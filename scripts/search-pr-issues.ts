@@ -3,8 +3,8 @@
  * Search for specific PR/issue numbers mentioned in Discord
  */
 import "dotenv/config";
-import { searchGitHubIssues } from "../src/github-integration.js";
-import { getConfig } from "../src/config.js";
+import { searchGitHubIssues } from "../src/connectors/github/client.js";
+import { getConfig } from "../src/config/index.js";
 
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 // Note: GITHUB_TOKEN is optional but recommended for higher rate limits

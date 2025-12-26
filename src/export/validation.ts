@@ -1,6 +1,6 @@
 import { existsSync } from "fs";
 import { join } from "path";
-import { getConfig } from "./config.js";
+import { getConfig } from "../config/index.js";
 
 export interface ValidationResult {
   valid: boolean;

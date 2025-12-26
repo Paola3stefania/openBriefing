@@ -3,9 +3,9 @@
  * Analyzes documentation and extracts product features
  */
 
-import { log, logError, logWarn } from "../logger.js";
+import { log, logError, logWarn } from "../mcp/logger.js";
 import { ProductFeature } from "./types.js";
-import { DocumentationContent } from "./documentation-fetcher.js";
+import { DocumentationContent } from "./documentationFetcher.js";
 
 /**
  * Extract product features from documentation using LLM

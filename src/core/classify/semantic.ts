@@ -3,8 +3,8 @@
  * Uses OpenAI embeddings API to understand semantic meaning and connect related concepts
  */
 
-import type { GitHubIssue, DiscordMessage, ClassifiedMessage } from "./issue-classifier.js";
-import { log, logWarn } from "./logger.js";
+import type { GitHubIssue, DiscordMessage, ClassifiedMessage } from "./classifier.js";
+import { log, logWarn } from "../../mcp/logger.js";
 
 // Embedding vector type (OpenAI returns 1536-dimensional vectors)
 type Embedding = number[];

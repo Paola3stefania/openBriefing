@@ -3,9 +3,9 @@
  * Exports issues to Jira project management tool
  */
 
-import { BasePMTool } from "./base-pm-tool.js";
-import { PMToolIssue, PMToolConfig, ExportResult } from "./types.js";
-import { log, logError } from "../logger.js";
+import { BasePMTool } from "../base.js";
+import { PMToolIssue, PMToolConfig, ExportResult } from "../types.js";
+import { log, logError } from "../../mcp/logger.js";
 
 export class JiraIntegration extends BasePMTool {
   private apiUrl: string;

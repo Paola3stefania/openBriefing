@@ -1,8 +1,8 @@
 /**
  * GitHub integration for searching repository issues
  */
-import { getConfig } from "./config.js";
-import { log } from "./logger.js";
+import { getConfig } from "../../config/index.js";
+import { log } from "../../mcp/logger.js";
 
 export interface GitHubIssue {
   id: number;

@@ -24,10 +24,10 @@ import {
   classifyMessagesWithCache, 
   type DiscordMessage,
   type GitHubIssue 
-} from "../src/issue-classifier.js";
-import { loadIssuesFromCache } from "../src/github-integration.js";
-import { loadDiscordCache, getAllMessagesFromCache } from "../src/discord-cache.js";
-import { getConfig } from "../src/config.js";
+} from "../src/core/classify/classifier.js";
+import { loadIssuesFromCache } from "../src/connectors/github/client.js";
+import { loadDiscordCache, getAllMessagesFromCache } from "../src/storage/cache/discordCache.js";
+import { getConfig } from "../src/config/index.js";
 
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 if (!DISCORD_TOKEN) {

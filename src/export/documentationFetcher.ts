@@ -3,7 +3,7 @@
  * Fetches and parses documentation from URLs or local file paths
  */
 
-import { log, logError } from "../logger.js";
+import { log, logError } from "../mcp/logger.js";
 import { readFile } from "fs/promises";
 import { existsSync } from "fs";
 import { join, isAbsolute } from "path";

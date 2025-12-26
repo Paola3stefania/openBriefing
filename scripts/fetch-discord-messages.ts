@@ -16,7 +16,7 @@ import {
   NewsChannel,
   Message,
 } from "discord.js";
-import { getConfig } from "../src/config.js";
+import { getConfig } from "../src/config/index.js";
 import {
   loadDiscordCache,
   getMostRecentMessageDate,
@@ -25,7 +25,7 @@ import {
   getAllMessagesFromCache,
   type DiscordMessage,
   type DiscordCache,
-} from "../src/discord-cache.js";
+} from "../src/storage/cache/discordCache.js";
 
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 if (!DISCORD_TOKEN) {

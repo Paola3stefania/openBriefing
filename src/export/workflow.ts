@@ -2,11 +2,11 @@
  * Main workflow for exporting classified messages/issues to PM tools
  */
 
-import { log, logError } from "../logger.js";
-import { fetchDocumentation, fetchMultipleDocumentation } from "./documentation-fetcher.js";
-import { extractFeaturesFromDocumentation } from "./feature-extractor.js";
-import { mapToFeatures } from "./feature-mapper.js";
-import { createPMTool, validatePMToolConfig } from "./pm-tool-factory.js";
+import { log, logError } from "../mcp/logger.js";
+import { fetchDocumentation, fetchMultipleDocumentation } from "./documentationFetcher.js";
+import { extractFeaturesFromDocumentation } from "./featureExtractor.js";
+import { mapToFeatures } from "./featureMapper.js";
+import { createPMTool, validatePMToolConfig } from "./factory.js";
 import { PMToolConfig, PMToolIssue, ProductFeature, FeatureMapping, ProjectMapping } from "./types.js";
 import { join } from "path";
 import { readFile } from "fs/promises";

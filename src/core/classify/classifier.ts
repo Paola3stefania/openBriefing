@@ -2,8 +2,8 @@
  * Classify Discord messages by matching them with GitHub issues
  */
 
-import { searchGitHubIssues, type GitHubIssue } from "./github-integration.js";
-import { log, logError, logWarn } from "./logger.js";
+import { searchGitHubIssues, type GitHubIssue } from "../../connectors/github/client.js";
+import { log, logError, logWarn } from "../../mcp/logger.js";
 
 // Re-export for convenience
 export type { GitHubIssue };
@@ -454,7 +454,7 @@ export async function classifyMessagesWithCache(
   // Use semantic classification if enabled and available
   if (useSemantic) {
     try {
-      const { classifyMessagesSemantic, isLLMClassificationAvailable } = await import("./semantic-classifier.js");
+      const { classifyMessagesSemantic, isLLMClassificationAvailable } = await import("./semantic.js");
       if (isLLMClassificationAvailable()) {
         return await classifyMessagesSemantic(messages, issues, minSimilarity);
       } else {

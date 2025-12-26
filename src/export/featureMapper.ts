@@ -3,9 +3,9 @@
  * Maps Discord messages and GitHub issues to product features
  */
 
-import { log, logWarn } from "../logger.js";
+import { log, logWarn } from "../mcp/logger.js";
 import { ProductFeature, FeatureMapping } from "./types.js";
-import { createEmbedding } from "../semantic-classifier.js";
+import { createEmbedding } from "../core/classify/semantic.js";
 
 // Re-export Embedding type
 type Embedding = number[];

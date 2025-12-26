@@ -3,10 +3,10 @@
  */
 
 import { PMToolConfig } from "./types.js";
-import { IPMTool } from "./base-pm-tool.js";
-import { LinearIntegration } from "./linear-integration.js";
-import { JiraIntegration } from "./jira-integration.js";
-import { logError } from "../logger.js";
+import { IPMTool } from "./base.js";
+import { LinearIntegration } from "./linear/client.js";
+import { JiraIntegration } from "./jira/client.js";
+import { logError } from "../mcp/logger.js";
 
 /**
  * Create a PM tool integration instance based on configuration

@@ -12,8 +12,8 @@ import {
   NewsChannel,
   ChannelType,
 } from "discord.js";
-import { searchGitHubIssues, formatGitHubIssue } from "../src/github-integration.js";
-import { getConfig } from "../src/config.js";
+import { searchGitHubIssues, formatGitHubIssue } from "../src/connectors/github/client.js";
+import { getConfig } from "../src/config/index.js";
 
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 if (!DISCORD_TOKEN) {

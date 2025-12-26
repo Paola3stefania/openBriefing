@@ -14,8 +14,8 @@ import {
   mergeIssues,
   type GitHubIssue,
   type IssuesCache 
-} from "../src/github-integration.js";
-import { getConfig } from "../src/config.js";
+} from "../src/connectors/github/client.js";
+import { getConfig } from "../src/config/index.js";
 
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 // Note: GITHUB_TOKEN is optional but recommended for higher rate limits

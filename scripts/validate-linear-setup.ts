@@ -5,7 +5,7 @@
  */
 
 import "dotenv/config";
-import { validatePMSetup } from "../src/pm-validation.js";
+import { validatePMSetup } from "../src/export/validation.js";
 
 // Run validation
 const result = validatePMSetup();

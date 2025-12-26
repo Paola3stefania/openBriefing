@@ -12,7 +12,7 @@ import {
   NewsChannel,
   ChannelType,
 } from "discord.js";
-import { getConfig } from "../src/config.js";
+import { getConfig } from "../src/config/index.js";
 
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 if (!DISCORD_TOKEN) {

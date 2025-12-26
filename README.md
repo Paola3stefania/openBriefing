@@ -137,19 +137,39 @@ Available tools via Model Context Protocol:
 ## Project Structure
 
 ```
-unmute/
-├── src/                    # Source code
-│   ├── index.ts           # MCP server entry point
-│   ├── github-integration.ts
-│   ├── discord-cache.ts
-│   ├── issue-classifier.ts
-│   ├── semantic-classifier.ts
-│   └── pm-integration/    # PM tool export system
-├── docs/                   # Documentation
-├── cache/                  # Cached data (gitignored)
-├── discord/                # Discord message cache (gitignored)
-├── results/                # Classification results (gitignored)
-├── dist/                   # Compiled output
+discord-mcp/
+├── src/
+│   ├── mcp/               # MCP server and tool handlers
+│   │   ├── server.ts      # Main MCP server entry point
+│   │   └── logger.ts
+│   ├── connectors/        # External service connectors
+│   │   ├── github/
+│   │   │   └── client.ts
+│   │   └── discord/       # (planned)
+│   ├── core/              # Core business logic
+│   │   └── classify/      # Classification engine
+│   │       ├── classifier.ts
+│   │       └── semantic.ts
+│   ├── storage/           # Data persistence
+│   │   └── cache/         # Caching layer
+│   │       ├── discordCache.ts
+│   │       └── classificationHistory.ts
+│   ├── export/            # PM tool export system
+│   │   ├── linear/
+│   │   ├── jira/
+│   │   ├── workflow.ts
+│   │   └── ...
+│   ├── types/             # Type definitions
+│   │   └── signal.ts      # Normalized Signal type
+│   ├── config/            # Configuration
+│   │   └── index.ts
+│   └── index.ts           # Entry point (re-exports mcp/server)
+├── scripts/               # CLI utilities
+├── docs/                  # Documentation
+├── cache/                 # Cached data (gitignored)
+├── discord/               # Discord message cache (gitignored)
+├── results/               # Classification results (gitignored)
+├── dist/                  # Compiled output
 └── package.json
 ```
 
