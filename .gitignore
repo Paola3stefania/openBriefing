@@ -2,10 +2,11 @@ node_modules/
 dist/
 .env
 *.log
-discord-classified-*.json
-results/
-cache/
-github-issues-cache.json
-discord/
-discord-messages-*.json
+
+# Cache and data files - ignore all JSON files in these directories
+cache/**/*.json
+discord/**/*.json
+results/**/*.json
+
+# Keep cursor config example but ignore personal config
 cursor-mcp-config.json

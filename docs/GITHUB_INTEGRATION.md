@@ -1,124 +1,44 @@
-# GitHub Integration for Discord MCP
+# GitHub Integration
 
-## Overview
+Discord MCP server integrates with GitHub to search repository issues and correlate them with Discord discussions.
 
-The Discord MCP server includes GitHub integration to search repository issues and correlate them with Discord discussions.
+## Tools
 
-## New Tools
+### `search_github_issues`
 
-### 1. `search_github_issues`
-
-Search GitHub issues in the configured repository (set via GITHUB_OWNER and GITHUB_REPO environment variables).
+Search GitHub issues in the configured repository (set via `GITHUB_OWNER` and `GITHUB_REPO`).
 
 **Parameters:**
-- `query` (required): Search query (e.g., "bug", "stripe plugin", "password reset")
-- `state` (optional): Filter by state - "open", "closed", or "all" (default: "all")
-
-**Example:**
-```json
-{
-  "query": "stripe plugin",
-  "state": "open"
-}
-```
+- `query` (required): Search query
+- `state` (optional): "open", "closed", or "all" (default: "all")
 
 **Returns:**
-- Total count of matching issues
-- List of issues with:
-  - Issue number and title
-  - State (open/closed)
-  - URL
-  - Author
-  - Creation and update dates
-  - Labels
-  - Body preview
+- Total count and list of matching issues with number, title, state, URL, author, dates, labels, and body preview
 
-### 2. `search_discord_and_github`
+### `search_discord_and_github`
 
-Search both Discord messages and GitHub issues for a topic, allowing you to see related discussions and issues together.
+Search both Discord messages and GitHub issues for a topic.
 
 **Parameters:**
-- `query` (required): Search query to search in both Discord and GitHub
-- `channel_id` (required): Discord channel ID to search in
-- `discord_limit` (optional): Number of Discord messages to search (1-100, default: 50)
-- `github_state` (optional): GitHub issue state filter - "open", "closed", or "all" (default: "all")
-
-**Example:**
-```json
-{
-  "query": "password reset",
-  "channel_id": "1288403910284935182",
-  "discord_limit": 30,
-  "github_state": "open"
-}
-```
+- `query` (required): Search query
+- `channel_id` (optional): Discord channel ID (uses default if not provided)
+- `discord_limit` (optional): Number of messages to search (1-100, default: 50)
+- `github_state` (optional): Issue state filter (default: "all")
 
 **Returns:**
-- Discord search results (messages matching the query)
-- GitHub search results (issues matching the query)
-- Combined view of both sources
+- Combined results from Discord and GitHub
 
 ## Configuration
 
-### Optional: GitHub Token
+### GitHub Token (Optional)
 
-For higher rate limits (5000 requests/hour instead of 60), you can add a GitHub personal access token:
+For higher rate limits (5000 requests/hour vs 60 without token):
 
-1. Create a GitHub personal access token at: https://github.com/settings/tokens
-2. Add it to your environment variables:
-   ```bash
-   export GITHUB_TOKEN=your_token_here
+1. Create token at: https://github.com/settings/tokens
+2. Add to `.env`:
    ```
-3. Or add it to your `cursor-mcp-config.json`:
-   ```json
-   {
-     "mcpServers": {
-       "discord": {
-         "command": "/Users/user/Projects/discord-mcp/run-mcp.sh",
-         "env": {
-           "DISCORD_TOKEN": "...",
-           "GITHUB_TOKEN": "your_token_here"
-         }
-       }
-     }
-   }
+   GITHUB_TOKEN=your_token_here
    ```
+3. Or add to MCP server config environment variables
 
-**Note:** The GitHub API works without a token, but rate limits are lower (60 requests/hour). With a token, you get 5000 requests/hour.
-
-## Usage Examples
-
-### Search for Stripe Plugin Issues
-```
-search_github_issues: {
-  "query": "stripe plugin",
-  "state": "open"
-}
-```
-
-### Search Both Discord and GitHub for Bug Reports
-```
-search_discord_and_github: {
-  "query": "password reset error",
-  "channel_id": "1288403910284935182",
-  "github_state": "open"
-}
-```
-
-### Find Related Discussions
-```
-search_discord_and_github: {
-  "query": "email verification",
-  "channel_id": "1296058482289676320",  // #development channel
-  "discord_limit": 100
-}
-```
-
-## Benefits
-
-1. **Correlate Issues**: Find related GitHub issues when discussing problems in Discord
-2. **Track Discussions**: See both Discord discussions and GitHub issues for a topic
-3. **Better Context**: Understand if an issue is already reported or being discussed
-4. **Link Discussions**: Get direct links to both Discord messages and GitHub issues
-
-
+Without a token, rate limit is 60 requests/hour. With a token, 5000 requests/hour.
