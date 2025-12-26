@@ -5,7 +5,7 @@
 Set required environment variables in `.env`:
 
 ```bash
-PM_INTEGRATION_ENABLED=true
+# PM Integration is automatically enabled when PM_TOOL_TYPE is set
 PM_TOOL_TYPE=linear
 PM_TOOL_API_KEY=your_linear_api_key_here  # Get from https://linear.app/settings/api
 PM_TOOL_TEAM_ID=your_team_id  # Optional: auto-creates "UNMute" team if not set

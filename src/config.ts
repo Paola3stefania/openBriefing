@@ -81,7 +81,8 @@ export function getConfig(): Config {
       useSemantic: process.env.USE_SEMANTIC_CLASSIFICATION !== "false" && !!process.env.OPENAI_API_KEY,
     },
     pmIntegration: {
-      enabled: process.env.PM_INTEGRATION_ENABLED === "true",
+      // PM integration is enabled if PM_TOOL_TYPE is set
+      enabled: !!process.env.PM_TOOL_TYPE,
       documentation_urls: process.env.DOCUMENTATION_URLS
         ? process.env.DOCUMENTATION_URLS.split(",").map(url => url.trim()).filter(url => url.length > 0)
         : undefined,

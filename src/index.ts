@@ -1613,7 +1613,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         
         // Check if PM integration is enabled
         if (!config.pmIntegration?.enabled) {
-          throw new Error("PM integration is not enabled. Set PM_INTEGRATION_ENABLED=true in environment variables.");
+          throw new Error("PM integration requires PM_TOOL_TYPE to be set in environment variables (e.g., PM_TOOL_TYPE=linear).");
         }
 
         // Get documentation URLs from config

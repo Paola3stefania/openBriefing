@@ -17,13 +17,6 @@ export function validatePMSetup(): ValidationResult {
     info: [],
   };
 
-  // Check PM Integration enabled
-  if (process.env.PM_INTEGRATION_ENABLED !== "true") {
-    result.warnings.push("PM_INTEGRATION_ENABLED is not set to 'true'");
-  } else {
-    result.info.push("PM integration is enabled");
-  }
-
   // Check PM Tool Type
   if (process.env.PM_TOOL_TYPE !== "linear") {
     result.errors.push("PM_TOOL_TYPE must be 'linear' for Linear export");
