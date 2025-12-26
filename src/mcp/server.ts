@@ -2452,7 +2452,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           let totalProcessed = 0;
           
           // Function to save progress incrementally
-          const saveProgressToFile = async () => {
+          const saveProgressToFile = async (pretty = false) => {
             const mergedGroups = Array.from(allGroupsMap.values());
             const mergedUngrouped = Array.from(allUngroupedMap.values());
             
@@ -2471,15 +2471,18 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
               ungrouped_threads: mergedUngrouped,
             };
             
-            await writeFile(outputPath, JSON.stringify(outputData, null, 2), "utf-8");
+            // Use compact JSON during intermediate saves (faster), pretty print only at the end
+            await writeFile(outputPath, JSON.stringify(outputData, null, pretty ? 2 : 0), "utf-8");
           };
           
           // Process threads in batches
+          const startTime = Date.now();
           for (let batchNum = 0; batchNum < totalBatches; batchNum++) {
             const startIdx = batchNum * BATCH_SIZE;
             const endIdx = Math.min(startIdx + BATCH_SIZE, allThreads.length);
             const batch = allThreads.slice(startIdx, endIdx);
             
+            const batchStartTime = Date.now();
             console.error(`[Grouping] Processing batch ${batchNum + 1}/${totalBatches} (threads ${startIdx + 1}-${endIdx} of ${allThreads.length})...`);
             
             // Create a temporary ClassificationResults for this batch
@@ -2562,9 +2565,19 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             
             totalProcessed = endIdx;
             
-            // Save progress after each batch
-            await saveProgressToFile();
-            console.error(`[Grouping] Batch ${batchNum + 1}/${totalBatches} complete. Saved ${allGroupsMap.size} groups and ${allUngroupedMap.size} ungrouped threads.`);
+            // Save progress every 5 batches or on last batch (reduces file I/O)
+            const shouldSave = (batchNum + 1) % 5 === 0 || (batchNum + 1) === totalBatches;
+            const batchTime = Date.now() - batchStartTime;
+            const elapsed = Date.now() - startTime;
+            const avgTimePerBatch = elapsed / (batchNum + 1);
+            const remainingBatches = totalBatches - (batchNum + 1);
+            const estimatedRemaining = Math.round((remainingBatches * avgTimePerBatch) / 1000);
+            
+            if (shouldSave) {
+              // Use compact JSON for intermediate saves (faster)
+              await saveProgressToFile(false);
+            }
+            console.error(`[Grouping] Batch ${batchNum + 1}/${totalBatches} complete (${batchTime}ms). ${allGroupsMap.size} groups, ${allUngroupedMap.size} ungrouped threads.${shouldSave ? ' (saved)' : ''}${estimatedRemaining > 0 ? ` ~${estimatedRemaining}s remaining` : ''}`);
           }
           
           // Final grouping: apply maxGroups limit and sort
