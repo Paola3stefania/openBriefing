@@ -33,6 +33,7 @@ UNMute is an MCP server that integrates communication platforms (Discord, GitHub
 
 - **Keyword-based**: Fast, free classification using keyword matching (default when OpenAI not configured)
 - **Semantic (LLM-based)**: Context-aware classification using OpenAI embeddings (enabled by default when `OPENAI_API_KEY` is set)
+- **Persistent embedding cache**: Issue embeddings are cached to disk, avoiding redundant API calls
 - Thread-aware classification
 - Classification history tracking
 - Automatically syncs issues and messages before classifying
@@ -43,6 +44,7 @@ UNMute is an MCP server that integrates communication platforms (Discord, GitHub
 - Map conversations to features using semantic similarity
 - Export to Linear, Jira, and other PM tools
 - Automatic documentation crawling for comprehensive feature extraction
+- Export results saved to `results/` for tracking history
 
 ## Setup
 
@@ -166,9 +168,14 @@ discord-mcp/
 │   └── index.ts           # Entry point (re-exports mcp/server)
 ├── scripts/               # CLI utilities
 ├── docs/                  # Documentation
-├── cache/                 # Cached data (gitignored)
-├── discord/               # Discord message cache (gitignored)
-├── results/               # Classification results (gitignored)
+├── cache/                 # All cached data (gitignored)
+│   ├── github-issues-cache.json      # GitHub issues
+│   ├── issue-embeddings-cache.json   # LLM embeddings (persistent)
+│   └── discord-messages-*.json       # Discord messages
+├── results/               # Output files (gitignored)
+│   ├── discord-classified-*.json     # Classification results
+│   ├── classification-history.json   # Classification tracking
+│   └── export-*.json                 # PM export history
 ├── dist/                  # Compiled output
 └── package.json
 ```

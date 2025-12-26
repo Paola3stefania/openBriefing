@@ -1,10 +1,15 @@
 /**
  * LLM-based semantic classification using embeddings
  * Uses OpenAI embeddings API to understand semantic meaning and connect related concepts
+ * Includes persistent disk cache for issue embeddings to avoid redundant API calls
  */
 
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
+import { join } from "path";
+import { createHash } from "crypto";
 import type { GitHubIssue, DiscordMessage, ClassifiedMessage } from "./classifier.js";
 import { logWarn } from "../../mcp/logger.js";
+import { getConfig } from "../../config/index.js";
 
 // Progress logging to stderr (doesn't interfere with MCP JSON-RPC on stdout)
 function logProgress(message: string) {
@@ -16,6 +21,86 @@ type Embedding = number[];
 
 interface EmbeddingCache {
   [key: string]: Embedding;
+}
+
+// Persistent cache structure for disk storage
+interface PersistentEmbeddingEntry {
+  embedding: Embedding;
+  contentHash: string; // Hash of issue content to detect changes
+  createdAt: string;
+}
+
+interface PersistentEmbeddingCache {
+  version: number;
+  model: string;
+  entries: { [issueNumber: string]: PersistentEmbeddingEntry };
+}
+
+const CACHE_VERSION = 1;
+const EMBEDDING_MODEL = "text-embedding-3-small";
+
+/**
+ * Get the path to the embeddings cache file
+ */
+function getEmbeddingsCachePath(): string {
+  const config = getConfig();
+  const cacheDir = join(process.cwd(), config.paths.cacheDir);
+  
+  // Ensure cache directory exists
+  if (!existsSync(cacheDir)) {
+    mkdirSync(cacheDir, { recursive: true });
+  }
+  
+  return join(cacheDir, "issue-embeddings-cache.json");
+}
+
+/**
+ * Create a hash of issue content to detect changes
+ */
+function hashIssueContent(issue: GitHubIssue): string {
+  const content = createIssueText(issue);
+  return createHash("md5").update(content).digest("hex");
+}
+
+/**
+ * Load persistent embedding cache from disk
+ */
+function loadPersistentCache(): PersistentEmbeddingCache {
+  const cachePath = getEmbeddingsCachePath();
+  
+  if (!existsSync(cachePath)) {
+    return { version: CACHE_VERSION, model: EMBEDDING_MODEL, entries: {} };
+  }
+  
+  try {
+    const data = readFileSync(cachePath, "utf-8");
+    const cache = JSON.parse(data) as PersistentEmbeddingCache;
+    
+    // Check version and model compatibility
+    if (cache.version !== CACHE_VERSION || cache.model !== EMBEDDING_MODEL) {
+      logProgress("Embedding cache version/model mismatch, starting fresh");
+      return { version: CACHE_VERSION, model: EMBEDDING_MODEL, entries: {} };
+    }
+    
+    return cache;
+  } catch (error) {
+    logProgress("Failed to load embedding cache, starting fresh");
+    return { version: CACHE_VERSION, model: EMBEDDING_MODEL, entries: {} };
+  }
+}
+
+/**
+ * Save persistent embedding cache to disk
+ */
+function savePersistentCache(cache: PersistentEmbeddingCache): void {
+  const cachePath = getEmbeddingsCachePath();
+  
+  try {
+    writeFileSync(cachePath, JSON.stringify(cache, null, 2), "utf-8");
+    logProgress(`Saved ${Object.keys(cache.entries).length} issue embeddings to cache`);
+  } catch (error) {
+    logWarn("Failed to save embedding cache:", error);
+  }
 }
 
 /**
@@ -214,62 +299,108 @@ export async function matchMessageToIssuesSemantic(
 
 /**
  * Pre-compute embeddings for all issues (more efficient than computing per message)
+ * Uses persistent disk cache to avoid re-embedding unchanged issues
  */
 async function precomputeIssueEmbeddings(
   issues: GitHubIssue[],
   apiKey: string,
   embeddingCache: EmbeddingCache
 ): Promise<void> {
-  // Process issues in smaller batches to respect rate limits
-  // OpenAI TPM (tokens per minute) limits require careful pacing
-  const issueBatchSize = 10; // Process 10 issues at a time to avoid TPM limits
-  const delayMs = 1000; // 1 second delay between batches to respect TPM limits
-
-  const totalIssues = issues.length;
-  let processedCount = 0;
-  logProgress(`Pre-computing embeddings for ${totalIssues} issues...`);
-
-  for (let i = 0; i < issues.length; i += issueBatchSize) {
-    const batch = issues.slice(i, i + issueBatchSize);
+  // Load persistent cache from disk
+  const persistentCache = loadPersistentCache();
+  
+  // Determine which issues need new embeddings
+  const issuesToEmbed: GitHubIssue[] = [];
+  let cachedCount = 0;
+  
+  for (const issue of issues) {
+    const issueKey = `issue:${issue.number}`;
+    const cachedEntry = persistentCache.entries[issue.number.toString()];
+    const currentHash = hashIssueContent(issue);
     
-    // Compute embeddings for this batch of issues sequentially to avoid overwhelming the API
+    if (cachedEntry && cachedEntry.contentHash === currentHash) {
+      // Use cached embedding (content hasn't changed)
+      embeddingCache[issueKey] = cachedEntry.embedding;
+      cachedCount++;
+    } else {
+      // Need to compute new embedding
+      issuesToEmbed.push(issue);
+    }
+  }
+  
+  const totalIssues = issues.length;
+  logProgress(`Found ${cachedCount}/${totalIssues} issues in embedding cache, ${issuesToEmbed.length} need embedding`);
+  
+  if (issuesToEmbed.length === 0) {
+    logProgress("All issue embeddings loaded from cache!");
+    return;
+  }
+  
+  // Process issues in smaller batches to respect rate limits
+  const issueBatchSize = 10;
+  const delayMs = 1000;
+  let processedCount = 0;
+  let cacheModified = false;
+
+  logProgress(`Computing embeddings for ${issuesToEmbed.length} issues...`);
+
+  for (let i = 0; i < issuesToEmbed.length; i += issueBatchSize) {
+    const batch = issuesToEmbed.slice(i, i + issueBatchSize);
+    
     for (const issue of batch) {
       const issueCacheKey = `issue:${issue.number}`;
-      if (!embeddingCache[issueCacheKey]) {
-        try {
-          const issueText = createIssueText(issue);
-          embeddingCache[issueCacheKey] = await createEmbedding(issueText, apiKey);
-          // Small delay between individual requests to respect rate limits
-          await new Promise(resolve => setTimeout(resolve, 100));
-        } catch (error) {
-          // If rate limited, wait longer before continuing
-          if (error instanceof Error && error.message.includes("429")) {
-            await new Promise(resolve => setTimeout(resolve, 5000));
-            // Retry this issue
-            try {
-              const issueText = createIssueText(issue);
-              embeddingCache[issueCacheKey] = await createEmbedding(issueText, apiKey);
-            } catch (retryError) {
-              // Skip this issue if it still fails after retry
-              continue;
-            }
-          } else {
-            // Skip this issue on other errors
+      try {
+        const issueText = createIssueText(issue);
+        const embedding = await createEmbedding(issueText, apiKey);
+        
+        // Store in memory cache
+        embeddingCache[issueCacheKey] = embedding;
+        
+        // Store in persistent cache
+        persistentCache.entries[issue.number.toString()] = {
+          embedding,
+          contentHash: hashIssueContent(issue),
+          createdAt: new Date().toISOString(),
+        };
+        cacheModified = true;
+        
+        await new Promise(resolve => setTimeout(resolve, 100));
+      } catch (error) {
+        if (error instanceof Error && error.message.includes("429")) {
+          await new Promise(resolve => setTimeout(resolve, 5000));
+          try {
+            const issueText = createIssueText(issue);
+            const embedding = await createEmbedding(issueText, apiKey);
+            embeddingCache[issueCacheKey] = embedding;
+            persistentCache.entries[issue.number.toString()] = {
+              embedding,
+              contentHash: hashIssueContent(issue),
+              createdAt: new Date().toISOString(),
+            };
+            cacheModified = true;
+          } catch (retryError) {
             continue;
           }
+        } else {
+          continue;
         }
       }
     }
 
-    processedCount = Math.min(i + issueBatchSize, totalIssues);
-    logProgress(`Processed ${processedCount}/${totalIssues} issue embeddings (${Math.round((processedCount / totalIssues) * 100)}%)`);
+    processedCount = Math.min(i + issueBatchSize, issuesToEmbed.length);
+    logProgress(`Embedded ${processedCount}/${issuesToEmbed.length} new issues (${Math.round((processedCount / issuesToEmbed.length) * 100)}%)`);
 
-    // Delay between batches to respect rate limits
-    if (i + issueBatchSize < issues.length) {
+    if (i + issueBatchSize < issuesToEmbed.length) {
       await new Promise(resolve => setTimeout(resolve, delayMs));
     }
   }
-  logProgress(`Completed pre-computing all ${totalIssues} issue embeddings`);
+  
+  // Save updated cache to disk
+  if (cacheModified) {
+    savePersistentCache(persistentCache);
+  }
+  
+  logProgress(`Completed: ${cachedCount} from cache + ${issuesToEmbed.length} newly embedded = ${totalIssues} total`);
 }
 
 /**

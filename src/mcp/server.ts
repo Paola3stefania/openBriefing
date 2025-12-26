@@ -71,9 +71,10 @@ discord.once("clientReady", () => {
  * Find Discord cache file for a channel, handling files with timestamp suffixes
  */
 async function findDiscordCacheFile(channelId: string): Promise<string | null> {
-  const discordDir = join(process.cwd(), "discord");
+  const config = getConfig();
+  const cacheDir = join(process.cwd(), config.paths.cacheDir);
   const baseFileName = `discord-messages-${channelId}.json`;
-  const exactPath = join(discordDir, baseFileName);
+  const exactPath = join(cacheDir, baseFileName);
 
   // First try exact match
   if (existsSync(exactPath)) {
@@ -82,13 +83,13 @@ async function findDiscordCacheFile(channelId: string): Promise<string | null> {
 
   // If not found, try to find files that start with the base name
   try {
-    const files = await readdir(discordDir);
+    const files = await readdir(cacheDir);
     const matchingFiles = files.filter(f => f.startsWith(baseFileName));
     
     if (matchingFiles.length > 0) {
       // Return the most recently modified file (if multiple exist)
       // For now, just return the first match (we could enhance this to check mtime)
-      return join(discordDir, matchingFiles[0]);
+      return join(cacheDir, matchingFiles[0]);
     }
   } catch (error) {
     // Directory doesn't exist or can't be read
@@ -776,7 +777,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         throw new Error("Channel ID is required. Provide channel_id parameter or set DISCORD_DEFAULT_CHANNEL_ID in environment variables.");
       }
 
-      const cacheDir = join(process.cwd(), "discord");
+      const cacheDir = join(process.cwd(), discordConfig.paths.cacheDir);
       const cacheFileName = `discord-messages-${actualChannelId}.json`;
       const cachePath = join(cacheDir, cacheFileName);
 
@@ -1035,9 +1036,9 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       await writeFile(issuesCachePath, JSON.stringify(issuesCacheData, null, 2), "utf-8");
 
       // Step 2: Fetch/sync Discord messages (incremental) before classification
-      const cacheDir = join(process.cwd(), "discord");
+      const discordCacheDir = join(process.cwd(), classifyConfig.paths.cacheDir);
       const cacheFileName = `discord-messages-${actualChannelId}.json`;
-      const discordCachePath = join(cacheDir, cacheFileName);
+      const discordCachePath = join(discordCacheDir, cacheFileName);
 
       const channel = await discord.channels.fetch(actualChannelId);
       if (!channel ||
@@ -1195,7 +1196,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       // Save updated Discord cache
-      await mkdir(cacheDir, { recursive: true });
+      await mkdir(discordCacheDir, { recursive: true });
       await writeFile(discordCachePath, JSON.stringify(finalDiscordCache, null, 2), "utf-8");
 
       // Load classification history
@@ -1763,6 +1764,25 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           pmToolConfig
         );
 
+        // Save export results to file
+        await mkdir(resultsDir, { recursive: true });
+        
+        const timestamp = Date.now();
+        const exportResultsPath = join(resultsDir, `export-${pmToolConfig.type}-${timestamp}.json`);
+        
+        const exportResultData = {
+          timestamp: new Date().toISOString(),
+          pm_tool: pmToolConfig.type,
+          success: result.success,
+          features_extracted: result.features_extracted,
+          features_mapped: result.features_mapped,
+          issues_exported: result.issues_exported,
+          errors: result.errors,
+          source_file: classifiedPath,
+        };
+        
+        await writeFile(exportResultsPath, JSON.stringify(exportResultData, null, 2), "utf-8");
+
         return {
           content: [
             {
@@ -1773,6 +1793,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 features_mapped: result.features_mapped,
                 issues_exported: result.issues_exported,
                 errors: result.errors,
+                results_saved_to: exportResultsPath,
                 message: result.success
                   ? `Successfully exported to ${pmToolConfig.type}: ${result.issues_exported?.created || 0} created, ${result.issues_exported?.updated || 0} updated`
                   : `Export failed: ${result.errors?.join(", ")}`,

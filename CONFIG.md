@@ -27,8 +27,19 @@ These help scripts find channels by name:
 - `DISCORD_CHANNEL_CHAT` - Chat channel name (default: "chat")
 
 ### File Paths
+- `CACHE_DIR` - Directory for all cache files (default: "cache")
 - `RESULTS_DIR` - Directory for output files (default: "results")
 - `ISSUES_CACHE_FILE` - Name of the issues cache file (default: "github-issues-cache.json")
+
+### Cache Files (stored in `CACHE_DIR`)
+- `github-issues-cache.json` - Cached GitHub issues
+- `issue-embeddings-cache.json` - Persistent LLM embeddings for issues
+- `discord-messages-{channelId}.json` - Cached Discord messages per channel
+
+### Results Files (stored in `RESULTS_DIR`)
+- `discord-classified-{channelId}.json` - Classification results
+- `classification-history.json` - Tracks which messages have been classified
+- `export-{pmTool}-{timestamp}.json` - PM tool export history
 
 ## Example .env File
 

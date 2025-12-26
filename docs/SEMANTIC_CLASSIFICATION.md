@@ -28,7 +28,10 @@ LLM-based semantic similarity matching using OpenAI embeddings for better contex
 
 - Model: `text-embedding-3-small`
 - Pricing: ~$0.02 per 1M tokens
-- Embeddings are cached during classification
+- **Issue embeddings are cached to disk** (`cache/issue-embeddings-cache.json`)
+  - Only new/changed issues are re-embedded
+  - Subsequent classifications load from cache instantly
+- Discord message embeddings are computed per classification run
 - Processed in batches with delays to respect rate limits (5000 requests/minute)
 
 ## Usage
@@ -58,6 +61,19 @@ If `OPENAI_API_KEY` is not set or semantic classification fails, the system auto
 - Issues must be cached (classification tool automatically syncs issues before classifying)
 - `OPENAI_API_KEY` environment variable set (for semantic classification)
 - Messages are automatically synced before classification
+
+## Caching
+
+All cache files are stored in the `cache/` folder:
+
+- `github-issues-cache.json`: GitHub issues (synced automatically)
+- `issue-embeddings-cache.json`: Persistent LLM embeddings for issues
+- `discord-messages-*.json`: Discord messages per channel
+
+The embedding cache uses content hashing to detect changes:
+- If an issue's title, body, or labels change, it will be re-embedded
+- If an issue hasn't changed, its cached embedding is reused
+- This significantly reduces API costs for repeated classifications
 
 ## Similarity Scores
 
