@@ -10,7 +10,7 @@ This directory contains cached data files used for local development and classif
 
 ## Privacy Notice
 
-⚠️ **Do not commit cache files** - They may contain private data from your Discord server or GitHub repository.
+**WARNING: Do not commit cache files** - They may contain private data from your Discord server or GitHub repository.
 
 All `.json` files in this directory are gitignored by default.
 

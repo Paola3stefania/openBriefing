@@ -41,7 +41,9 @@ export interface Group {
   exported_at?: string;
   linear_issue_id?: string;
   linear_issue_url?: string;
+  linear_issue_identifier?: string; // Human-readable ID like "LIN-123"
   linear_project_ids?: string[];
+  affects_features?: Array<{ id: string; name: string }>; // Features this group affects
   threads: Array<{
     thread_id: string;
     thread_name?: string;

@@ -466,7 +466,7 @@ function buildGroupDescription(group: {
   
   // Cross-cutting notice
   if (group.is_cross_cutting && group.affects_features && group.affects_features.length > 0) {
-    parts.push("### ⚠️ Cross-Cutting Issue");
+    parts.push("### Cross-Cutting Issue");
     parts.push("");
     parts.push(`This affects multiple features: **${group.affects_features.map(f => f.name).join(", ")}**`);
     parts.push("");
@@ -495,7 +495,7 @@ function buildGroupDescription(group: {
         }
       }
       parts.push("");
-      parts.push("> 💡 **Tip:** Reference this Linear issue in your PR with `Fixes LIN-XXX` or `Closes LIN-XXX` to auto-close when merged.");
+      parts.push("> **Tip:** Reference this Linear issue in your PR with `Fixes LIN-XXX` or `Closes LIN-XXX` to auto-close when merged.");
       parts.push("");
     }
     

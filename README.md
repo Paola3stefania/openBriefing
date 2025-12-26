@@ -49,6 +49,31 @@ See [docs/LINEAR_GITHUB_CONTRACT.md](docs/LINEAR_GITHUB_CONTRACT.md) for the ful
 - Classification history tracking
 - Automatically syncs issues and messages before classifying
 
+**Similarity Scales:**
+
+UNMute uses **two different similarity scales** depending on the operation:
+
+1. **Issue Matching (Classification)** — **0-100 scale** (percentage-based)
+   - `80-100`: **Strong match** — Thread is very likely related to this issue
+   - `60-79`: **Moderate match** — Thread may be related, worth reviewing
+   - `40-59`: **Weak match** — Possibly related, but needs verification
+   - `0-39`: **Unlikely match** — Probably unrelated
+   - **Default threshold: `60`** — Only matches ≥60 are considered for grouping
+   - **Recommended tiers:**
+     - `min_similarity: 80` — High confidence only (fewer false positives)
+     - `min_similarity: 60` — Balanced (default, good precision/recall)
+     - `min_similarity: 40` — More inclusive (may include false positives)
+
+2. **Feature Matching (Group-to-Feature)** — **0.0-1.0 scale** (cosine similarity)
+   - `0.7-1.0`: **Strong feature match** — Group clearly relates to this feature
+   - `0.5-0.7`: **Moderate feature match** — Group may relate to this feature
+   - `0.0-0.5`: **Weak feature match** — Unlikely to relate
+   - **Default threshold: `0.5`** — Only matches ≥0.5 are considered
+   - **Recommended tiers:**
+     - `min_similarity: 0.7` — High confidence only
+     - `min_similarity: 0.5` — Balanced (default)
+     - `min_similarity: 0.3` — More inclusive
+
 ### Semantic Grouping
 
 - **Issue-based grouping**: Group threads by their matched GitHub issues (fast, no LLM calls)
@@ -59,10 +84,10 @@ See [docs/LINEAR_GITHUB_CONTRACT.md](docs/LINEAR_GITHUB_CONTRACT.md) for the ful
 
 ### PM Tool Export
 
-- Extract product features from documentation (URLs or local files)
+- Extract product features from documentation (URLs or local file paths)
 - Map conversations to features using semantic similarity
 - Export to Linear, Jira, and other PM tools
-- Automatic documentation crawling for comprehensive feature extraction
+- **Documentation fetching**: Supports HTTP/HTTPS URLs and local file paths. For URLs, fetches the page content (basic HTML parsing). **Note:** Complex sites with authentication, JavaScript-rendered content, or robots.txt restrictions may not work.
 - Export results saved to `results/` for tracking history
 
 ### Storage Backends
@@ -101,6 +126,8 @@ Switch between backends using `STORAGE_BACKEND` environment variable or by setti
    - `GITHUB_OWNER`: GitHub organization/username (required)
    - `GITHUB_REPO`: GitHub repository name (required)
    - `OPENAI_API_KEY`: OpenAI API key (optional, for semantic classification)
+   - `OPENAI_EMBEDDING_MODEL`: Embedding model to use (optional, default: "text-embedding-3-small")
+     - Options: `text-embedding-3-small` (default), `text-embedding-3-large`, `text-embedding-ada-002`
    - `DOCUMENTATION_URLS`: URLs or file paths to product documentation (optional, for PM export)
    - `PM_TOOL_*`: PM tool configuration (optional, for PM export)
 
@@ -196,7 +223,7 @@ suggest_grouping → results/grouping-{channelId}-{timestamp}.json
 - Each run updates the file with newly grouped threads
 
 **Options:**
-- `min_similarity`: Minimum score for issue matching (0-100, default 60)
+- `min_similarity`: Minimum similarity score for issue matching (**0-100 scale**, default 60). Only threads with similarity ≥60 are grouped with an issue.
 - `max_groups`: Maximum groups to return (default 50)
 - `re_classify`: Force re-classification before grouping
 - `semantic_only`: Use pure semantic similarity instead of issue-based grouping
@@ -224,7 +251,7 @@ match_groups_to_features → updates grouping file with feature mappings
 **Options:**
 - `grouping_data_path`: Path to grouping file (optional, uses latest if not provided)
 - `channel_id`: Channel ID to find latest grouping file (if path not provided)
-- `min_similarity`: Minimum similarity for feature matching (0-1, default 0.5)
+- `min_similarity`: Minimum similarity for feature matching (**0.0-1.0 scale**, default 0.5). Uses cosine similarity between group embeddings and feature embeddings.
 
 **Output (issue-based grouping):**
 ```json
@@ -280,15 +307,23 @@ Configure `DOCUMENTATION_URLS` in `.env` (can be URLs like `https://docs.example
 
 These tool names are **stable** and will not change. Semantics may evolve, but names are fixed. New tools are additive only.
 
+### Primary Entry Point
+
+**Start here:** `sync_and_classify` — Full workflow: sync messages, sync issues, classify. This is the recommended entry point for most users.
+
 ### Core Workflow Tools
 
 | Tool | Description |
 |------|-------------|
-| `sync_and_classify` | Full workflow: sync messages, sync issues, classify |
+| `sync_and_classify` | **Primary entry point** — Full workflow: sync messages, sync issues, classify |
 | `classify_discord_messages` | Classify messages with GitHub issues (auto-syncs first) |
 | `suggest_grouping` | Group threads by matched issues (runs classification if needed) |
 | `match_groups_to_features` | Map groups to product features using semantic similarity |
 | `export_to_pm_tool` | Export classified data or grouped issues to Linear, Jira |
+
+### Building Block Tools
+
+These tools are used internally by the workflow tools, but can also be called directly for advanced use cases:
 
 ### Data Fetching Tools
 

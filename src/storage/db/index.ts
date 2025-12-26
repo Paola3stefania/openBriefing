@@ -51,7 +51,7 @@ export class DatabaseStorage implements IStorage {
             thread.first_message_id,
             thread.first_message_author || null,
             thread.first_message_timestamp ? new Date(thread.first_message_timestamp) : null,
-            null, // first_message_url - not in schema yet
+            thread.first_message_url || null,
             thread.status,
           ]
         );
@@ -199,9 +199,9 @@ export class DatabaseStorage implements IStorage {
           `INSERT INTO groups (
             id, channel_id, github_issue_number, suggested_title,
             avg_similarity, thread_count, is_cross_cutting, status,
-            exported_at, linear_issue_id, linear_issue_url, linear_project_ids,
-            updated_at
-          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
+            exported_at, linear_issue_id, linear_issue_url, linear_issue_identifier,
+            linear_project_ids, affects_features, updated_at
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW())
           ON CONFLICT (id) DO UPDATE SET
             suggested_title = EXCLUDED.suggested_title,
             avg_similarity = EXCLUDED.avg_similarity,
@@ -211,7 +211,9 @@ export class DatabaseStorage implements IStorage {
             exported_at = EXCLUDED.exported_at,
             linear_issue_id = EXCLUDED.linear_issue_id,
             linear_issue_url = EXCLUDED.linear_issue_url,
+            linear_issue_identifier = EXCLUDED.linear_issue_identifier,
             linear_project_ids = EXCLUDED.linear_project_ids,
+            affects_features = EXCLUDED.affects_features,
             updated_at = NOW()`,
           [
             group.id,
@@ -225,7 +227,9 @@ export class DatabaseStorage implements IStorage {
             group.exported_at ? new Date(group.exported_at) : null,
             group.linear_issue_id || null,
             group.linear_issue_url || null,
+            group.linear_issue_identifier || null,
             group.linear_project_ids || null,
+            group.affects_features ? JSON.stringify(group.affects_features) : '[]',
           ]
         );
 
@@ -259,7 +263,8 @@ export class DatabaseStorage implements IStorage {
         g.id, g.channel_id, g.github_issue_number, g.suggested_title,
         g.avg_similarity, g.thread_count, g.is_cross_cutting, g.status,
         g.created_at, g.updated_at, g.exported_at,
-        g.linear_issue_id, g.linear_issue_url, g.linear_project_ids,
+        g.linear_issue_id, g.linear_issue_url, g.linear_issue_identifier,
+        g.linear_project_ids, g.affects_features,
         COALESCE(
           json_agg(
             json_build_object(
@@ -290,7 +295,8 @@ export class DatabaseStorage implements IStorage {
       GROUP BY g.id, g.channel_id, g.github_issue_number, g.suggested_title,
                g.avg_similarity, g.thread_count, g.is_cross_cutting, g.status,
                g.created_at, g.updated_at, g.exported_at,
-               g.linear_issue_id, g.linear_issue_url, g.linear_project_ids
+               g.linear_issue_id, g.linear_issue_url, g.linear_issue_identifier,
+               g.linear_project_ids, g.affects_features
       ORDER BY g.thread_count DESC, g.avg_similarity DESC
     `;
 
@@ -310,7 +316,9 @@ export class DatabaseStorage implements IStorage {
       exported_at: row.exported_at?.toISOString(),
       linear_issue_id: row.linear_issue_id,
       linear_issue_url: row.linear_issue_url,
+      linear_issue_identifier: row.linear_issue_identifier,
       linear_project_ids: row.linear_project_ids,
+      affects_features: row.affects_features ? JSON.parse(row.affects_features) : [],
       threads: row.threads || [],
     }));
   }
@@ -321,7 +329,8 @@ export class DatabaseStorage implements IStorage {
         g.id, g.channel_id, g.github_issue_number, g.suggested_title,
         g.avg_similarity, g.thread_count, g.is_cross_cutting, g.status,
         g.created_at, g.updated_at, g.exported_at,
-        g.linear_issue_id, g.linear_issue_url, g.linear_project_ids,
+        g.linear_issue_id, g.linear_issue_url, g.linear_issue_identifier,
+        g.linear_project_ids, g.affects_features,
         COALESCE(
           json_agg(
             json_build_object(
@@ -342,7 +351,8 @@ export class DatabaseStorage implements IStorage {
       GROUP BY g.id, g.channel_id, g.github_issue_number, g.suggested_title,
                g.avg_similarity, g.thread_count, g.is_cross_cutting, g.status,
                g.created_at, g.updated_at, g.exported_at,
-               g.linear_issue_id, g.linear_issue_url, g.linear_project_ids`,
+               g.linear_issue_id, g.linear_issue_url, g.linear_issue_identifier,
+               g.linear_project_ids, g.affects_features`,
       [groupId]
     );
 
@@ -365,7 +375,9 @@ export class DatabaseStorage implements IStorage {
       exported_at: row.exported_at?.toISOString(),
       linear_issue_id: row.linear_issue_id,
       linear_issue_url: row.linear_issue_url,
+      linear_issue_identifier: row.linear_issue_identifier,
       linear_project_ids: row.linear_project_ids,
+      affects_features: row.affects_features ? JSON.parse(row.affects_features) : [],
       threads: row.threads || [],
     };
   }

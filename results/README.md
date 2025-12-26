@@ -10,7 +10,7 @@ This directory contains output files from classification and export workflows.
 
 ## Privacy Notice
 
-⚠️ **Do not commit results files** - They may contain private data from your Discord server or GitHub repository.
+**WARNING: Do not commit results files** - They may contain private data from your Discord server or GitHub repository.
 
 All `.json` files in this directory are gitignored by default.
 
