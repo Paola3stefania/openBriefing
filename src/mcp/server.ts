@@ -1780,8 +1780,6 @@ async function main() {
   const transport = new StdioServerTransport();
   await mcpServer.connect(transport);
 
-  log("UNMute MCP server started, connecting to Discord...");
-
   // Connect to Discord in the background (non-blocking)
   discord.login(DISCORD_TOKEN).catch((error) => {
     logError("Failed to login to Discord:", error);
