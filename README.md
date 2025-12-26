@@ -1,4 +1,4 @@
-# Discord MCP Server
+# UnMute
 
 This MCP server allows you to read messages from Discord servers and classify them against GitHub issues using the Model Context Protocol.
 
