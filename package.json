@@ -1,11 +1,11 @@
 {
-  "name": "discord-mcp",
+  "name": "unmute-mcp",
   "version": "1.0.0",
   "description": "MCP server for reading Discord messages and classifying them against GitHub issues",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "discord-mcp": "./dist/index.js"
+    "unmute-mcp": "./dist/index.js"
   },
   "scripts": {
     "build": "tsc",
@@ -30,7 +30,7 @@
   },
   "keywords": [
     "mcp",
-    "discord",
+    "unmute",
     "claude"
   ],
   "license": "MIT",
