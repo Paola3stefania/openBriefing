@@ -16,6 +16,10 @@ This tool is configurable via environment variables. Create a `.env` file in the
 
 ## Optional Configuration
 
+### Classification
+- `OPENAI_API_KEY` - OpenAI API key for semantic classification (enabled by default when set)
+- `USE_SEMANTIC_CLASSIFICATION` - Set to "false" to disable semantic classification even when API key is set (default: enabled if API key is set)
+
 ### Discord Channel Names
 These help scripts find channels by name:
 - `DISCORD_CHANNEL_DEVELOPMENT` - Development channel name (default: "development")
@@ -38,6 +42,10 @@ DISCORD_DEFAULT_CHANNEL_ID=your_default_channel_id
 GITHUB_TOKEN=your_github_personal_access_token_here
 GITHUB_OWNER=your-org
 GITHUB_REPO=your-repo
+
+# Classification (Optional)
+OPENAI_API_KEY=your_openai_api_key_here
+# USE_SEMANTIC_CLASSIFICATION=false  # Uncomment to disable semantic classification
 ```
 
 ## Using Different Repositories
@@ -56,15 +64,14 @@ To use this tool with a different GitHub repository:
    GITHUB_REPO=your-repository
    ```
 
-3. Fetch issues for your repository:
+3. The `classify_discord_messages` MCP tool will automatically fetch issues and messages before classifying. You can also fetch manually:
    ```bash
    npm run fetch-issues
    ```
 
-4. Classify Discord messages:
-   ```bash
-   npm run classify-issues <channel_id> 50
-   ```
+4. Classify Discord messages (automatically syncs issues and messages first):
+   - Use the `classify_discord_messages` MCP tool
+   - Or use `sync_and_classify` for the full workflow
 
 ## Configuration Priority
 

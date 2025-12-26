@@ -31,10 +31,11 @@ UNMute is an MCP server that integrates communication platforms (Discord, GitHub
 
 ### Classification
 
-- **Keyword-based**: Fast, free classification using keyword matching
-- **Semantic (LLM-based)**: Context-aware classification using OpenAI embeddings
+- **Keyword-based**: Fast, free classification using keyword matching (default when OpenAI not configured)
+- **Semantic (LLM-based)**: Context-aware classification using OpenAI embeddings (enabled by default when `OPENAI_API_KEY` is set)
 - Thread-aware classification
 - Classification history tracking
+- Automatically syncs issues and messages before classifying
 
 ### PM Tool Export
 
@@ -88,23 +89,22 @@ Fetches only new or updated issues since last fetch.
 
 ### Classifying Discord Messages
 
-```bash
-npm run classify-issues <channel_id> [limit] [minSimilarity]
-```
+The `classify_discord_messages` MCP tool automatically:
+1. Fetches/syncs GitHub issues (incremental)
+2. Fetches/syncs Discord messages (incremental)
+3. Classifies messages with issues
 
-Example:
-```bash
-npm run classify-issues [channel_id] 30 20
-```
+You can also fetch separately:
+- `fetch_github_issues`: Fetch and cache GitHub issues
+- `fetch_discord_messages`: Fetch and cache Discord messages
 
-Parameters:
-- `channel_id`: Discord channel ID (required)
-- `limit`: Number of messages to analyze (default: 30)
-- `minSimilarity`: Minimum similarity score threshold (default: 20)
+**Note:** Classification requires cached issues. The classification tool will automatically fetch them if needed.
 
 ### Automated Workflow
 
-Use the `sync_and_classify` MCP tool to:
+The `classify_discord_messages` tool automatically syncs before classifying.
+
+Alternatively, use `sync_and_classify` MCP tool which provides a unified workflow:
 1. Sync Discord messages (incremental)
 2. Sync GitHub issues (incremental)
 3. Classify messages with issues
@@ -130,7 +130,7 @@ Available tools via Model Context Protocol:
 - `search_discord_and_github`: Search both Discord and GitHub
 - `fetch_github_issues`: Fetch and cache GitHub issues
 - `fetch_discord_messages`: Fetch and cache Discord messages
-- `classify_discord_messages`: Classify messages with GitHub issues
+- `classify_discord_messages`: Classify messages with GitHub issues (automatically syncs issues and messages first)
 - `sync_and_classify`: Automated sync and classification workflow
 - `export_to_pm_tool`: Export to PM tools (Linear, Jira)
 

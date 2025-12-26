@@ -10,17 +10,19 @@ LLM-based semantic similarity matching using OpenAI embeddings for better contex
 
 ## Configuration
 
-### Enable
+### Enable (Default Behavior)
 
 1. Add to `.env`:
    ```
    OPENAI_API_KEY=your_openai_api_key_here
    ```
-2. Semantic classification is automatically enabled when `OPENAI_API_KEY` is set
+2. Semantic classification is **enabled by default** when `OPENAI_API_KEY` is set
 3. To disable even with API key:
    ```
    USE_SEMANTIC_CLASSIFICATION=false
    ```
+
+**Note:** When semantic classification is enabled, it is used automatically. No additional configuration needed.
 
 ### Cost
 
@@ -49,7 +51,13 @@ The `classify_discord_messages` tool automatically uses semantic classification 
 
 ## Fallback
 
-If `OPENAI_API_KEY` is not set or semantic classification fails, the system automatically falls back to keyword-based classification.
+If `OPENAI_API_KEY` is not set or semantic classification fails, the system automatically falls back to keyword-based classification. Classification always works, even without OpenAI API key.
+
+## Requirements
+
+- Issues must be cached (classification tool automatically syncs issues before classifying)
+- `OPENAI_API_KEY` environment variable set (for semantic classification)
+- Messages are automatically synced before classification
 
 ## Similarity Scores
 

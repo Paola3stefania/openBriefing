@@ -1,29 +1,32 @@
 # Message Classification
 
-Analyzes Discord messages and matches them with GitHub issues using keyword-based similarity.
+Analyzes Discord messages and matches them with GitHub issues using keyword-based or semantic similarity.
 
 ## Process
 
-1. **Fetch Messages**: Reads N messages (default: 30) from the specified channel
-2. **For Each Message**:
-   - Extract keywords (removes stop words, keeps meaningful terms)
-   - Search GitHub API using top 5 keywords
-   - Calculate similarity score (0-100%) based on keyword overlap
-   - Filter issues with similarity ≥ threshold (default: 20%)
-   - Return top 5 matches per message
+The `classify_discord_messages` tool automatically:
+1. **Syncs GitHub Issues**: Fetches all issues from the repository and caches them (incremental updates)
+2. **Syncs Discord Messages**: Fetches messages from the channel and caches them (incremental updates)
+3. **Classification**: 
+   - Compares each message against all cached GitHub issues
+   - Uses keyword-based matching (default) or semantic matching (if OpenAI API key is configured)
+   - Calculates similarity score (0-100%) 
+   - Filters issues with similarity ≥ threshold (default: 20%)
+   - Returns top 5 matches per message
 
 ## Important Notes
 
-- Does not compare against all GitHub issues at once
-- Searches GitHub API using message keywords
-- GitHub API returns up to 20 results per search
-- Only issues matching keywords and above similarity threshold are returned
+- Issues are cached locally, so classification compares against all issues at once
+- Messages are cached locally, so classification can process large batches efficiently
+- Classification method: Keyword-based (default) or Semantic (if `OPENAI_API_KEY` is set)
+- Semantic classification is enabled by default when OpenAI API key is configured
 
 ## Performance
 
-- One GitHub API call per message
-- Rate limit: 60 requests/hour (without token) or 5000/hour (with token)
-- Includes 500ms delay between searches
+- Issues are fetched once and cached (incremental updates on subsequent runs)
+- Messages are fetched once and cached (incremental updates on subsequent runs)
+- Classification compares all messages against all cached issues (no API calls during classification)
+- Much faster than API-based search since everything is local
 
 ## Similarity Threshold
 
@@ -37,22 +40,30 @@ Analyzes Discord messages and matches them with GitHub issues using keyword-base
 **Message:** "I'm having trouble with stripe plugin subscription webhooks"
 
 **Process:**
-1. Keywords: ["trouble", "stripe", "plugin", "subscription", "webhooks"]
-2. GitHub search: `repo:{owner}/{repo} stripe plugin subscription webhooks type:issue`
-3. Finds issue #5535: "Stripe - cancel at the period end not working"
-4. Similarity: 45% (matched: "stripe", "plugin", "subscription")
-5. Included in results if > 20% threshold
+1. Issues are cached locally (e.g., 5000 issues from the repository)
+2. Keywords: ["trouble", "stripe", "plugin", "subscription", "webhooks"]
+3. Compares against all cached issues (no API calls needed)
+4. Finds issue #5535: "Stripe - cancel at the period end not working"
+5. Similarity: 45% (matched: "stripe", "plugin", "subscription")
+6. Included in results if > 20% threshold
 
-## Limitations
+## Classification Methods
 
-- Keyword-based only (not semantic)
-- Max 20 results per GitHub API search
-- One search per message (may miss related issues if keywords don't match)
-- Rate limiting may require GitHub token for large batches
+### Keyword-Based (Default)
+- Fast and free
+- Compares keywords and phrases extracted from messages and issues
+- Weighted scoring system prioritizes technical terms
+- Works offline after initial cache
+
+### Semantic (LLM-Based)
+- Enabled automatically when `OPENAI_API_KEY` is set
+- Uses OpenAI embeddings for context-aware matching
+- Better understanding of synonyms and related concepts
+- See SEMANTIC_CLASSIFICATION.md for details
 
 ## Improving Results
 
 - Lower similarity threshold (e.g., 15% instead of 20%)
-- Use GitHub token for higher rate limits
-- Process in smaller batches
-- Use semantic classification (see SEMANTIC_CLASSIFICATION.md)
+- Enable semantic classification by setting `OPENAI_API_KEY`
+- Process more messages using `classify_all` parameter
+- Ensure issues and messages are up-to-date (classification auto-syncs)

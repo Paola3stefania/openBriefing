@@ -990,39 +990,240 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         throw new Error("Channel ID is required. Provide channel_id parameter or set DISCORD_DEFAULT_CHANNEL_ID in environment variables.");
       }
 
+      // Step 1: Fetch/sync GitHub issues (incremental) before classification
+      const issuesCachePath = join(process.cwd(), classifyConfig.paths.cacheDir, classifyConfig.paths.issuesCacheFile);
+      let existingIssuesCache: IssuesCache | null = null;
+      let sinceIssuesDate: string | undefined = undefined;
+
+      try {
+        if (existsSync(issuesCachePath)) {
+          existingIssuesCache = await loadIssuesFromCache(issuesCachePath);
+          sinceIssuesDate = getMostRecentIssueDate(existingIssuesCache);
+        }
+      } catch (error) {
+        // Cache doesn't exist or invalid, will fetch all
+      }
+
+      const githubToken = process.env.GITHUB_TOKEN;
+      if (!githubToken) {
+        throw new Error("GITHUB_TOKEN environment variable is required for fetching issues");
+      }
+
+      const newIssues = await fetchAllGitHubIssues(githubToken, true, undefined, undefined, sinceIssuesDate);
+
+      // Merge with existing cache if doing incremental update
+      let finalIssues: GitHubIssue[];
+      if (existingIssuesCache && newIssues.length > 0) {
+        finalIssues = mergeIssues(existingIssuesCache.issues, newIssues);
+      } else if (existingIssuesCache && newIssues.length === 0) {
+        finalIssues = existingIssuesCache.issues;
+      } else {
+        finalIssues = newIssues;
+      }
+
+      // Save updated issues cache
+      const issuesCacheData: IssuesCache = {
+        fetched_at: new Date().toISOString(),
+        total_count: finalIssues.length,
+        open_count: finalIssues.filter((i) => i.state === "open").length,
+        closed_count: finalIssues.filter((i) => i.state === "closed").length,
+        issues: finalIssues,
+      };
+
+      const issuesCacheDir = join(process.cwd(), classifyConfig.paths.cacheDir);
+      await mkdir(issuesCacheDir, { recursive: true });
+      await writeFile(issuesCachePath, JSON.stringify(issuesCacheData, null, 2), "utf-8");
+
+      // Step 2: Fetch/sync Discord messages (incremental) before classification
+      const cacheDir = join(process.cwd(), "discord");
+      const cacheFileName = `discord-messages-${actualChannelId}.json`;
+      const discordCachePath = join(cacheDir, cacheFileName);
+
+      const channel = await discord.channels.fetch(actualChannelId);
+      if (!channel ||
+          (!(channel instanceof TextChannel) &&
+           !(channel instanceof DMChannel) &&
+           !(channel instanceof NewsChannel))) {
+        throw new Error("Channel does not support messages");
+      }
+
+      const channelName = channel instanceof TextChannel || channel instanceof NewsChannel
+        ? `#${channel.name}`
+        : "DM";
+
+      const guildId = channel instanceof TextChannel || channel instanceof NewsChannel
+        ? channel.guild?.id
+        : undefined;
+
+      // Check if cache exists for incremental update
+      let existingDiscordCache: DiscordCache | null = null;
+      let sinceDiscordDate: string | undefined = undefined;
+
+      try {
+        const foundCachePath = await findDiscordCacheFile(actualChannelId);
+        if (foundCachePath) {
+          existingDiscordCache = await loadDiscordCache(foundCachePath);
+          sinceDiscordDate = getMostRecentMessageDate(existingDiscordCache);
+        }
+      } catch (error) {
+        // Cache doesn't exist or invalid
+      }
+
+      // Fetch messages with pagination (incremental)
+      let fetchedMessages: any[] = [];
+      let lastMessageId: string | undefined = undefined;
+      let hasMore = true;
+
+      while (hasMore) {
+        const options: { limit: number; before?: string } = { limit: 100 };
+        if (lastMessageId) {
+          options.before = lastMessageId;
+        }
+
+        const messages = await channel.messages.fetch(options);
+
+        if (messages.size === 0) {
+          hasMore = false;
+          break;
+        }
+
+        const messageArray = Array.from(messages.values());
+
+        // If incremental, filter by date
+        if (sinceDiscordDate) {
+          const sinceTime = new Date(sinceDiscordDate).getTime();
+          const newMessages = messageArray.filter((msg: any) => {
+            const createdTime = msg.createdAt.getTime();
+            const editedTime = msg.editedAt ? msg.editedAt.getTime() : 0;
+            return createdTime >= sinceTime || editedTime >= sinceTime;
+          });
+
+          if (newMessages.length === 0) {
+            const newestInBatch = messageArray[0];
+            const newestTime = Math.max(
+              newestInBatch.createdAt.getTime(),
+              newestInBatch.editedAt ? newestInBatch.editedAt.getTime() : 0
+            );
+            if (newestTime < sinceTime) {
+              hasMore = false;
+              break;
+            }
+          }
+
+          fetchedMessages.push(...newMessages);
+        } else {
+          fetchedMessages.push(...messageArray);
+        }
+
+        lastMessageId = messageArray[messageArray.length - 1].id;
+
+        // Rate limiting
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+
+      // Format messages
+      const formattedMessages = fetchedMessages.map((msg: any) => {
+        return {
+          id: msg.id,
+          author: {
+            id: msg.author.id,
+            username: msg.author.username,
+            discriminator: msg.author.discriminator,
+            bot: msg.author.bot,
+            avatar: msg.author.avatar,
+          },
+          content: msg.content,
+          created_at: msg.createdAt.toISOString(),
+          edited_at: msg.editedAt ? msg.editedAt.toISOString() : null,
+          timestamp: msg.createdTimestamp.toString(),
+          channel_id: actualChannelId,
+          channel_name: channelName,
+          guild_id: guildId,
+          guild_name: channel instanceof TextChannel || channel instanceof NewsChannel
+            ? channel.guild?.name
+            : undefined,
+          attachments: msg.attachments.map((att: any) => ({
+            id: att.id,
+            filename: att.name,
+            url: att.url,
+            size: att.size,
+            content_type: att.contentType || undefined,
+          })),
+          embeds: msg.embeds.length,
+          mentions: Array.from(msg.mentions.users.keys()).map(id => String(id)),
+          reactions: msg.reactions.cache.map((reaction: any) => ({
+            emoji: reaction.emoji.name || reaction.emoji.id || "",
+            count: reaction.count,
+          })),
+          thread: msg.thread ? {
+            id: msg.thread.id,
+            name: msg.thread.name,
+          } : undefined,
+          message_reference: msg.reference ? {
+            message_id: msg.reference.messageId || "",
+            channel_id: msg.reference.channelId || "",
+            guild_id: msg.reference.guildId || undefined,
+          } : undefined,
+          url: msg.url,
+        };
+      });
+
+      // Merge with existing cache if doing incremental update, or organize by thread
+      let finalDiscordCache: DiscordCache;
+
+      if (existingDiscordCache && formattedMessages.length > 0) {
+        finalDiscordCache = mergeMessagesByThread(existingDiscordCache, formattedMessages);
+      } else if (existingDiscordCache && formattedMessages.length === 0) {
+        finalDiscordCache = existingDiscordCache;
+      } else {
+        const { threads, mainMessages } = organizeMessagesByThread(formattedMessages);
+        const totalCount = formattedMessages.length;
+        const dates = formattedMessages.map(m => new Date(m.created_at).getTime());
+        const oldestDate = dates.length > 0 ? new Date(Math.min(...dates)).toISOString() : null;
+        const newestDate = dates.length > 0 ? new Date(Math.max(...dates)).toISOString() : null;
+
+        finalDiscordCache = {
+          fetched_at: new Date().toISOString(),
+          channel_id: actualChannelId,
+          channel_name: channelName,
+          total_count: totalCount,
+          oldest_message_date: oldestDate,
+          newest_message_date: newestDate,
+          threads,
+          main_messages: mainMessages,
+        };
+      }
+
+      // Save updated Discord cache
+      await mkdir(cacheDir, { recursive: true });
+      await writeFile(discordCachePath, JSON.stringify(finalDiscordCache, null, 2), "utf-8");
+
       // Load classification history
       const resultsDir = join(process.cwd(), classifyConfig.paths.resultsDir || "results");
       const classificationHistory = await loadClassificationHistory(resultsDir);
 
-      // Try to load Discord messages from cache
-      const discordCachePath = await findDiscordCacheFile(actualChannelId);
-      let discordMessages: DiscordMessage[] = [];
-      let useCache = false;
+      // Use the freshly fetched Discord cache
+      const allCachedMessages = getAllMessagesFromCache(finalDiscordCache);
+      
+      // Check if this is first-time classification (no classified messages or threads)
+      const isFirstTimeClassification = Object.keys(classificationHistory.messages).length === 0 && 
+                                       (!classificationHistory.threads || Object.keys(classificationHistory.threads).length === 0);
 
-      if (discordCachePath) {
-        try {
-          const discordCache = await loadDiscordCache(discordCachePath);
-          const allCachedMessages = getAllMessagesFromCache(discordCache);
-          
-          // Check if this is first-time classification (no classified messages or threads)
-          const isFirstTimeClassification = Object.keys(classificationHistory.messages).length === 0 && 
-                                           (!classificationHistory.threads || Object.keys(classificationHistory.threads).length === 0);
+      // Filter out already-classified messages if re_classify is false
+      let messagesToClassify = re_classify 
+        ? allCachedMessages 
+        : filterUnclassifiedMessages(allCachedMessages, classificationHistory);
 
-          // Filter out already-classified messages if re_classify is false
-          let messagesToClassify = re_classify 
-            ? allCachedMessages 
-            : filterUnclassifiedMessages(allCachedMessages, classificationHistory);
+      // Group messages by thread FIRST (before applying limits)
+      // This allows us to count threads and process them in batches
+      const threadGroupsMap = new Map<string, CachedDiscordMessage[]>();
+      const standaloneMessagesMap = new Map<string, CachedDiscordMessage>();
 
-          // Group messages by thread FIRST (before applying limits)
-          // This allows us to count threads and process them in batches
-          const threadGroupsMap = new Map<string, CachedDiscordMessage[]>();
-          const standaloneMessagesMap = new Map<string, CachedDiscordMessage>();
-
-          for (const msg of messagesToClassify) {
-            const threadId = msg.thread?.id;
-            if (threadId) {
-              // Get all messages from this thread
-              const threadMessages = getThreadContextForMessage(discordCache, msg);
+      for (const msg of messagesToClassify) {
+        const threadId = msg.thread?.id;
+        if (threadId) {
+          // Get all messages from this thread
+          const threadMessages = getThreadContextForMessage(finalDiscordCache, msg);
               
               // Only add if we haven't seen this thread yet
               if (!threadGroupsMap.has(threadId)) {
@@ -1116,7 +1317,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
 
           // Get guild ID from cache
-          const guildId = allCachedMessages[0]?.guild_id || "@me";
+          const cacheGuildId = allCachedMessages[0]?.guild_id || "@me";
 
           // Convert threads to combined messages (combine all messages in thread)
           const threadCombinedMessages: DiscordMessage[] = Array.from(threadGroups.entries()).map(([threadId, threadMsgs]) => {
@@ -1127,7 +1328,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
             // Get thread name from first message or cache
             const firstMsg = sortedThreadMsgs[0];
-            const threadName = firstMsg.thread?.name || discordCache.threads?.[threadId]?.thread_name;
+            const threadName = firstMsg.thread?.name || finalDiscordCache.threads?.[threadId]?.thread_name;
 
             // Combine all messages in thread with author context
             const combinedContent = sortedThreadMsgs
@@ -1139,7 +1340,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
               author: firstMsg.author.username,
               content: combinedContent,
               timestamp: firstMsg.created_at,
-              url: firstMsg.url || `https://discord.com/channels/${guildId}/${actualChannelId}/${firstMsg.id}`,
+              url: firstMsg.url || `https://discord.com/channels/${cacheGuildId}/${actualChannelId}/${firstMsg.id}`,
               // Store thread info for tracking
               threadId: threadId,
               threadName: threadName,
@@ -1161,104 +1362,11 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             isStandalone: true,
           } as DiscordMessage & { threadId?: string; threadName?: string; messageIds?: string[]; isStandalone?: boolean }));
 
-          // Combine thread messages and standalone messages
-          discordMessages = [...threadCombinedMessages, ...standaloneDiscordMessages];
+      // Combine thread messages and standalone messages
+      const discordMessages: DiscordMessage[] = [...threadCombinedMessages, ...standaloneDiscordMessages];
 
-          useCache = true;
-        } catch (error) {
-          // Cache failed, fall back to API
-        }
-      }
-
-      // Fallback to fetching from API if cache doesn't exist or failed
-      if (!useCache) {
-        const channel = await discord.channels.fetch(actualChannelId);
-
-        if (!channel || 
-            (!(channel instanceof TextChannel) && 
-             !(channel instanceof DMChannel) && 
-             !(channel instanceof NewsChannel))) {
-          throw new Error("Channel does not support messages");
-        }
-
-        const guildId = channel instanceof TextChannel || channel instanceof NewsChannel
-          ? channel.guild.id
-          : "@me";
-
-        // If classify_all is true, we should be using the cache path
-        // But if we're here, fetch messages with pagination if needed
-        let messageArray: Message[] = [];
-        if (classify_all) {
-          // Fetch messages in batches (Discord API max is 100 per request)
-          let lastMessageId: string | undefined = undefined;
-          let hasMore = true;
-          while (hasMore) {
-            const batch: Collection<string, Message> = await channel.messages.fetch({ 
-              limit: 100, 
-              ...(lastMessageId ? { before: lastMessageId } : {})
-            });
-            const batchArray: Message[] = Array.from(batch.values());
-            messageArray.push(...batchArray);
-            
-            if (batchArray.length < 100) {
-              hasMore = false;
-            } else {
-              lastMessageId = batchArray[batchArray.length - 1].id;
-            }
-            
-            // Safety limit: stop after 10,000 messages to avoid infinite loops
-            if (messageArray.length >= 10000) {
-              hasMore = false;
-            }
-          }
-          messageArray = messageArray.reverse();
-        } else {
-          const fetchLimit = limit;
-          const messages = await channel.messages.fetch({ limit: fetchLimit });
-          messageArray = Array.from(messages.values()).reverse();
-        }
-
-        // Filter out already-classified messages if re_classify is false
-        if (!re_classify) {
-          messageArray = messageArray.filter(msg => !classificationHistory.messages[msg.id]);
-        }
-
-        // Convert to DiscordMessage format (treating as standalone threads)
-        discordMessages = messageArray.map((msg) => ({
-          id: msg.id,
-          author: msg.author.username,
-          content: msg.content,
-          timestamp: msg.createdAt.toISOString(),
-          url: `https://discord.com/channels/${guildId}/${actualChannelId}/${msg.id}`,
-          threadId: msg.id, // Treat as standalone thread
-          threadName: `Standalone Message: ${msg.content.substring(0, 50)}...`,
-          messageIds: [msg.id],
-          isStandalone: true,
-        }));
-      }
-
-      // Load GitHub issues from cache
-      const issuesCachePath = join(process.cwd(), classifyConfig.paths.cacheDir, classifyConfig.paths.issuesCacheFile);
-      let issues: GitHubIssue[] = [];
-      let issuesUseCache = false;
-
-      if (existsSync(issuesCachePath)) {
-        try {
-          const issuesCache = await loadIssuesFromCache(issuesCachePath);
-          issues = issuesCache.issues;
-          issuesUseCache = true;
-        } catch (error) {
-          // Cache failed, fall back to API
-        }
-      }
-
-      // If no cache available, fetch all issues from API
-      if (!issuesUseCache) {
-        const githubToken = process.env.GITHUB_TOKEN;
-        if (githubToken) {
-          issues = await fetchAllGitHubIssues(githubToken, true);
-        }
-      }
+      // Load GitHub issues from the freshly fetched cache (already cached above)
+      const issues = finalIssues;
 
       // Update thread status to "classifying" before we start
       const updatedHistory = { ...classificationHistory };
@@ -1280,7 +1388,8 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // Process messages in batches to save progress incrementally
       const BATCH_SIZE = 50; // Process 50 threads/messages at a time
       const allClassified: ClassifiedMessage[] = [];
-      const useSemantic = issuesUseCache ? (classifyConfig.classification?.useSemantic ?? false) : false;
+      // Use semantic classification by default when OpenAI is available (issues are always cached now)
+      const useSemantic = classifyConfig.classification.useSemantic;
 
       for (let i = 0; i < discordMessages.length; i += BATCH_SIZE) {
         const batch = discordMessages.slice(i, i + BATCH_SIZE);
@@ -1416,7 +1525,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       const result = {
         channel_id: actualChannelId,
-        channel_name: useCache ? "cached" : (await discord.channels.fetch(actualChannelId) as any)?.name || actualChannelId,
+        channel_name: channelName,
         analysis_date: new Date().toISOString(),
         summary: {
           total_messages: discordMessages.length,
