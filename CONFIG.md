@@ -19,6 +19,11 @@ This tool is configurable via environment variables. Create a `.env` file in the
 ### Classification
 - `OPENAI_API_KEY` - OpenAI API key for semantic classification (enabled by default when set)
 - `USE_SEMANTIC_CLASSIFICATION` - Set to "false" to disable semantic classification even when API key is set (default: enabled if API key is set)
+- `OPENAI_EMBEDDING_MODEL` - OpenAI embedding model to use (default: "text-embedding-3-small")
+  - `text-embedding-3-small` - Fast, cost-effective, 1536 dimensions (default, recommended)
+  - `text-embedding-3-large` - Higher quality, more expensive, 3072 dimensions
+  - `text-embedding-ada-002` - Legacy model, 1536 dimensions
+  - **Note:** Changing the model will invalidate existing embedding caches (they'll be regenerated)
 
 ### Discord Channel Names
 These help scripts find channels by name:
@@ -73,6 +78,7 @@ GITHUB_REPO=your-repo
 
 # Classification (Optional)
 OPENAI_API_KEY=your_openai_api_key_here
+# OPENAI_EMBEDDING_MODEL=text-embedding-3-small  # Optional: change embedding model
 
 # Storage Backend (Optional)
 # Default: Auto-detect (PostgreSQL if DATABASE_URL set, otherwise JSON)

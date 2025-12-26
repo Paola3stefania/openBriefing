@@ -37,7 +37,14 @@ interface PersistentEmbeddingCache {
 }
 
 const CACHE_VERSION = 1;
-const EMBEDDING_MODEL = "text-embedding-3-small";
+
+/**
+ * Get the embedding model from config
+ */
+function getEmbeddingModel(): string {
+  const config = getConfig();
+  return config.classification.embeddingModel;
+}
 
 /**
  * Get the path to the embeddings cache file
@@ -68,8 +75,10 @@ function hashIssueContent(issue: GitHubIssue): string {
 function loadPersistentCache(): PersistentEmbeddingCache {
   const cachePath = getEmbeddingsCachePath();
   
+  const currentModel = getEmbeddingModel();
+  
   if (!existsSync(cachePath)) {
-    return { version: CACHE_VERSION, model: EMBEDDING_MODEL, entries: {} };
+    return { version: CACHE_VERSION, model: currentModel, entries: {} };
   }
   
   try {
@@ -77,15 +86,15 @@ function loadPersistentCache(): PersistentEmbeddingCache {
     const cache = JSON.parse(data) as PersistentEmbeddingCache;
     
     // Check version and model compatibility
-    if (cache.version !== CACHE_VERSION || cache.model !== EMBEDDING_MODEL) {
-      logProgress("Embedding cache version/model mismatch, starting fresh");
-      return { version: CACHE_VERSION, model: EMBEDDING_MODEL, entries: {} };
+    if (cache.version !== CACHE_VERSION || cache.model !== currentModel) {
+      logProgress(`Embedding cache version/model mismatch (cached: ${cache.model}, current: ${currentModel}), starting fresh`);
+      return { version: CACHE_VERSION, model: currentModel, entries: {} };
     }
     
     return cache;
   } catch (error) {
     logProgress("Failed to load embedding cache, starting fresh");
-    return { version: CACHE_VERSION, model: EMBEDDING_MODEL, entries: {} };
+    return { version: CACHE_VERSION, model: currentModel, entries: {} };
   }
 }
 
@@ -134,7 +143,7 @@ export async function createEmbedding(text: string, apiKey: string, retries = 3)
           "Authorization": `Bearer ${apiKey}`,
         },
         body: JSON.stringify({
-          model: "text-embedding-3-small", // Cost-effective model with good performance
+          model: getEmbeddingModel(),
           input: truncatedText,
         }),
       });

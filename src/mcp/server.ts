@@ -292,7 +292,7 @@ const tools: Tool[] = [
         },
         min_similarity: {
           type: "number",
-          description: "Minimum similarity score to consider a match (0-100, default 20)",
+          description: "Minimum similarity score to consider a match (0-100 scale, default 20). Lower values (20-40) are more inclusive for initial classification, higher values (60-80) are more strict. See README for tier recommendations.",
           minimum: 0,
           maximum: 100,
           default: 20,
@@ -328,7 +328,7 @@ const tools: Tool[] = [
         },
         min_similarity: {
           type: "number",
-          description: "Minimum similarity score to consider a match (0-100, default 20)",
+          description: "Minimum similarity score to consider a match (0-100 scale, default 20). Lower values (20-40) are more inclusive for initial classification, higher values (60-80) are more strict. See README for tier recommendations.",
           minimum: 0,
           maximum: 100,
           default: 20,
@@ -384,7 +384,7 @@ const tools: Tool[] = [
         },
         min_similarity: {
           type: "number",
-          description: "Minimum similarity threshold for issue matching (0-100, default 60)",
+          description: "Minimum similarity threshold for issue matching (0-100 scale, default 60). Only threads with similarity ≥60 are grouped with an issue. Recommended: 60 (balanced), 80 (high confidence), 40 (more inclusive). See README for tier details.",
           minimum: 0,
           maximum: 100,
           default: 60,
@@ -424,7 +424,7 @@ const tools: Tool[] = [
         },
         min_similarity: {
           type: "number",
-          description: "Minimum similarity threshold for feature matching (0-1, default 0.5)",
+          description: "Minimum similarity threshold for feature matching (0.0-1.0 scale, cosine similarity, default 0.5). Only groups with similarity ≥0.5 are mapped to a feature. Recommended: 0.5 (balanced), 0.7 (high confidence), 0.3 (more inclusive). See README for tier details.",
           minimum: 0,
           maximum: 1,
           default: 0.5,

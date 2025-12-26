@@ -27,7 +27,14 @@ interface EmbeddingCacheFile {
 }
 
 const CACHE_VERSION = 1;
-const EMBEDDING_MODEL = "text-embedding-3-small";
+
+/**
+ * Get the embedding model from config
+ */
+function getEmbeddingModel(): string {
+  const config = getConfig();
+  return config.classification.embeddingModel;
+}
 
 // In-memory cache for fast access during runtime
 const memoryCache: Map<string, Embedding> = new Map();
@@ -62,9 +69,10 @@ export function hashContent(content: string): string {
  */
 function loadCache(cacheType: "issues" | "discord"): EmbeddingCacheFile {
   const cachePath = getCachePath(cacheType);
+  const currentModel = getEmbeddingModel();
   
   if (!existsSync(cachePath)) {
-    return { version: CACHE_VERSION, model: EMBEDDING_MODEL, entries: {} };
+    return { version: CACHE_VERSION, model: currentModel, entries: {} };
   }
   
   try {
@@ -72,15 +80,15 @@ function loadCache(cacheType: "issues" | "discord"): EmbeddingCacheFile {
     const cache = JSON.parse(data) as EmbeddingCacheFile;
     
     // Check version and model compatibility
-    if (cache.version !== CACHE_VERSION || cache.model !== EMBEDDING_MODEL) {
-      console.error(`[EmbeddingCache] Version/model mismatch for ${cacheType}, starting fresh`);
-      return { version: CACHE_VERSION, model: EMBEDDING_MODEL, entries: {} };
+    if (cache.version !== CACHE_VERSION || cache.model !== currentModel) {
+      console.error(`[EmbeddingCache] Version/model mismatch for ${cacheType} (cached: ${cache.model}, current: ${currentModel}), starting fresh`);
+      return { version: CACHE_VERSION, model: currentModel, entries: {} };
     }
     
     return cache;
   } catch (error) {
     console.error(`[EmbeddingCache] Failed to load ${cacheType} cache, starting fresh`);
-    return { version: CACHE_VERSION, model: EMBEDDING_MODEL, entries: {} };
+    return { version: CACHE_VERSION, model: currentModel, entries: {} };
   }
 }
 
@@ -213,7 +221,7 @@ export function getCacheStats(cacheType: "issues" | "discord"): {
 export function clearCache(cacheType: "issues" | "discord"): void {
   const cache: EmbeddingCacheFile = {
     version: CACHE_VERSION,
-    model: EMBEDDING_MODEL,
+    model: getEmbeddingModel(),
     entries: {},
   };
   saveCache(cacheType, cache);
