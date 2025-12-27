@@ -47,6 +47,7 @@ import { groupSignalsSemantic, groupByClassificationResults, type Feature, type 
 import type { Signal } from "../types/signal.js";
 import { fetchMultipleDocumentation } from "../export/documentationFetcher.js";
 import { extractFeaturesFromDocumentation } from "../export/featureExtractor.js";
+import type { ClassifiedThread } from "../storage/types.js";
 
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 
@@ -1719,6 +1720,82 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           // Save progress after each batch (both history AND JSON file)
           await saveClassificationHistory(updatedHistory, resultsDir);
           await saveProgressToFile(allClassified.length);
+          
+          // Save to database if configured (batch write)
+          try {
+            const { getStorage } = await import("../storage/factory.js");
+            const storage = getStorage();
+            
+            // Convert batch threads to ClassifiedThread format for database
+            const threadsToSave: ClassifiedThread[] = [];
+            
+            // Add threads from this batch that were classified
+            for (const classifiedMsg of batchClassified) {
+              const msg = classifiedMsg.message as DiscordMessage & { threadId?: string; threadName?: string; messageIds?: string[] };
+              const threadId = msg.threadId || classifiedMsg.message.id;
+              const threadData = threadMap.get(threadId);
+              
+              if (threadData) {
+                threadsToSave.push({
+                  thread_id: threadId,
+                  channel_id: actualChannelId,
+                  thread_name: threadData.thread.thread_name,
+                  message_count: threadData.thread.message_count,
+                  first_message_id: threadData.thread.first_message_id,
+                  first_message_author: threadData.thread.first_message_author,
+                  first_message_timestamp: threadData.thread.first_message_timestamp,
+                  first_message_url: threadData.thread.first_message_url,
+                  classified_at: new Date().toISOString(),
+                  status: "completed",
+                  issues: threadData.issues.map((issue: any) => ({
+                    number: issue.number,
+                    title: issue.title,
+                    state: issue.state,
+                    url: issue.url,
+                    similarity_score: issue.similarity_score,
+                    matched_terms: issue.matched_terms,
+                    labels: issue.labels,
+                    author: issue.author,
+                    created_at: issue.created_at,
+                  })),
+                });
+              }
+            }
+            
+            // Add threads from this batch that had no matches
+            for (const msg of batch) {
+              const threadMsg = msg as DiscordMessage & { threadId?: string; threadName?: string; messageIds?: string[] };
+              const threadId = threadMsg.threadId || msg.id;
+              const threadData = threadMap.get(threadId);
+              
+              // Only add if not already added above and has no matches
+              if (threadData && threadData.issues.length === 0 && !threadsToSave.some(t => t.thread_id === threadId)) {
+                threadsToSave.push({
+                  thread_id: threadId,
+                  channel_id: actualChannelId,
+                  thread_name: threadData.thread.thread_name,
+                  message_count: threadData.thread.message_count,
+                  first_message_id: threadData.thread.first_message_id,
+                  first_message_author: threadData.thread.first_message_author,
+                  first_message_timestamp: threadData.thread.first_message_timestamp,
+                  first_message_url: threadData.thread.first_message_url,
+                  classified_at: new Date().toISOString(),
+                  status: "completed",
+                  issues: [],
+                });
+              }
+            }
+            
+            // Save batch to database (all in one transaction)
+            if (threadsToSave.length > 0) {
+              await storage.saveClassifiedThreads(threadsToSave);
+              console.error(`[Classification] Saved ${threadsToSave.length} threads to database.`);
+            }
+          } catch (dbError) {
+            // Log database error but don't fail classification
+            console.error(`[Classification] Database save error (continuing):`, dbError);
+          }
+          
           console.error(`[Classification] Batch ${batchNum}/${totalBatches} complete. Saved ${threadMap.size} total threads to file.`);
 
         } catch (error) {

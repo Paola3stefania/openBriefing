@@ -40,6 +40,10 @@ export interface IStorage {
   getFeatures(urls: string[]): Promise<{ features: any[]; extracted_at: string; documentation_count: number } | null>;
   clearFeaturesCache(): Promise<void>;
   
+  // Classification history operations
+  saveClassificationHistoryEntry(channelId: string, messageId: string, threadId?: string): Promise<void>;
+  getClassificationHistory(channelId: string): Promise<Array<{ message_id: string; thread_id?: string; classified_at: string }>>;
+  
   // Stats
   getStats(channelId: string): Promise<StorageStats>;
   

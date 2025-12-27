@@ -100,8 +100,60 @@ export async function loadClassificationHistory(resultsDir: string): Promise<Cla
 
 /**
  * Save classification history
+ * Saves to database if DATABASE_URL is set, otherwise saves to JSON file
  */
 export async function saveClassificationHistory(
+  history: ClassificationHistory,
+  resultsDir: string
+): Promise<void> {
+  // Check if database is available
+  const hasDatabase = !!(process.env.DATABASE_URL || (process.env.DB_HOST && process.env.DB_NAME));
+
+  if (hasDatabase) {
+    // Save to database
+    try {
+      const { transaction } = await import("../db/client.js");
+      await transaction(async (client: any) => {
+        // Save all message classifications
+        for (const [messageId, msg] of Object.entries(history.messages)) {
+          // Find thread_id for this message by checking threads
+          let threadId: string | undefined;
+          for (const [tid, thread] of Object.entries(history.threads || {})) {
+            if (thread.channel_id === msg.channel_id) {
+              // Check if this message is in the channel's classified messages
+              const channelMsgs = history.channel_classifications[msg.channel_id] || [];
+              if (channelMsgs.includes(messageId)) {
+                threadId = tid;
+                break;
+              }
+            }
+          }
+
+          await client.query(
+            `INSERT INTO classification_history (channel_id, message_id, thread_id, classified_at)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (channel_id, message_id) DO UPDATE SET
+               thread_id = EXCLUDED.thread_id,
+               classified_at = EXCLUDED.classified_at`,
+            [msg.channel_id, messageId, threadId || null, new Date(msg.classified_at)]
+          );
+        }
+      });
+    } catch (error) {
+      // If database save fails, fall back to JSON
+      console.error("[ClassificationHistory] Database save failed, falling back to JSON:", error);
+      await saveClassificationHistoryToFile(history, resultsDir);
+    }
+  } else {
+    // Save to JSON file
+    await saveClassificationHistoryToFile(history, resultsDir);
+  }
+}
+
+/**
+ * Save classification history to JSON file (fallback)
+ */
+async function saveClassificationHistoryToFile(
   history: ClassificationHistory,
   resultsDir: string
 ): Promise<void> {

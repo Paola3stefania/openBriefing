@@ -690,5 +690,32 @@ export class DatabaseStorage implements IStorage {
   async clearFeaturesCache(): Promise<void> {
     await query("DELETE FROM features");
   }
+
+  async saveClassificationHistoryEntry(channelId: string, messageId: string, threadId?: string): Promise<void> {
+    await query(
+      `INSERT INTO classification_history (channel_id, message_id, thread_id, classified_at)
+       VALUES ($1, $2, $3, NOW())
+       ON CONFLICT (channel_id, message_id) DO UPDATE SET
+         thread_id = EXCLUDED.thread_id,
+         classified_at = NOW()`,
+      [channelId, messageId, threadId || null]
+    );
+  }
+
+  async getClassificationHistory(channelId: string): Promise<Array<{ message_id: string; thread_id?: string; classified_at: string }>> {
+    const result = await query(
+      `SELECT message_id, thread_id, classified_at
+       FROM classification_history
+       WHERE channel_id = $1
+       ORDER BY classified_at DESC`,
+      [channelId]
+    );
+
+    return result.rows.map(row => ({
+      message_id: row.message_id,
+      thread_id: row.thread_id || undefined,
+      classified_at: row.classified_at?.toISOString() || new Date().toISOString(),
+    }));
+  }
 }
 

@@ -683,5 +683,32 @@ export class JsonStorage implements IStorage {
       await writeFile(cacheFile, JSON.stringify({ urls: [], features: [], extracted_at: "", documentation_count: 0 }, null, 2), "utf-8");
     }
   }
+
+  async saveClassificationHistoryEntry(channelId: string, messageId: string, threadId?: string): Promise<void> {
+    // For JSON storage, classification history is saved via saveClassificationHistory function
+    // This method is a no-op for JSON storage as it uses the file-based approach
+    // The actual saving happens in classificationHistory.ts
+  }
+
+  async getClassificationHistory(channelId: string): Promise<Array<{ message_id: string; thread_id?: string; classified_at: string }>> {
+    // For JSON storage, classification history is loaded via loadClassificationHistory function
+    // This method loads from the JSON file
+    const { loadClassificationHistory } = await import("../cache/classificationHistory.js");
+    const history = await loadClassificationHistory(this.resultsDir);
+    
+    const messageIds = history.channel_classifications[channelId] || [];
+    return messageIds.map(msgId => {
+      const msg = history.messages[msgId];
+      const thread = msg ? Object.values(history.threads || {}).find(t => 
+        history.messages[msgId] && Object.keys(history.messages).includes(msgId)
+      ) : null;
+      
+      return {
+        message_id: msgId,
+        thread_id: thread?.thread_id,
+        classified_at: msg?.classified_at || new Date().toISOString(),
+      };
+    });
+  }
 }
 
