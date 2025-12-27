@@ -1,12 +1,14 @@
 /**
  * Documentation fetcher
  * Fetches and parses documentation from URLs or local file paths
+ * Supports caching via storage backend (database or JSON)
  */
 
 import { log, logError } from "../mcp/logger.js";
 import { readFile } from "fs/promises";
 import { existsSync } from "fs";
 import { join, isAbsolute } from "path";
+import { getStorage } from "../storage/factory.js";
 
 export interface DocumentationContent {
   url: string;
@@ -29,7 +31,8 @@ export interface DocumentationContent {
  */
 export async function fetchDocumentation(urlOrPath: string): Promise<DocumentationContent> {
   try {
-    log(`Fetching documentation from: ${urlOrPath}`);
+    // Log removed to avoid interfering with MCP JSON protocol
+    // log(`Fetching documentation from: ${urlOrPath}`);
     
     // Check if it's a URL (starts with http:// or https://)
     const isUrl = urlOrPath.startsWith("http://") || urlOrPath.startsWith("https://");
@@ -87,7 +90,8 @@ export async function fetchDocumentation(urlOrPath: string): Promise<Documentati
       }
     }
 
-    log(`Fetched ${content.length} characters from documentation`);
+    // Log removed to avoid interfering with MCP JSON protocol
+    // log(`Fetched ${content.length} characters from documentation`);
 
     return {
       url: urlOrPath,
@@ -146,10 +150,13 @@ function extractTextFromHTML(html: string): string {
 /**
  * Crawl all documentation pages from a base URL
  * Follows links and fetches all pages under the docs path
+ * Checks cache for individual pages before fetching
  */
-export async function crawlDocumentation(baseUrl: string, maxPages = 100): Promise<DocumentationContent[]> {
-  log(`Crawling documentation from: ${baseUrl} (max ${maxPages} pages)`);
+export async function crawlDocumentation(baseUrl: string, maxPages = 100, useCache = true): Promise<DocumentationContent[]> {
+  // Log removed to avoid interfering with MCP JSON protocol
+  // log(`Crawling documentation from: ${baseUrl} (max ${maxPages} pages)`);
   
+  const storage = useCache ? getStorage() : null;
   const visited = new Set<string>();
   const toVisit: string[] = [baseUrl];
   const results: DocumentationContent[] = [];
@@ -163,8 +170,42 @@ export async function crawlDocumentation(baseUrl: string, maxPages = 100): Promi
     
     visited.add(currentUrl);
     
+    // Check cache first
+    if (storage) {
+      const cached = await storage.getDocumentation(currentUrl);
+      if (cached) {
+        results.push(cached);
+        // Still extract links from cached content to discover new pages
+        // For now, we'll need to fetch the HTML to extract links, but we can optimize this later
+        // by storing links in the cache or parsing from cached content
+        try {
+          const response = await fetch(currentUrl, {
+            headers: {
+              "User-Agent": "Discord-MCP-Bot/1.0",
+            },
+          });
+          if (response.ok) {
+            const rawHtml = await response.text();
+            const links = extractLinksFromHTML(rawHtml, baseUrl);
+            for (const link of links) {
+              const normalizedLink = link.split("#")[0].replace(/\/$/, "");
+              if (normalizedLink.startsWith(baseUrl.replace(/\/$/, "")) && 
+                  !visited.has(normalizedLink) && 
+                  !toVisit.includes(normalizedLink)) {
+                toVisit.push(normalizedLink);
+              }
+            }
+          }
+        } catch (error) {
+          // If we can't fetch for link extraction, continue with cached content
+        }
+        continue;
+      }
+    }
+    
     try {
-      log(`Fetching: ${currentUrl} (${visited.size}/${maxPages})`);
+      // Log removed to avoid interfering with MCP JSON protocol
+      // log(`Fetching: ${currentUrl} (${visited.size}/${maxPages})`);
       
       // Fetch raw HTML first to extract links
       const response = await fetch(currentUrl, {
@@ -208,22 +249,34 @@ export async function crawlDocumentation(baseUrl: string, maxPages = 100): Promi
         content = extractTextFromHTML(rawHtml);
       }
       
-      results.push({
+      const doc: DocumentationContent = {
         url: currentUrl,
         title,
         content: content.trim(),
         fetched_at: new Date().toISOString(),
-      });
+      };
+      
+      results.push(doc);
+      
+      // Cache immediately
+      if (storage) {
+        try {
+          await storage.saveDocumentation(doc);
+        } catch (error) {
+          // Continue even if caching fails
+        }
+      }
       
     } catch (error) {
       logError(`Failed to fetch ${currentUrl}:`, error);
     }
     
-    // Small delay to be respectful
+    // Small delay to be respectful (only for actual fetches, not cached)
     await new Promise(resolve => setTimeout(resolve, 300));
   }
   
-  log(`Crawled ${results.length} documentation pages`);
+  // Log removed to avoid interfering with MCP JSON protocol
+  // log(`Crawled ${results.length} documentation pages`);
   return results;
 }
 
@@ -264,26 +317,63 @@ function extractLinksFromHTML(html: string, baseUrl: string): string[] {
 /**
  * Fetch multiple documentation URLs or crawl docs directories
  * If a URL ends with /docs, it will crawl all pages under it
+ * Uses cached documentation if available, otherwise fetches and caches
  */
-export async function fetchMultipleDocumentation(urls: string[], crawlDocs = true): Promise<DocumentationContent[]> {
+export async function fetchMultipleDocumentation(urls: string[], crawlDocs = true, useCache = true): Promise<DocumentationContent[]> {
+  const storage = getStorage();
   const results: DocumentationContent[] = [];
+  const urlsToFetch: string[] = [];
   
-  for (const urlOrPath of urls) {
+  // Check cache first if enabled
+  if (useCache) {
+    const cachedDocs = await storage.getDocumentationMultiple(urls);
+    const cachedUrls = new Set(cachedDocs.map(d => d.url));
+    
+    // Add cached docs to results
+    results.push(...cachedDocs);
+    
+    // Find URLs that need to be fetched
+    for (const urlOrPath of urls) {
+      if (!cachedUrls.has(urlOrPath)) {
+        urlsToFetch.push(urlOrPath);
+      }
+    }
+  } else {
+    urlsToFetch.push(...urls);
+  }
+  
+  // Fetch missing documentation
+  const fetchedDocs: DocumentationContent[] = [];
+  for (const urlOrPath of urlsToFetch) {
     try {
       // Check if it's a docs directory URL that should be crawled
       if (crawlDocs && urlOrPath.startsWith("http") && (urlOrPath.endsWith("/docs") || urlOrPath.includes("/docs/"))) {
-        log(`Crawling docs directory: ${urlOrPath}`);
+        // Log removed to avoid interfering with MCP JSON protocol
+        // log(`Crawling docs directory: ${urlOrPath}`);
         const crawledDocs = await crawlDocumentation(urlOrPath);
-        results.push(...crawledDocs);
+        fetchedDocs.push(...crawledDocs);
       } else {
         // Single page fetch
         const doc = await fetchDocumentation(urlOrPath);
-        results.push(doc);
+        fetchedDocs.push(doc);
       }
     } catch (error) {
       logError(`Failed to fetch ${urlOrPath}:`, error);
     }
   }
+  
+  // Cache fetched documentation
+  if (fetchedDocs.length > 0 && useCache) {
+    try {
+      await storage.saveDocumentationMultiple(fetchedDocs);
+    } catch (error) {
+      logError("Failed to cache documentation:", error);
+      // Continue even if caching fails
+    }
+  }
+  
+  // Combine cached and fetched results
+  results.push(...fetchedDocs);
   
   return results;
 }

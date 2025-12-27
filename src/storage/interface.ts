@@ -3,6 +3,7 @@
  */
 
 import type { ClassifiedThread, Group, UngroupedThread, StorageStats } from "./types.js";
+import type { DocumentationContent } from "../export/documentationFetcher.js";
 
 export interface IStorage {
   // Channel operations
@@ -25,6 +26,19 @@ export interface IStorage {
   saveUngroupedThread(thread: UngroupedThread): Promise<void>;
   saveUngroupedThreads(threads: UngroupedThread[]): Promise<void>;
   getUngroupedThreads(channelId: string): Promise<UngroupedThread[]>;
+  
+  // Documentation cache operations
+  saveDocumentation(doc: DocumentationContent): Promise<void>;
+  saveDocumentationMultiple(docs: DocumentationContent[]): Promise<void>;
+  getDocumentation(url: string): Promise<DocumentationContent | null>;
+  getDocumentationMultiple(urls: string[]): Promise<DocumentationContent[]>;
+  getAllCachedDocumentation(): Promise<DocumentationContent[]>;
+  clearDocumentationCache(): Promise<void>;
+  
+  // Feature cache operations
+  saveFeatures(urls: string[], features: any[], docCount: number): Promise<void>;
+  getFeatures(urls: string[]): Promise<{ features: any[]; extracted_at: string; documentation_count: number } | null>;
+  clearFeaturesCache(): Promise<void>;
   
   // Stats
   getStats(channelId: string): Promise<StorageStats>;

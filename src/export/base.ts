@@ -63,8 +63,36 @@ export abstract class BasePMTool implements IPMTool {
 
     for (const issue of issues) {
       try {
-        // Check if issue already exists
-        const existing = await this.findIssueBySourceId(issue.source_id);
+        // Check if issue already has a stored ID (from previous export)
+        // If it does, verify it exists before using it
+        let existing: { id: string; url: string } | null = null;
+        
+        if (issue.linear_issue_id) {
+          // Verify the stored ID exists in Linear
+          const linearTool = this as any;
+          if (typeof linearTool.getIssue === "function") {
+            const verifiedIssue = await linearTool.getIssue(issue.linear_issue_id);
+            if (verifiedIssue) {
+              existing = {
+                id: verifiedIssue.id,
+                url: verifiedIssue.url,
+              };
+            }
+          }
+        }
+        
+        // If no stored ID or verification failed, try finding by source ID
+        // Pass title to enable title-based search fallback for duplicate detection
+        if (!existing) {
+          const linearTool = this as any;
+          if (typeof linearTool.findIssueBySourceId === "function" && linearTool.findIssueBySourceId.length > 1) {
+            // Linear implementation accepts title parameter
+            existing = await linearTool.findIssueBySourceId(issue.source_id, issue.title);
+          } else {
+            // Other implementations only accept sourceId
+            existing = await this.findIssueBySourceId(issue.source_id);
+          }
+        }
         
         if (existing) {
           // Update existing issue
@@ -73,6 +101,8 @@ export abstract class BasePMTool implements IPMTool {
           if (existing.url) {
             result.issue_urls?.push(existing.url);
           }
+          // Ensure the issue object has the ID stored
+          issue.linear_issue_id = existing.id;
         } else {
           // Create new issue
           const created = await this.createIssue(issue);

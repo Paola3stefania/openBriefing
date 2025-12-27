@@ -3,6 +3,9 @@ dist/
 .env
 *.log
 
+# IDE files
+.idea/
+
 # Cache and data files - ignore all JSON files in these directories
 cache/**/*.json
 results/**/*.json

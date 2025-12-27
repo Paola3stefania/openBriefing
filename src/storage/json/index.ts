@@ -5,6 +5,7 @@
 
 import type { IStorage } from "../interface.js";
 import type { ClassifiedThread, Group, UngroupedThread, StorageStats } from "../types.js";
+import type { DocumentationContent } from "../../export/documentationFetcher.js";
 import { readFile, writeFile, mkdir, readdir } from "fs/promises";
 import { existsSync } from "fs";
 import { join } from "path";
@@ -525,6 +526,161 @@ export class JsonStorage implements IStorage {
       return true;
     } catch {
       return false;
+    }
+  }
+
+  async saveDocumentation(doc: DocumentationContent): Promise<void> {
+    await this.saveDocumentationMultiple([doc]);
+  }
+
+  async saveDocumentationMultiple(docs: DocumentationContent[]): Promise<void> {
+    if (docs.length === 0) return;
+
+    await mkdir(this.resultsDir, { recursive: true });
+
+    const cacheFile = join(this.resultsDir, "documentation-cache.json");
+    
+    // Load existing cache
+    let cache: Record<string, DocumentationContent> = {};
+    if (existsSync(cacheFile)) {
+      try {
+        const content = await readFile(cacheFile, "utf-8");
+        cache = JSON.parse(content);
+      } catch {
+        // If file is corrupted, start fresh
+        cache = {};
+      }
+    }
+
+    // Update cache with new docs
+    for (const doc of docs) {
+      cache[doc.url] = doc;
+    }
+
+    // Save back to file
+    await writeFile(cacheFile, JSON.stringify(cache, null, 2), "utf-8");
+  }
+
+  async getDocumentation(url: string): Promise<DocumentationContent | null> {
+    const cacheFile = join(this.resultsDir, "documentation-cache.json");
+    
+    if (!existsSync(cacheFile)) {
+      return null;
+    }
+
+    try {
+      const content = await readFile(cacheFile, "utf-8");
+      const cache: Record<string, DocumentationContent> = JSON.parse(content);
+      return cache[url] || null;
+    } catch {
+      return null;
+    }
+  }
+
+  async getDocumentationMultiple(urls: string[]): Promise<DocumentationContent[]> {
+    if (urls.length === 0) return [];
+
+    const cacheFile = join(this.resultsDir, "documentation-cache.json");
+    
+    if (!existsSync(cacheFile)) {
+      return [];
+    }
+
+    try {
+      const content = await readFile(cacheFile, "utf-8");
+      const cache: Record<string, DocumentationContent> = JSON.parse(content);
+      
+      const results: DocumentationContent[] = [];
+      for (const url of urls) {
+        if (cache[url]) {
+          results.push(cache[url]);
+        }
+      }
+      return results;
+    } catch {
+      return [];
+    }
+  }
+
+  async getAllCachedDocumentation(): Promise<DocumentationContent[]> {
+    const cacheFile = join(this.resultsDir, "documentation-cache.json");
+    
+    if (!existsSync(cacheFile)) {
+      return [];
+    }
+
+    try {
+      const content = await readFile(cacheFile, "utf-8");
+      const cache: Record<string, DocumentationContent> = JSON.parse(content);
+      return Object.values(cache);
+    } catch {
+      return [];
+    }
+  }
+
+  async clearDocumentationCache(): Promise<void> {
+    const cacheFile = join(this.resultsDir, "documentation-cache.json");
+    if (existsSync(cacheFile)) {
+      await writeFile(cacheFile, JSON.stringify({}, null, 2), "utf-8");
+    }
+  }
+
+  async saveFeatures(urls: string[], features: any[], docCount: number): Promise<void> {
+    const cacheFile = join(this.resultsDir, "features-cache.json");
+    await mkdir(this.resultsDir, { recursive: true });
+    
+    // Sort URLs for consistent comparison
+    const sortedUrls = [...urls].sort();
+    
+    const cached = {
+      urls: sortedUrls,
+      features,
+      extracted_at: new Date().toISOString(),
+      documentation_count: docCount,
+    };
+    
+    await writeFile(cacheFile, JSON.stringify(cached, null, 2), "utf-8");
+  }
+
+  async getFeatures(urls: string[]): Promise<{ features: any[]; extracted_at: string; documentation_count: number } | null> {
+    const cacheFile = join(this.resultsDir, "features-cache.json");
+    
+    if (!existsSync(cacheFile)) {
+      return null;
+    }
+
+    try {
+      const content = await readFile(cacheFile, "utf-8");
+      const cached: { urls: string[]; features: any[]; extracted_at: string; documentation_count: number } = JSON.parse(content);
+      
+      // Check if URLs match (order doesn't matter)
+      const cachedUrls = new Set(cached.urls.map(u => u.toLowerCase().trim()));
+      const requestedUrls = new Set(urls.map(u => u.toLowerCase().trim()));
+      
+      if (cachedUrls.size !== requestedUrls.size) {
+        return null;
+      }
+      
+      for (const url of requestedUrls) {
+        if (!cachedUrls.has(url)) {
+          return null;
+        }
+      }
+      
+      return {
+        features: cached.features,
+        extracted_at: cached.extracted_at,
+        documentation_count: cached.documentation_count,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  async clearFeaturesCache(): Promise<void> {
+    const cacheFile = join(this.resultsDir, "features-cache.json");
+    if (existsSync(cacheFile)) {
+      await writeFile(cacheFile, JSON.stringify({ urls: [], features: [], extracted_at: "", documentation_count: 0 }, null, 2), "utf-8");
     }
   }
 }

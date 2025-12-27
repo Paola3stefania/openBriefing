@@ -405,8 +405,7 @@ const tools: Tool[] = [
         },
         max_groups: {
           type: "number",
-          description: "Maximum number of groups to return (default 50)",
-          default: 50,
+          description: "Maximum number of groups to return (optional, no limit if not specified)",
         },
         re_classify: {
           type: "boolean",
@@ -438,13 +437,64 @@ const tools: Tool[] = [
         },
         min_similarity: {
           type: "number",
-          description: "Minimum similarity threshold for feature matching (0.0-1.0 scale, cosine similarity, default 0.5). Only groups with similarity ≥0.5 are mapped to a feature. Recommended: 0.5 (balanced), 0.7 (high confidence), 0.3 (more inclusive). See README for tier details.",
+          description: "Minimum similarity threshold for feature matching (0.0-1.0 scale, cosine similarity, default 0.6). Only groups with similarity ≥0.6 are mapped to a feature. Recommended: 0.6 (balanced), 0.7 (high confidence), 0.3 (more inclusive). See README for tier details.",
           minimum: 0,
           maximum: 1,
-          default: 0.5,
+          default: 0.6,
         },
       },
       required: [],
+    },
+  },
+  {
+    name: "classify_linear_issues",
+    description: "Fetch all issues from Linear UNMute team and classify them with existing projects (features) or create new projects if needed. Requires PM_TOOL_API_KEY and PM_TOOL_TEAM_ID.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        team_name: {
+          type: "string",
+          description: "Linear team name to fetch issues from (default: 'UNMute')",
+          default: "UNMute",
+        },
+        limit: {
+          type: "number",
+          description: "Maximum number of issues to process (default: 250)",
+          default: 250,
+        },
+        create_projects: {
+          type: "boolean",
+          description: "If true, create new projects for issues that don't match existing projects (default: true)",
+          default: true,
+        },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "manage_documentation_cache",
+    description: "Manage documentation cache - view cached docs, pre-fetch and cache documentation, extract features from cache, or clear cache. This avoids re-fetching documentation every time features are needed.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: {
+          type: "string",
+          enum: ["list", "fetch", "extract_features", "clear"],
+          description: "Action to perform: 'list' (view cached docs), 'fetch' (pre-fetch and cache), 'extract_features' (extract features from cached docs), 'clear' (clear cache)",
+          default: "list",
+        },
+        urls: {
+          type: "array",
+          items: { type: "string" },
+          description: "Documentation URLs to fetch (required for 'fetch' action). Can be URLs or local file paths.",
+        },
+        use_cache: {
+          type: "boolean",
+          description: "Whether to use cache when fetching (default: true). Set to false to force re-fetch.",
+          default: true,
+        },
+      },
+      required: ["action"],
     },
   },
 ];
@@ -2110,7 +2160,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const { 
         channel_id, 
         min_similarity = 60, 
-        max_groups = 50, 
+        max_groups, 
         re_classify = false,
         semantic_only = false,
       } = args as {
@@ -2397,26 +2447,22 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           // Issue-based grouping: Group threads by matched GitHub issues
           console.error(`[Grouping] Grouping by matched GitHub issues...`);
           
-          // Extract features from documentation for Linear project mapping
+          // Get features from cache or extract from documentation for Linear project mapping
           let features: Feature[] = [];
           const docUrls = config.pmIntegration?.documentation_urls;
           if (docUrls && docUrls.length > 0) {
             try {
-              const { fetchMultipleDocumentation } = await import("../export/documentationFetcher.js");
-              const { extractFeaturesFromDocumentation } = await import("../export/featureExtractor.js");
-              console.error(`[Grouping] Extracting features from documentation for Linear project mapping...`);
-              const docs = await fetchMultipleDocumentation(docUrls);
-              if (docs.length > 0) {
-                const extractedFeatures = await extractFeaturesFromDocumentation(docs);
-                features = extractedFeatures.map(f => ({
-                  id: f.id,
-                  name: f.name,
-                  description: f.description,
-                }));
-                console.error(`[Grouping] Extracted ${features.length} features from documentation`);
-              }
+              const { getFeaturesFromCacheOrExtract } = await import("../export/featureCache.js");
+              console.error(`[Grouping] Getting features (from cache or extracting)...`);
+              const extractedFeatures = await getFeaturesFromCacheOrExtract(docUrls);
+              features = extractedFeatures.map(f => ({
+                id: f.id,
+                name: f.name,
+                description: f.description,
+              }));
+              console.error(`[Grouping] Using ${features.length} features`);
             } catch (error) {
-              console.error(`[Grouping] Failed to extract features: ${error instanceof Error ? error.message : String(error)}. Continuing without feature mapping.`);
+              console.error(`[Grouping] Failed to get features: ${error instanceof Error ? error.message : String(error)}. Continuing without feature mapping.`);
             }
           }
           
@@ -2611,7 +2657,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           });
           
           // Apply maxGroups limit
-          if (max_groups > 0) {
+          if (max_groups && max_groups > 0) {
             finalGroups = finalGroups.slice(0, max_groups);
           }
           
@@ -2839,18 +2885,20 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             };
           }
           
-          // Extract features
+          // Get features from cache or extract
           let features: Feature[] = [];
           const docUrls = config.pmIntegration?.documentation_urls;
           if (docUrls && docUrls.length > 0) {
-            const docs = await fetchMultipleDocumentation(docUrls);
-            if (docs.length > 0) {
-              const extractedFeatures = await extractFeaturesFromDocumentation(docs);
+            try {
+              const { getFeaturesFromCacheOrExtract } = await import("../export/featureCache.js");
+              const extractedFeatures = await getFeaturesFromCacheOrExtract(docUrls);
               features = extractedFeatures.map(f => ({
                 id: f.id,
                 name: f.name,
                 description: f.description,
               }));
+            } catch (error) {
+              console.error(`[Grouping] Failed to get features: ${error instanceof Error ? error.message : String(error)}. Continuing without features.`);
             }
           }
           
@@ -3004,7 +3052,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const { 
           grouping_data_path,
           channel_id,
-          min_similarity = 0.5,
+          min_similarity = 0.6,
         } = args as {
           grouping_data_path?: string;
           channel_id?: string;
@@ -3038,7 +3086,8 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         // Load grouping data
-        console.error(`[Feature Matching] Loading grouping data from ${groupingPath}...`);
+        // Log removed to avoid interfering with MCP JSON protocol
+        // console.error(`[Feature Matching] Loading grouping data from ${groupingPath}...`);
         const groupingContent = await readFile(groupingPath, "utf-8");
         const groupingData = safeJsonParse<{
           timestamp: string;
@@ -3051,32 +3100,26 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           features?: Array<{ id: string; name: string }>;
         }>(groupingContent, groupingPath);
 
-        // Extract features from documentation
-        console.error(`[Feature Matching] Extracting features from documentation...`);
+        // Get features from cache or extract from documentation
         const docUrls = config.pmIntegration?.documentation_urls;
         if (!docUrls || docUrls.length === 0) {
           throw new Error("No documentation URLs configured. Set DOCUMENTATION_URLS in config.");
         }
 
-        const { fetchMultipleDocumentation } = await import("../export/documentationFetcher.js");
-        const { extractFeaturesFromDocumentation } = await import("../export/featureExtractor.js");
-        const docs = await fetchMultipleDocumentation(docUrls);
-        
-        if (docs.length === 0) {
-          throw new Error("Failed to fetch documentation");
-        }
-
-        const extractedFeatures = await extractFeaturesFromDocumentation(docs);
+        const { getFeaturesFromCacheOrExtract } = await import("../export/featureCache.js");
+        const extractedFeatures = await getFeaturesFromCacheOrExtract(docUrls);
         const features = extractedFeatures.map(f => ({
           id: f.id,
           name: f.name,
           description: f.description,
         }));
 
-        console.error(`[Feature Matching] Extracted ${features.length} features from documentation`);
+        // Log removed to avoid interfering with MCP JSON protocol
+        // console.error(`[Feature Matching] Extracted ${features.length} features from documentation`);
 
         // Map groups to features
-        console.error(`[Feature Matching] Mapping ${groupingData.groups.length} groups to features...`);
+        // Log removed to avoid interfering with MCP JSON protocol
+        // console.error(`[Feature Matching] Mapping ${groupingData.groups.length} groups to features...`);
         const { mapGroupsToFeatures } = await import("../export/featureMapper.js");
         const groupsWithFeatures = await mapGroupsToFeatures(groupingData.groups, features, min_similarity);
 
@@ -3101,7 +3144,8 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         // Save updated grouping file
         await writeFile(groupingPath, JSON.stringify(groupingData, null, 2), "utf-8");
-        console.error(`[Feature Matching] Updated grouping file with feature matches: ${groupingPath}`);
+        // Log removed to avoid interfering with MCP JSON protocol
+        // console.error(`[Feature Matching] Updated grouping file with feature matches: ${groupingPath}`);
 
         return {
           content: [
@@ -3125,6 +3169,365 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       } catch (error) {
         logError("Feature matching failed:", error);
         throw new Error(`Feature matching failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    case "classify_linear_issues": {
+      const { team_name = "UNMute", limit = 250, create_projects = true } = args as {
+        team_name?: string;
+        limit?: number;
+        create_projects?: boolean;
+      };
+
+      try {
+        const config = getConfig();
+        
+        // Check if PM integration is enabled and is Linear
+        if (!config.pmIntegration?.enabled || config.pmIntegration.pm_tool?.type !== "linear") {
+          throw new Error("Linear integration requires PM_TOOL_TYPE=linear and PM_TOOL_API_KEY to be set in environment variables.");
+        }
+
+        if (!config.pmIntegration.pm_tool?.api_key) {
+          throw new Error("Linear API key is required. Set PM_TOOL_API_KEY in environment variables.");
+        }
+
+        // Build PM tool configuration
+        const pmToolConfig: PMToolConfig = {
+          type: "linear",
+          api_key: config.pmIntegration.pm_tool.api_key,
+          api_url: config.pmIntegration.pm_tool.api_url,
+          team_id: config.pmIntegration.pm_tool.team_id,
+        };
+
+        // Create Linear integration instance
+        const { LinearIntegration } = await import("../export/linear/client.js");
+        const linearTool = new LinearIntegration(pmToolConfig);
+
+        // Find or get the team
+        let teamId = pmToolConfig.team_id;
+        if (!teamId) {
+          // Find team by name
+          const teams = await linearTool.listTeams();
+          const team = teams.find(t => t.name.toLowerCase() === team_name.toLowerCase() || t.key.toLowerCase() === team_name.toLowerCase());
+          if (!team) {
+            throw new Error(`Team "${team_name}" not found. Available teams: ${teams.map(t => t.name).join(", ")}`);
+          }
+          teamId = team.id;
+        }
+
+        // Fetch all issues from the team
+        console.error(`[Linear Classification] Fetching issues from team ${team_name} (${teamId})...`);
+        const issues = await linearTool.listTeamIssues(teamId, limit);
+        console.error(`[Linear Classification] Found ${issues.length} issues`);
+
+        // Get all existing projects
+        const allProjects = await linearTool.listProjects();
+        const projectNameMap = new Map<string, { id: string; name: string }>();
+        const projectIdMap = new Map<string, string>(); // project_id -> project_name
+        for (const project of allProjects) {
+          projectNameMap.set(project.name.toLowerCase().trim(), project);
+          projectIdMap.set(project.id, project.name);
+        }
+
+        // Classify issues
+        const results = {
+          total_issues: issues.length,
+          with_projects: 0,
+          without_projects: 0,
+          projects_created: 0,
+          projects_matched: 0,
+          issues_by_project: {} as Record<string, number>,
+          unclassified_issues: [] as Array<{ id: string; identifier: string; title: string }>,
+        };
+
+        // Get features from cache or extract if needed
+        let features: Array<{ id: string; name: string; description?: string }> = [];
+        if (create_projects && config.pmIntegration.documentation_urls && config.pmIntegration.documentation_urls.length > 0) {
+          try {
+            const { getFeaturesFromCacheOrExtract } = await import("../export/featureCache.js");
+            console.error(`[Linear Classification] Getting features (from cache or extracting)...`);
+            features = await getFeaturesFromCacheOrExtract(config.pmIntegration.documentation_urls);
+            console.error(`[Linear Classification] Using ${features.length} features`);
+          } catch (error) {
+            console.error(`[Linear Classification] Failed to get features:`, error);
+            // Continue without features
+          }
+        }
+
+        for (const issue of issues) {
+          if (issue.projectId && issue.projectName) {
+            // Issue already has a project
+            results.with_projects++;
+            const projectName = issue.projectName.toLowerCase().trim();
+            results.issues_by_project[issue.projectName] = (results.issues_by_project[issue.projectName] || 0) + 1;
+          } else {
+            // Issue doesn't have a project - try to classify it
+            results.without_projects++;
+            
+            if (create_projects) {
+              // Try to match with existing features or create a new project
+              let matchedProjectId: string | undefined;
+              
+              // Try to match with existing features using semantic similarity
+              if (features.length > 0 && process.env.OPENAI_API_KEY) {
+                try {
+                  const { createEmbedding } = await import("../core/classify/semantic.js");
+                  const issueText = `${issue.title} ${issue.description || ""}`.trim();
+                  const issueEmbedding = await createEmbedding(issueText, process.env.OPENAI_API_KEY);
+                  
+                  let bestMatch: { feature: typeof features[0]; similarity: number } | null = null;
+                  
+                  for (const feature of features) {
+                    const featureText = `${feature.name}: ${feature.description || ""}`.trim();
+                    const featureEmbedding = await createEmbedding(featureText, process.env.OPENAI_API_KEY);
+                    
+                    // Calculate cosine similarity
+                    let dotProduct = 0;
+                    let normA = 0;
+                    let normB = 0;
+                    for (let i = 0; i < issueEmbedding.length; i++) {
+                      dotProduct += issueEmbedding[i] * featureEmbedding[i];
+                      normA += issueEmbedding[i] * issueEmbedding[i];
+                      normB += featureEmbedding[i] * featureEmbedding[i];
+                    }
+                    const similarity = dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
+                    
+                    if (similarity > 0.6 && (!bestMatch || similarity > bestMatch.similarity)) {
+                      bestMatch = { feature, similarity };
+                    }
+                  }
+                  
+                  if (bestMatch) {
+                    // Create or get project for this feature
+                    matchedProjectId = await linearTool.createOrGetProject(
+                      bestMatch.feature.id,
+                      bestMatch.feature.name,
+                      bestMatch.feature.description
+                    );
+                    results.projects_matched++;
+                  }
+                } catch (error) {
+                  console.error(`[Linear Classification] Failed to match issue ${issue.identifier}:`, error);
+                }
+              }
+              
+              // If no match found, create a project based on issue title
+              if (!matchedProjectId) {
+                try {
+                  // Use issue title as project name (truncate if too long)
+                  const projectName = issue.title.length > 50 ? issue.title.substring(0, 47) + "..." : issue.title;
+                  const projectId = await linearTool.createOrGetProject(
+                    `issue-${issue.id}`,
+                    projectName,
+                    `Project created from issue: ${issue.identifier}`
+                  );
+                  matchedProjectId = projectId;
+                  results.projects_created++;
+                } catch (error) {
+                  console.error(`[Linear Classification] Failed to create project for issue ${issue.identifier}:`, error);
+                  results.unclassified_issues.push({
+                    id: issue.id,
+                    identifier: issue.identifier,
+                    title: issue.title,
+                  });
+                }
+              }
+              
+              // Link issue to project if we found/created one
+              if (matchedProjectId) {
+                try {
+                  await linearTool.updateIssue(issue.id, { project_id: matchedProjectId });
+                  const projectName = projectIdMap.get(matchedProjectId) || "Unknown";
+                  results.issues_by_project[projectName] = (results.issues_by_project[projectName] || 0) + 1;
+                } catch (error) {
+                  console.error(`[Linear Classification] Failed to link issue ${issue.identifier} to project:`, error);
+                }
+              }
+            } else {
+              results.unclassified_issues.push({
+                id: issue.id,
+                identifier: issue.identifier,
+                title: issue.title,
+              });
+            }
+          }
+        }
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                success: true,
+                message: `Classified ${issues.length} Linear issues`,
+                results,
+              }, null, 2),
+            },
+          ],
+        };
+      } catch (error) {
+        logError("Linear issue classification failed:", error);
+        throw new Error(`Linear issue classification failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    case "manage_documentation_cache": {
+      const { action = "list", urls, use_cache = true } = args as {
+        action?: "list" | "fetch" | "extract_features" | "clear";
+        urls?: string[];
+        use_cache?: boolean;
+      };
+
+      try {
+        const { getStorage } = await import("../storage/factory.js");
+        const storage = getStorage();
+        const config = getConfig();
+
+        switch (action) {
+          case "list": {
+            // List all cached documentation
+            const cachedDocs = await storage.getAllCachedDocumentation();
+            
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify({
+                    success: true,
+                    cached_count: cachedDocs.length,
+                    cached_docs: cachedDocs.map(doc => ({
+                      url: doc.url,
+                      title: doc.title,
+                      content_length: doc.content.length,
+                      fetched_at: doc.fetched_at,
+                    })),
+                  }, null, 2),
+                },
+              ],
+            };
+          }
+
+          case "fetch": {
+            // Pre-fetch and cache documentation
+            if (!urls || urls.length === 0) {
+              // Use config URLs if not provided
+              const configUrls = config.pmIntegration?.documentation_urls;
+              if (!configUrls || configUrls.length === 0) {
+                throw new Error("No URLs provided. Set 'urls' parameter or DOCUMENTATION_URLS in environment variables.");
+              }
+              const docs = await fetchMultipleDocumentation(configUrls, true, use_cache);
+              
+              return {
+                content: [
+                  {
+                    type: "text",
+                    text: JSON.stringify({
+                      success: true,
+                      message: `Fetched and cached ${docs.length} documentation pages`,
+                      cached_docs: docs.map(doc => ({
+                        url: doc.url,
+                        title: doc.title,
+                        content_length: doc.content.length,
+                        fetched_at: doc.fetched_at,
+                      })),
+                    }, null, 2),
+                  },
+                ],
+              };
+            } else {
+              const docs = await fetchMultipleDocumentation(urls, true, use_cache);
+              
+              return {
+                content: [
+                  {
+                    type: "text",
+                    text: JSON.stringify({
+                      success: true,
+                      message: `Fetched and cached ${docs.length} documentation pages`,
+                      cached_docs: docs.map(doc => ({
+                        url: doc.url,
+                        title: doc.title,
+                        content_length: doc.content.length,
+                        fetched_at: doc.fetched_at,
+                      })),
+                    }, null, 2),
+                  },
+                ],
+              };
+            }
+          }
+
+          case "extract_features": {
+            // Extract features from cached documentation (or use feature cache if available)
+            const docUrls = config.pmIntegration?.documentation_urls || urls || [];
+            
+            if (docUrls.length === 0) {
+              throw new Error("No documentation URLs configured. Set DOCUMENTATION_URLS in environment variables or provide 'urls' parameter.");
+            }
+
+            if (!process.env.OPENAI_API_KEY) {
+              throw new Error("OPENAI_API_KEY is required for feature extraction.");
+            }
+
+            const { getFeaturesFromCacheOrExtract, getCachedFeaturesInfo } = await import("../export/featureCache.js");
+            
+            // Check if features are already cached
+            const cacheInfo = await getCachedFeaturesInfo(docUrls);
+            if (cacheInfo) {
+              console.error(`[Documentation Cache] Features already cached (${cacheInfo.feature_count} features from ${cacheInfo.documentation_count} docs, extracted at ${cacheInfo.extracted_at})`);
+            }
+            
+            // Get features (from cache or extract)
+            console.error(`[Documentation Cache] Getting features (from cache or extracting)...`);
+            const features = await getFeaturesFromCacheOrExtract(docUrls);
+
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify({
+                    success: true,
+                    message: `Got ${features.length} features (from cache or extracted)`,
+                    cached: !!cacheInfo,
+                    features: features.map(f => ({
+                      id: f.id,
+                      name: f.name,
+                      description: f.description,
+                      category: f.category,
+                      priority: f.priority,
+                    })),
+                    cache_info: cacheInfo,
+                  }, null, 2),
+                },
+              ],
+            };
+          }
+
+          case "clear": {
+            // Clear documentation cache and feature cache
+            await storage.clearDocumentationCache();
+            const { clearFeaturesCache } = await import("../export/featureCache.js");
+            await clearFeaturesCache();
+            
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify({
+                    success: true,
+                    message: "Documentation cache and feature cache cleared",
+                  }, null, 2),
+                },
+              ],
+            };
+          }
+
+          default:
+            throw new Error(`Unknown action: ${action}`);
+        }
+      } catch (error) {
+        logError("Documentation cache management failed:", error);
+        throw new Error(`Documentation cache management failed: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
 

@@ -1,13 +1,14 @@
 /**
  * Shared embedding cache for semantic operations
  * Used by both classification and grouping
- * Persists embeddings to disk to avoid redundant API calls
+ * Persists embeddings to database (if available) or disk to avoid redundant API calls
  */
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import { join } from "path";
 import { createHash } from "crypto";
 import { getConfig } from "../../config/index.js";
+import { query, checkConnection } from "../db/client.js";
 
 // Embedding vector type (OpenAI returns 1536-dimensional vectors)
 export type Embedding = number[];
@@ -38,6 +39,26 @@ function getEmbeddingModel(): string {
 
 // In-memory cache for fast access during runtime
 const memoryCache: Map<string, Embedding> = new Map();
+
+// Cache whether database is available (lazy initialization)
+let dbAvailable: boolean | null = null;
+
+/**
+ * Check if database is available for storing embeddings
+ */
+async function isDatabaseAvailable(): Promise<boolean> {
+  if (dbAvailable !== null) {
+    return dbAvailable;
+  }
+  
+  try {
+    dbAvailable = await checkConnection();
+    return dbAvailable;
+  } catch {
+    dbAvailable = false;
+    return false;
+  }
+}
 
 /**
  * Get the path to an embeddings cache file
@@ -109,18 +130,52 @@ function saveCache(cacheType: "issues" | "discord", cache: EmbeddingCacheFile): 
  * Get cached embedding for an item
  * Returns undefined if not cached or content changed
  */
-export function getCachedEmbedding(
+export async function getCachedEmbedding(
   cacheType: "issues" | "discord",
   id: string,
   contentHash: string
-): Embedding | undefined {
+): Promise<Embedding | undefined> {
   // Check memory cache first
   const memKey = `${cacheType}:${id}`;
   if (memoryCache.has(memKey)) {
     return memoryCache.get(memKey);
   }
   
-  // Check disk cache
+  // For issue embeddings, try database first if available
+  if (cacheType === "issues" && await isDatabaseAvailable()) {
+    try {
+      const issueNumber = parseInt(id, 10);
+      if (!isNaN(issueNumber)) {
+        const currentModel = getEmbeddingModel();
+        const result = await query<{
+          embedding: number[];
+          content_hash: string;
+          model: string;
+        }>(
+          `SELECT embedding, content_hash, model 
+           FROM issue_embeddings 
+           WHERE issue_number = $1 AND model = $2`,
+          [issueNumber, currentModel]
+        );
+        
+        if (result.rows.length > 0) {
+          const row = result.rows[0];
+          if (row.content_hash === contentHash) {
+            // Content matches, use cached embedding
+            memoryCache.set(memKey, row.embedding);
+            return row.embedding;
+          }
+          // Content hash mismatch means issue changed, return undefined to re-embed
+          return undefined;
+        }
+      }
+    } catch (error) {
+      // Database error, fall back to JSON cache
+      console.error(`[EmbeddingCache] Database error, falling back to JSON:`, error);
+    }
+  }
+  
+  // Fall back to disk cache (or for discord embeddings)
   const cache = loadCache(cacheType);
   const entry = cache.entries[id];
   
@@ -136,17 +191,42 @@ export function getCachedEmbedding(
 /**
  * Save embedding to cache
  */
-export function setCachedEmbedding(
+export async function setCachedEmbedding(
   cacheType: "issues" | "discord",
   id: string,
   contentHash: string,
   embedding: Embedding
-): void {
+): Promise<void> {
   // Save to memory cache
   const memKey = `${cacheType}:${id}`;
   memoryCache.set(memKey, embedding);
   
-  // Save to disk cache
+  // For issue embeddings, save to database first if available
+  if (cacheType === "issues" && await isDatabaseAvailable()) {
+    try {
+      const issueNumber = parseInt(id, 10);
+      if (!isNaN(issueNumber)) {
+        const currentModel = getEmbeddingModel();
+        await query(
+          `INSERT INTO issue_embeddings (issue_number, embedding, content_hash, model, updated_at)
+           VALUES ($1, $2::jsonb, $3, $4, NOW())
+           ON CONFLICT (issue_number) 
+           DO UPDATE SET 
+             embedding = $2::jsonb,
+             content_hash = $3,
+             model = $4,
+             updated_at = NOW()`,
+          [issueNumber, JSON.stringify(embedding) as any, contentHash, currentModel]
+        );
+        return; // Successfully saved to database, skip JSON cache
+      }
+    } catch (error) {
+      // Database error, fall back to JSON cache
+      console.error(`[EmbeddingCache] Database save error, falling back to JSON:`, error);
+    }
+  }
+  
+  // Fall back to disk cache (or for discord embeddings)
   const cache = loadCache(cacheType);
   cache.entries[id] = {
     embedding,
@@ -159,10 +239,51 @@ export function setCachedEmbedding(
 /**
  * Batch save embeddings (more efficient for multiple items)
  */
-export function batchSetCachedEmbeddings(
+export async function batchSetCachedEmbeddings(
   cacheType: "issues" | "discord",
   items: Array<{ id: string; contentHash: string; embedding: Embedding }>
-): void {
+): Promise<void> {
+  // For issue embeddings, save to database first if available
+  if (cacheType === "issues" && await isDatabaseAvailable()) {
+    try {
+      const currentModel = getEmbeddingModel();
+      // Use a transaction for batch insert
+      const values: Array<[number, string, string]> = [];
+      for (const item of items) {
+        const issueNumber = parseInt(item.id, 10);
+        if (!isNaN(issueNumber)) {
+          values.push([issueNumber, JSON.stringify(item.embedding), item.contentHash]);
+          // Save to memory cache
+          const memKey = `${cacheType}:${item.id}`;
+          memoryCache.set(memKey, item.embedding);
+        }
+      }
+      
+      if (values.length > 0) {
+        // Batch insert using individual INSERT statements
+        // We do them in a loop - could be optimized with a transaction wrapper, but this is simpler
+        for (const [issueNumber, embeddingJson, contentHash] of values) {
+          await query(
+            `INSERT INTO issue_embeddings (issue_number, embedding, content_hash, model, updated_at)
+             VALUES ($1, $2::jsonb, $3, $4, NOW())
+             ON CONFLICT (issue_number)
+             DO UPDATE SET
+               embedding = EXCLUDED.embedding,
+               content_hash = EXCLUDED.content_hash,
+               model = EXCLUDED.model,
+               updated_at = EXCLUDED.updated_at`,
+            [issueNumber, embeddingJson as any, contentHash, currentModel]
+          );
+        }
+        return; // Successfully saved to database, skip JSON cache
+      }
+    } catch (error) {
+      // Database error, fall back to JSON cache
+      console.error(`[EmbeddingCache] Database batch save error, falling back to JSON:`, error);
+    }
+  }
+  
+  // Fall back to disk cache (or for discord embeddings)
   const cache = loadCache(cacheType);
   
   for (const item of items) {
@@ -185,9 +306,40 @@ export function batchSetCachedEmbeddings(
  * Get all cached embeddings for a cache type
  * Useful for grouping operations
  */
-export function getAllCachedEmbeddings(
+export async function getAllCachedEmbeddings(
   cacheType: "issues" | "discord"
-): Map<string, Embedding> {
+): Promise<Map<string, Embedding>> {
+  // For issue embeddings, load from database first if available
+  if (cacheType === "issues" && await isDatabaseAvailable()) {
+    try {
+      const currentModel = getEmbeddingModel();
+      const result = await query<{
+        issue_number: number;
+        embedding: number[];
+      }>(
+        `SELECT issue_number, embedding 
+         FROM issue_embeddings 
+         WHERE model = $1`,
+        [currentModel]
+      );
+      
+      const embeddingsMap = new Map<string, Embedding>();
+      for (const row of result.rows) {
+        const id = row.issue_number.toString();
+        embeddingsMap.set(id, row.embedding);
+        // Also populate memory cache
+        const memKey = `${cacheType}:${id}`;
+        memoryCache.set(memKey, row.embedding);
+      }
+      
+      return embeddingsMap;
+    } catch (error) {
+      // Database error, fall back to JSON cache
+      console.error(`[EmbeddingCache] Database load error, falling back to JSON:`, error);
+    }
+  }
+  
+  // Fall back to disk cache (or for discord embeddings)
   const cache = loadCache(cacheType);
   const result = new Map<string, Embedding>();
   
@@ -218,7 +370,21 @@ export function getCacheStats(cacheType: "issues" | "discord"): {
 /**
  * Clear cache (useful for testing or reset)
  */
-export function clearCache(cacheType: "issues" | "discord"): void {
+export async function clearCache(cacheType: "issues" | "discord"): Promise<void> {
+  // For issue embeddings, clear from database if available
+  if (cacheType === "issues" && await isDatabaseAvailable()) {
+    try {
+      const currentModel = getEmbeddingModel();
+      await query(
+        `DELETE FROM issue_embeddings WHERE model = $1`,
+        [currentModel]
+      );
+    } catch (error) {
+      console.error(`[EmbeddingCache] Database clear error:`, error);
+    }
+  }
+  
+  // Also clear JSON cache
   const cache: EmbeddingCacheFile = {
     version: CACHE_VERSION,
     model: getEmbeddingModel(),

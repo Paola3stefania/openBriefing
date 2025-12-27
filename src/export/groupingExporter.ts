@@ -66,6 +66,125 @@ interface GroupingData {
 }
 
 /**
+ * Generate a proper title for a group using LLM
+ * Creates concise, descriptive titles following PR naming conventions
+ */
+async function generateGroupTitleWithLLM(group: GroupingGroup): Promise<string> {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    // Fallback to non-LLM title if API key not available
+    return generateFallbackTitle(group);
+  }
+
+  // Collect content from GitHub issues and threads
+  const contentParts: string[] = [];
+  
+  if (group.github_issue) {
+    contentParts.push(`GitHub Issue #${group.github_issue.number}: ${group.github_issue.title}`);
+  }
+  
+  if (group.threads && group.threads.length > 0) {
+    const threadInfo = group.threads
+      .map(t => t.thread_name || `Thread ${t.thread_id}`)
+      .slice(0, 5) // Limit to first 5 threads to avoid token limits
+      .join(", ");
+    contentParts.push(`Discord Threads: ${threadInfo}`);
+  }
+
+  if (contentParts.length === 0) {
+    return generateFallbackTitle(group);
+  }
+
+  const contentToAnalyze = contentParts.join("\n\n");
+
+  try {
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [
+          {
+            role: "system",
+            content: `You are a technical writer creating concise issue titles. Generate a single, clear title (max 100 characters) that summarizes the problem or feature request.
+
+Follow these guidelines:
+- Be specific and actionable
+- Use present tense ("Fix bug" not "Fixed bug")
+- If it's a bug fix, start with "fix:"
+- If it's a feature, start with "feat:"
+- If it's documentation, start with "docs:"
+- Keep it under 100 characters
+- Don't include issue numbers or IDs
+- Focus on the core problem or request
+
+Return ONLY the title text, nothing else.`
+          },
+          {
+            role: "user",
+            content: `Generate a concise title for this group:\n\n${contentToAnalyze}`
+          }
+        ],
+        temperature: 0.3,
+        max_tokens: 150,
+      }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      logError(`OpenAI API error for title generation: ${response.status} ${errorText}`);
+      return generateFallbackTitle(group);
+    }
+
+    const data = await response.json();
+    const title = data.choices[0]?.message?.content?.trim();
+    
+    if (title && title.length > 0 && title.length <= 150) {
+      // Truncate if slightly over limit
+      return title.length > 100 ? title.substring(0, 97) + "..." : title;
+    }
+    
+    return generateFallbackTitle(group);
+  } catch (error) {
+    logError("Error generating title with LLM:", error);
+    return generateFallbackTitle(group);
+  }
+}
+
+/**
+ * Generate a fallback title when LLM is unavailable or fails
+ */
+function generateFallbackTitle(group: GroupingGroup): string {
+  // Priority 1: GitHub issue title
+  if (group.github_issue?.title && group.github_issue.title.trim()) {
+    return group.github_issue.title.length > 100 
+      ? group.github_issue.title.substring(0, 97) + "..." 
+      : group.github_issue.title;
+  }
+  
+  // Priority 2: Thread titles
+  if (group.threads && group.threads.length > 0) {
+    const threadTitles = group.threads
+      .map(t => t.thread_name)
+      .filter((name): name is string => !!name && name.trim().length > 0);
+    
+    if (threadTitles.length > 0) {
+      const shortestTitle = threadTitles.reduce((shortest, current) => 
+        current.length < shortest.length ? current : shortest
+      );
+      return shortestTitle.length > 100 
+        ? shortestTitle.substring(0, 97) + "..." 
+        : shortestTitle;
+    }
+  }
+  
+  return "Untitled Group";
+}
+
+/**
  * Export grouping results directly to PM tool
  * Assumes groups are already matched to features (via match_groups_to_features)
  */
@@ -106,6 +225,12 @@ export async function exportGroupingToPMTool(
     if (pmToolConfig.type === "linear") {
       const linearTool = pmTool as any;
       if (typeof linearTool.createOrGetProject === "function") {
+        // Ensure "general" feature is always in the list
+        const hasGeneral = features.some(f => f.id === "general");
+        if (!hasGeneral) {
+          features.push({ id: "general", name: "General" });
+        }
+        
         for (const feature of features) {
           try {
             const projectId = await linearTool.createOrGetProject(
@@ -117,37 +242,32 @@ export async function exportGroupingToPMTool(
             log(`Created/verified project for feature: ${feature.name}`);
           } catch (error) {
             logError(`Failed to create project for ${feature.name}:`, error);
+            // Continue with other features even if one fails
           }
         }
       }
     }
 
-    // Ensure all groups have suggested_title before export
-    // Generate missing titles from thread titles or GitHub issue title
+    // Always generate proper titles using LLM for all groups
+    // This ensures consistent, well-formatted titles following PR naming conventions
+    log(`Generating titles for ${groupsWithFeatures.length} groups using LLM...`);
     for (const group of groupsWithFeatures) {
-      if (!group.suggested_title) {
-        // Generate title from threads or use GitHub issue title
-        if (group.threads && group.threads.length > 0) {
-          const threadTitles = group.threads
-            .map(t => t.thread_name)
-            .filter((name): name is string => !!name && name.trim().length > 0);
-          
-          if (threadTitles.length > 0) {
-            // Use shortest thread title or GitHub issue title
-            const shortestTitle = threadTitles.reduce((shortest, current) => 
-              current.length < shortest.length ? current : shortest
-            );
-            group.suggested_title = shortestTitle.length > 100 
-              ? shortestTitle.substring(0, 97) + "..." 
-              : shortestTitle;
-          } else {
-            group.suggested_title = group.github_issue?.title || "Untitled Group";
-          }
-        } else {
-          group.suggested_title = group.github_issue?.title || "Untitled Group";
-        }
+      // Always generate title using LLM to ensure proper naming conventions
+      // Check if current title looks like an ID - if so, definitely regenerate
+      const currentTitle = group.suggested_title;
+      const looksLikeId = currentTitle && /^[a-z]{2,10}-\d{10,}$/i.test(currentTitle.trim());
+      
+      // Always regenerate using LLM (even if title exists) to ensure consistency
+      // Only skip if title exists, doesn't look like ID, and we want to preserve it
+      // For now, always regenerate to ensure proper format
+      try {
+        group.suggested_title = await generateGroupTitleWithLLM(group);
+      } catch (error) {
+        logError(`Failed to generate title for group ${group.id}, using fallback:`, error);
+        group.suggested_title = generateFallbackTitle(group);
       }
     }
+    log(`Title generation complete`);
 
     // Convert groups to PM tool issues
     const pmIssues: PMToolIssue[] = [];
@@ -237,13 +357,22 @@ export async function exportGroupingToPMTool(
         threads: threadsWithUrls, // Pass threads with guaranteed URLs
       });
       
-      // Determine project ID (use first affected feature, or none for cross-cutting)
-      let projectId: string | undefined;
+      // Determine project ID (use first affected feature, or "general" if none)
       const affectsFeatures = group.affects_features || [];
-      if (affectsFeatures.length === 1) {
-        projectId = projectMappings.get(affectsFeatures[0].id);
+      
+      // Ensure we have at least one feature (default to "general")
+      const primaryFeature = affectsFeatures[0] || { id: "general", name: "General" };
+      const featureId = primaryFeature.id;
+      
+      // Get project ID for the primary feature
+      // Always get project ID for single-feature issues, or for issues with no features (use "general")
+      // For cross-cutting issues (multiple features), we'll tag them but not assign to a single project
+      let projectId: string | undefined;
+      if (affectsFeatures.length <= 1) {
+        // Single feature or no features - use the project for that feature (or "general")
+        projectId = projectMappings.get(featureId);
       }
-      // For cross-cutting issues, we'll tag them but not assign to a single project
+      // For cross-cutting issues (multiple features), projectId remains undefined
       
       // Generate labels for cross-cutting issues
       const labels: string[] = [];
@@ -264,14 +393,17 @@ export async function exportGroupingToPMTool(
       pmIssues.push({
         title,
         description,
-        feature_id: affectsFeatures[0]?.id || "general",
-        feature_name: affectsFeatures[0]?.name || "General",
+        feature_id: featureId,
+        feature_name: primaryFeature.name,
         project_id: projectId,
         source: group.github_issue ? "github" : (group.canonical_issue?.source === "github" ? "github" : "discord"),
         source_url: group.github_issue?.url || group.canonical_issue?.url || signals[0]?.url || "",
         source_id: group.id,
         labels,
         priority: group.is_cross_cutting ? "high" : "medium", // Cross-cutting issues get higher priority
+        // Pass existing Linear issue ID if group already has one (from previous export)
+        linear_issue_id: group.linear_issue_id,
+        linear_issue_identifier: group.linear_issue_identifier,
         metadata: {
           similarity,
           is_cross_cutting: group.is_cross_cutting || false,

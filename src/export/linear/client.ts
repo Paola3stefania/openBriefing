@@ -12,6 +12,7 @@ export class LinearIntegration extends BasePMTool {
   private apiKey: string;
   public teamId?: string; // Make accessible for updating after auto-creation
   private projectCache: Map<string, string> = new Map(); // feature_id -> project_id
+  private projectNameCache: Map<string, string> = new Map(); // project_name (lowercase) -> project_id
 
   constructor(config: PMToolConfig) {
     super(config);
@@ -83,6 +84,7 @@ export class LinearIntegration extends BasePMTool {
     if (updates.description) input.description = this.formatDescription(updates as PMToolIssue);
     if (updates.labels) input.labelIds = this.mapLabels(updates.labels);
     if (updates.priority) input.priority = this.mapPriority(updates.priority);
+    if (updates.project_id) input.projectId = updates.project_id;
 
     const variables = {
       id: issueId,
@@ -99,21 +101,37 @@ export class LinearIntegration extends BasePMTool {
   /**
    * Create or get Linear Project for a feature
    * Projects represent product features in Linear
+   * Always creates projects, including for "General" features
+   * Checks for duplicate project names before creating
    */
   async createOrGetProject(featureId: string, featureName: string, featureDescription?: string): Promise<string> {
-    // Check cache first
+    // Check cache by feature ID first
     if (this.projectCache.has(featureId)) {
       return this.projectCache.get(featureId)!;
     }
 
-    // Try to find existing project by name
-    const existingProject = await this.findProjectByName(featureName);
-    if (existingProject) {
-      this.projectCache.set(featureId, existingProject.id);
-      return existingProject.id;
+    // Check cache by project name (case-insensitive) to avoid duplicates
+    const nameKey = featureName.toLowerCase().trim();
+    if (this.projectNameCache.has(nameKey)) {
+      const existingProjectId = this.projectNameCache.get(nameKey)!;
+      // Also cache by feature ID for faster future lookups
+      this.projectCache.set(featureId, existingProjectId);
+      log(`Found existing Linear project by name: ${featureName} (${existingProjectId})`);
+      return existingProjectId;
     }
 
-    // Create new project
+    // Try to find existing project by name in Linear
+    const existingProject = await this.findProjectByName(featureName);
+    if (existingProject) {
+      const projectId = existingProject.id;
+      // Cache by both feature ID and name
+      this.projectCache.set(featureId, projectId);
+      this.projectNameCache.set(nameKey, projectId);
+      log(`Found existing Linear project: ${existingProject.name} (${projectId})`);
+      return projectId;
+    }
+
+    // No existing project found - create new one
     const query = `
       mutation CreateProject($input: ProjectCreateInput!) {
         projectCreate(input: $input) {
@@ -131,7 +149,9 @@ export class LinearIntegration extends BasePMTool {
       input: {
         name: featureName,
         description: featureDescription || `Project for ${featureName} feature`,
-        teamIds: this.teamId ? [this.teamId] : undefined,
+        // Note: teamIds is optional - projects are workspace-level in Linear
+        // If teamId is provided, we can associate the project with the team
+        ...(this.teamId && { teamIds: [this.teamId] }),
       },
     };
 
@@ -139,14 +159,20 @@ export class LinearIntegration extends BasePMTool {
       const response = await this.graphqlRequest(query, variables);
       
       if (!response.data?.projectCreate?.success) {
-        throw new Error(`Failed to create Linear project: ${JSON.stringify(response.errors)}`);
+        const errorMsg = response.errors ? JSON.stringify(response.errors) : "Unknown error";
+        throw new Error(`Failed to create Linear project: ${errorMsg}`);
       }
 
       const project = response.data.projectCreate.project;
-      this.projectCache.set(featureId, project.id);
-      log(`Created Linear project: ${project.name} (${project.id})`);
+      const projectId = project.id;
       
-      return project.id;
+      // Cache by both feature ID and name
+      this.projectCache.set(featureId, projectId);
+      this.projectNameCache.set(nameKey, projectId);
+      
+      log(`Created Linear project: ${project.name} (${projectId})`);
+      
+      return projectId;
     } catch (error) {
       logError(`Failed to create Linear project for feature ${featureName}:`, error);
       throw error;
@@ -154,58 +180,85 @@ export class LinearIntegration extends BasePMTool {
   }
 
   /**
-   * Find Linear project by name
-   * Linear projects query requires teamId filter or workspace scope
+   * List all projects in the workspace
    */
-  private async findProjectByName(projectName: string): Promise<{ id: string; name: string } | null> {
-    // Linear API: projects query may require filters
-    // Try with team filter first, fallback to workspace if needed
-    const query = `
-      query GetProjects($teamId: String) {
-        projects(filter: { team: { id: { eq: $teamId } } }) {
-          nodes {
-            id
-            name
+  async listProjects(): Promise<Array<{ id: string; name: string }>> {
+    try {
+      const query = `
+        query GetProjects {
+          projects {
+            nodes {
+              id
+              name
+            }
           }
         }
-      }
-    `;
-
-    try {
-      const response = await this.graphqlRequest(query, { teamId: this.teamId || null });
+      `;
+      
+      const response = await this.graphqlRequest(query, {});
       
       if (response.data?.projects?.nodes) {
+        // Update name cache with all projects
+        for (const project of response.data.projects.nodes) {
+          const normalizedName = project.name.toLowerCase().trim();
+          if (!this.projectNameCache.has(normalizedName)) {
+            this.projectNameCache.set(normalizedName, project.id);
+          }
+        }
+        
+        return response.data.projects.nodes.map((p: { id: string; name: string }) => ({
+          id: p.id,
+          name: p.name,
+        }));
+      }
+      
+      return [];
+    } catch (error) {
+      logError("Failed to list Linear projects:", error);
+      throw error;
+    }
+  }
+
+  /**
+   * Find Linear project by name
+   * Linear projects query - uses workspace scope (projects are workspace-level, not team-level)
+   * Also updates the name cache with all found projects to avoid future duplicate lookups
+   */
+  private async findProjectByName(projectName: string): Promise<{ id: string; name: string } | null> {
+    try {
+      // Linear projects are workspace-level, not team-level
+      // Query all projects in the workspace
+      const query = `
+        query GetProjects {
+          projects {
+            nodes {
+              id
+              name
+            }
+          }
+        }
+      `;
+      
+      const response = await this.graphqlRequest(query, {});
+      
+      if (response.data?.projects?.nodes) {
+        const normalizedSearchName = projectName.toLowerCase().trim();
+        
+        // Update name cache with all projects found
+        for (const project of response.data.projects.nodes) {
+          const normalizedName = project.name.toLowerCase().trim();
+          if (!this.projectNameCache.has(normalizedName)) {
+            this.projectNameCache.set(normalizedName, project.id);
+          }
+        }
+        
+        // Find the matching project
         const project = response.data.projects.nodes.find(
-          (p: { name: string }) => p.name.toLowerCase() === projectName.toLowerCase()
+          (p: { name: string }) => p.name.toLowerCase().trim() === normalizedSearchName
         );
         
         if (project) {
           return { id: project.id, name: project.name };
-        }
-      }
-      
-      // If no teamId or not found, try without filter (workspace scope)
-      if (this.teamId) {
-        const queryAll = `
-          query GetProjects {
-            projects {
-              nodes {
-                id
-                name
-              }
-            }
-          }
-        `;
-        
-        const responseAll = await this.graphqlRequest(queryAll, {});
-        if (responseAll.data?.projects?.nodes) {
-          const project = responseAll.data.projects.nodes.find(
-            (p: { name: string }) => p.name.toLowerCase() === projectName.toLowerCase()
-          );
-          
-          if (project) {
-            return { id: project.id, name: project.name };
-          }
         }
       }
       
@@ -216,12 +269,71 @@ export class LinearIntegration extends BasePMTool {
     }
   }
 
-  async findIssueBySourceId(sourceId: string): Promise<{ id: string; url: string } | null> {
+  async findIssueBySourceId(sourceId: string, title?: string): Promise<{ id: string; url: string } | null> {
     // Linear doesn't have a built-in way to search by custom source ID
     // We maintain a mapping table externally (in export results or mapping file)
-    // This method should be called with the stored linear_issue_id from mapping
-    // For now, return null - caller should use stored mapping from previous exports
+    // This method is primarily used when no stored ID exists
+    
+    // As a fallback, try searching by title if provided
+    if (title) {
+      try {
+        const found = await this.searchIssueByTitle(title);
+        if (found) {
+          return found;
+        }
+      } catch (error) {
+        // Log but don't fail - this is a fallback
+        logError(`Failed to search Linear issue by title "${title}":`, error);
+      }
+    }
+    
     return null;
+  }
+  
+  /**
+   * Search for Linear issue by title (used for duplicate detection)
+   * Returns the first matching issue found
+   */
+  private async searchIssueByTitle(title: string): Promise<{ id: string; url: string } | null> {
+    // Linear GraphQL API: Use issueSearch with title filter
+    // Note: Linear's search may require workspace-level access
+    const query = `
+      query SearchIssues($query: String!) {
+        issueSearch(query: $query, first: 10) {
+          nodes {
+            id
+            identifier
+            url
+            title
+          }
+        }
+      }
+    `;
+
+    try {
+      // Search for exact title match (Linear search supports quoted strings for exact match)
+      const searchQuery = `"${title}"`;
+      const response = await this.graphqlRequest(query, { query: searchQuery });
+      
+      if (response.data?.issueSearch?.nodes) {
+        // Find exact title match (case-insensitive)
+        const exactMatch = response.data.issueSearch.nodes.find(
+          (issue: { title: string }) => issue.title.toLowerCase() === title.toLowerCase()
+        );
+        
+        if (exactMatch) {
+          return {
+            id: exactMatch.id,
+            url: exactMatch.url,
+          };
+        }
+      }
+      
+      return null;
+    } catch (error) {
+      logError(`Failed to search Linear issue by title "${title}":`, error);
+      return null;
+    }
   }
   
   /**
@@ -390,7 +502,7 @@ export class LinearIntegration extends BasePMTool {
    * Get Linear issue by ID (for reading status/updates)
    * Useful for back-propagating Linear state to internal tracking
    */
-  async getIssue(issueId: string): Promise<{ id: string; identifier: string; url: string; title: string; state: string } | null> {
+  async getIssue(issueId: string): Promise<{ id: string; identifier: string; url: string; title: string; state: string; projectId?: string; projectName?: string } | null> {
     const query = `
       query GetIssue($id: String!) {
         issue(id: $id) {
@@ -399,6 +511,10 @@ export class LinearIntegration extends BasePMTool {
           url
           title
           state {
+            name
+          }
+          project {
+            id
             name
           }
         }
@@ -415,6 +531,8 @@ export class LinearIntegration extends BasePMTool {
           url: response.data.issue.url,
           title: response.data.issue.title,
           state: response.data.issue.state?.name || "Unknown",
+          projectId: response.data.issue.project?.id,
+          projectName: response.data.issue.project?.name,
         };
       }
       
@@ -422,6 +540,105 @@ export class LinearIntegration extends BasePMTool {
     } catch (error) {
       logError(`Failed to get Linear issue ${issueId}:`, error);
       return null;
+    }
+  }
+
+  /**
+   * List all issues from a Linear team
+   * Returns issues with their project information
+   */
+  async listTeamIssues(teamId: string, limit: number = 250): Promise<Array<{
+    id: string;
+    identifier: string;
+    url: string;
+    title: string;
+    description?: string;
+    state: string;
+    projectId?: string;
+    projectName?: string;
+    priority?: number;
+    labels?: Array<{ id: string; name: string }>;
+  }>> {
+    const query = `
+      query GetTeamIssues($teamId: String!, $first: Int!) {
+        team(id: $teamId) {
+          issues(first: $first) {
+            nodes {
+              id
+              identifier
+              url
+              title
+              description
+              state {
+                name
+              }
+              project {
+                id
+                name
+              }
+              priority
+              labels {
+                nodes {
+                  id
+                  name
+                }
+              }
+            }
+            pageInfo {
+              hasNextPage
+              endCursor
+            }
+          }
+        }
+      }
+    `;
+
+    try {
+      const allIssues: any[] = [];
+      let hasNextPage = true;
+      let cursor: string | undefined;
+
+      while (hasNextPage && allIssues.length < limit) {
+        const variables: any = {
+          teamId,
+          first: Math.min(limit - allIssues.length, 100), // Linear API limit is typically 100 per page
+        };
+
+        if (cursor) {
+          // For pagination, we'd need to modify the query to use after cursor
+          // For now, we'll fetch in batches
+          break; // Simplified - can be enhanced with proper pagination
+        }
+
+        const response = await this.graphqlRequest(query, variables);
+        
+        if (response.data?.team?.issues?.nodes) {
+          const issues = response.data.team.issues.nodes.map((issue: any) => ({
+            id: issue.id,
+            identifier: issue.identifier,
+            url: issue.url,
+            title: issue.title,
+            description: issue.description,
+            state: issue.state?.name || "Unknown",
+            projectId: issue.project?.id,
+            projectName: issue.project?.name,
+            priority: issue.priority,
+            labels: issue.labels?.nodes || [],
+          }));
+          
+          allIssues.push(...issues);
+          
+          hasNextPage = response.data.team.issues.pageInfo?.hasNextPage || false;
+          cursor = response.data.team.issues.pageInfo?.endCursor;
+        } else {
+          hasNextPage = false;
+        }
+      }
+
+      return allIssues;
+    } catch (error) {
+      logError(`Failed to list Linear team issues for team ${teamId}:`, error);
+      throw error;
     }
   }
 

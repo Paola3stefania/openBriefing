@@ -21,7 +21,7 @@ export interface CorrelationOptions {
 
 export interface SemanticGroupingOptions {
   minSimilarity?: number;  // 0-1 scale, default 0.6
-  maxGroups?: number;      // Max groups to return, default 50
+  maxGroups?: number;      // Max groups to return (optional, no limit if not specified)
 }
 
 export interface Feature {
@@ -105,7 +105,7 @@ async function getSignalEmbedding(
   }
   
   // Check persistent cache
-  const cached = getCachedEmbedding(cacheType, signal.sourceId, contentHash);
+  const cached = await getCachedEmbedding(cacheType, signal.sourceId, contentHash);
   if (cached) {
     sessionEmbeddingCache.set(sessionKey, cached);
     stats.cached++;
@@ -117,7 +117,7 @@ async function getSignalEmbedding(
   
   // Save to both caches
   sessionEmbeddingCache.set(sessionKey, embedding);
-  setCachedEmbedding(cacheType, signal.sourceId, contentHash, embedding);
+  await setCachedEmbedding(cacheType, signal.sourceId, contentHash, embedding);
   
   stats.computed++;
   return embedding;
@@ -151,7 +151,7 @@ export async function groupSignalsSemantic(
   features: Feature[],
   options: SemanticGroupingOptions = {}
 ): Promise<GroupingResult> {
-  const { minSimilarity = 0.6, maxGroups = 50 } = options;
+  const { minSimilarity = 0.6, maxGroups } = options;
   
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
@@ -270,8 +270,8 @@ export async function groupSignalsSemantic(
   // Sort by number of signals (larger groups first)
   groups.sort((a, b) => b.signals.length - a.signals.length);
   
-  // Limit groups
-  const limitedGroups = groups.slice(0, maxGroups);
+  // Limit groups only if maxGroups is explicitly set and > 0
+  const limitedGroups = maxGroups && maxGroups > 0 ? groups.slice(0, maxGroups) : groups;
   
   // Find ungrouped signals (singles that didn't match any feature well)
   const groupedSignalIds = new Set(
@@ -347,7 +347,7 @@ export function groupSignalsBySimilarity(
   signals: Signal[],
   options: CorrelationOptions = {}
 ): GroupCandidate[] {
-  const { minSimilarity = 0.5, maxGroups = 10 } = options;
+  const { minSimilarity = 0.5, maxGroups } = options;
   const groups: GroupCandidate[] = [];
   const processed = new Set<string>();
 
@@ -402,10 +402,9 @@ export function groupSignalsBySimilarity(
     }
   }
 
-  // Sort by similarity and limit
-  return groups
-    .sort((a, b) => b.similarity - a.similarity)
-    .slice(0, maxGroups);
+  // Sort by similarity and limit only if maxGroups is explicitly set and > 0
+  const sorted = groups.sort((a, b) => b.similarity - a.similarity);
+  return maxGroups && maxGroups > 0 ? sorted.slice(0, maxGroups) : sorted;
 }
 
 /**

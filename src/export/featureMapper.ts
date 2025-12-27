@@ -98,7 +98,7 @@ function calculateAverageEmbedding(embeddings: Embedding[]): Embedding {
 export async function mapGroupsToFeatures(
   groups: GroupingGroup[],
   features: Feature[],
-  minSimilarity: number = 0.5
+  minSimilarity: number = 0.6
 ): Promise<GroupingGroup[]> {
   if (features.length === 0) {
     log("No features provided, skipping feature mapping");
@@ -120,7 +120,10 @@ export async function mapGroupsToFeatures(
   // Step 1: Compute embeddings for all features
   const featureEmbeddings = new Map<string, Embedding>();
   for (const feature of features) {
-    const featureText = `${feature.name}${feature.description ? `: ${feature.description}` : ""}`;
+    // Construct feature text, avoiding double colons if name ends with colon
+    const name = feature.name.trim();
+    const separator = name.endsWith(":") ? " " : ": ";
+    const featureText = `${name}${feature.description ? `${separator}${feature.description}` : ""}`;
     try {
       const embedding = await createEmbedding(featureText, apiKey);
       featureEmbeddings.set(feature.id, embedding);

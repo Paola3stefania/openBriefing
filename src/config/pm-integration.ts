@@ -27,7 +27,10 @@ export function getPMIntegrationConfig(): PMIntegrationConfig {
     // PM integration is enabled if PM_TOOL_TYPE is set
     enabled: !!process.env.PM_TOOL_TYPE,
     documentation_urls: process.env.DOCUMENTATION_URLS
-      ? process.env.DOCUMENTATION_URLS.split(",").map(url => url.trim()).filter(url => url.length > 0)
+      ? process.env.DOCUMENTATION_URLS.split(",")
+          .map(url => url.trim())
+          .map(url => url.endsWith(":") ? url.slice(0, -1) : url) // Remove trailing colons
+          .filter(url => url.length > 0)
       : undefined,
     feature_extraction: {
       enabled: process.env.FEATURE_EXTRACTION_ENABLED !== "false",

@@ -104,9 +104,17 @@ UNMute supports two storage backends:
   - SQL queries for advanced analysis
   - Concurrent access support
   - Auto-detected when `DATABASE_URL` is set
+  - **All classification results saved to database** when `DATABASE_URL` is configured
   - See [docs/DATABASE_SETUP.md](docs/DATABASE_SETUP.md) for setup
 
 Switch between backends using `STORAGE_BACKEND` environment variable or by setting/removing `DATABASE_URL`.
+
+**Note:** When `DATABASE_URL` is set, all operations (classification, grouping, feature extraction) automatically save to PostgreSQL instead of JSON files. This includes:
+- Classified threads → `classified_threads` table
+- Thread-issue matches → `thread_issue_matches` table
+- Groups → `groups` table
+- Documentation cache → `documentation_cache` table
+- Features cache → `features_cache` table
 
 ## Setup
 
@@ -149,9 +157,44 @@ Switch between backends using `STORAGE_BACKEND` environment variable or by setti
    # Set DATABASE_URL in .env
    DATABASE_URL=postgresql://user:password@localhost:5432/unmute_mcp
    
-   # Run migrations
+   # Run migrations to create tables
    npm run db:migrate
+   
+   # (Optional) Import existing JSON cache files into database
+   # This imports: GitHub issues, issue embeddings, and Discord messages
+   npm run db:import
    ```
+   
+   **Importing existing data:**
+   
+   If you have existing JSON cache files (`cache/github-issues-cache.json`, `cache/issue-embeddings-cache.json`, `cache/discord-messages-*.json`), you can import them into PostgreSQL:
+   
+   ```bash
+   npm run db:import
+   ```
+   
+   This will:
+   - Create tables for GitHub issues, issue embeddings, and Discord messages
+   - Import all cached GitHub issues
+   - Import all issue embeddings
+   - Import all Discord messages from cache files
+   
+   **Setting up documentation and features cache:**
+   
+   After setting up the database, you can populate the documentation and features cache:
+   
+   ```bash
+   # Using MCP tools (recommended):
+   # 1. Fetch documentation
+   manage_documentation_cache(action: "fetch")
+   
+   # 2. Extract features from documentation
+   manage_documentation_cache(action: "extract_features")
+   ```
+   
+   Or use the MCP tools directly:
+   - `manage_documentation_cache` with `action: "fetch"` - Fetches and caches documentation
+   - `manage_documentation_cache` with `action: "extract_features"` - Extracts product features from cached documentation
    
    See [docs/DATABASE_SETUP.md](docs/DATABASE_SETUP.md) for detailed setup instructions.
 
@@ -224,7 +267,7 @@ suggest_grouping → results/grouping-{channelId}-{timestamp}.json
 
 **Options:**
 - `min_similarity`: Minimum similarity score for issue matching (**0-100 scale**, default 60). Only threads with similarity ≥60 are grouped with an issue.
-- `max_groups`: Maximum groups to return (default 50)
+- `max_groups`: Maximum groups to return (optional, no limit if not specified)
 - `re_classify`: Force re-classification before grouping
 - `semantic_only`: Use pure semantic similarity instead of issue-based grouping
 

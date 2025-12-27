@@ -75,17 +75,14 @@ export async function runExportWorkflow(
     let features: ProductFeature[];
     
     if (options?.skipFeatureExtraction && options?.existingFeatures) {
-      log("Using existing features, skipping extraction");
       features = options.existingFeatures;
     } else {
-      log(`Fetching documentation from ${documentationUrls.length} URL(s)...`);
       const documentation = await fetchMultipleDocumentation(documentationUrls);
       
       if (documentation.length === 0) {
         throw new Error("No documentation was successfully fetched");
       }
 
-      log("Extracting features from documentation using LLM...");
       features = await extractFeaturesFromDocumentation(documentation);
       result.features_extracted = features.length;
     }

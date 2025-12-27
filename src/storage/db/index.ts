@@ -4,6 +4,7 @@
 
 import type { IStorage } from "../interface.js";
 import type { ClassifiedThread, Group, UngroupedThread, StorageStats } from "../types.js";
+import type { DocumentationContent } from "../../export/documentationFetcher.js";
 import { query, transaction } from "./client.js";
 
 export class DatabaseStorage implements IStorage {
@@ -521,6 +522,173 @@ export class DatabaseStorage implements IStorage {
     } catch {
       return false;
     }
+  }
+
+  async saveDocumentation(doc: DocumentationContent): Promise<void> {
+    await this.saveDocumentationMultiple([doc]);
+  }
+
+  async saveDocumentationMultiple(docs: DocumentationContent[]): Promise<void> {
+    if (docs.length === 0) return;
+
+    await transaction(async (client) => {
+      for (const doc of docs) {
+        await client.query(
+          `INSERT INTO documentation_cache (url, title, content, sections, fetched_at)
+           VALUES ($1, $2, $3, $4, $5)
+           ON CONFLICT (url) DO UPDATE SET
+             title = EXCLUDED.title,
+             content = EXCLUDED.content,
+             sections = EXCLUDED.sections,
+             fetched_at = EXCLUDED.fetched_at,
+             updated_at = NOW()`,
+          [
+            doc.url,
+            doc.title || null,
+            doc.content,
+            doc.sections ? JSON.stringify(doc.sections) : null,
+            doc.fetched_at ? new Date(doc.fetched_at) : new Date(),
+          ]
+        );
+      }
+    });
+  }
+
+  async getDocumentation(url: string): Promise<DocumentationContent | null> {
+    const result = await query(
+      `SELECT url, title, content, sections, fetched_at
+       FROM documentation_cache
+       WHERE url = $1`,
+      [url]
+    );
+
+    if (result.rows.length === 0) {
+      return null;
+    }
+
+    const row = result.rows[0];
+    return {
+      url: row.url,
+      title: row.title || undefined,
+      content: row.content,
+      sections: row.sections ? JSON.parse(row.sections) : undefined,
+      fetched_at: row.fetched_at?.toISOString() || new Date().toISOString(),
+    };
+  }
+
+  async getDocumentationMultiple(urls: string[]): Promise<DocumentationContent[]> {
+    if (urls.length === 0) return [];
+
+    const result = await query(
+      `SELECT url, title, content, sections, fetched_at
+       FROM documentation_cache
+       WHERE url = ANY($1)`,
+      [urls]
+    );
+
+    return result.rows.map((row: any) => ({
+      url: row.url,
+      title: row.title || undefined,
+      content: row.content,
+      sections: row.sections ? JSON.parse(row.sections) : undefined,
+      fetched_at: row.fetched_at?.toISOString() || new Date().toISOString(),
+    }));
+  }
+
+  async getAllCachedDocumentation(): Promise<DocumentationContent[]> {
+    const result = await query(
+      `SELECT url, title, content, sections, fetched_at
+       FROM documentation_cache
+       ORDER BY fetched_at DESC`
+    );
+
+    return result.rows.map((row: any) => ({
+      url: row.url,
+      title: row.title || undefined,
+      content: row.content,
+      sections: row.sections ? JSON.parse(row.sections) : undefined,
+      fetched_at: row.fetched_at?.toISOString() || new Date().toISOString(),
+    }));
+  }
+
+  async clearDocumentationCache(): Promise<void> {
+    await query("DELETE FROM documentation_cache");
+  }
+
+  async saveFeatures(urls: string[], features: any[], docCount: number): Promise<void> {
+    // Sort URLs for consistent comparison
+    const sortedUrls = [...urls].map(u => u.toLowerCase().trim()).sort();
+    
+    await transaction(async (client) => {
+      // Insert each feature as a separate row (normalized)
+      for (const feature of features) {
+        await client.query(
+          `INSERT INTO features (id, name, description, category, priority, related_keywords, documentation_section, documentation_urls, extracted_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+           ON CONFLICT (id) DO UPDATE SET
+             name = EXCLUDED.name,
+             description = EXCLUDED.description,
+             category = EXCLUDED.category,
+             priority = EXCLUDED.priority,
+             related_keywords = EXCLUDED.related_keywords,
+             documentation_section = EXCLUDED.documentation_section,
+             documentation_urls = EXCLUDED.documentation_urls,
+             extracted_at = EXCLUDED.extracted_at,
+             updated_at = NOW()`,
+          [
+            feature.id,
+            feature.name,
+            feature.description || null,
+            feature.category || null,
+            feature.priority || null,
+            feature.related_keywords || [],
+            feature.documentation_section || null,
+            sortedUrls,
+          ]
+        );
+      }
+    });
+  }
+
+  async getFeatures(urls: string[]): Promise<{ features: any[]; extracted_at: string; documentation_count: number } | null> {
+    // Sort URLs for consistent comparison
+    const sortedUrls = [...urls].map(u => u.toLowerCase().trim()).sort();
+    
+    // Query features that match all the provided URLs
+    const result = await query(
+      `SELECT 
+         json_agg(
+           json_build_object(
+             'id', id,
+             'name', name,
+             'description', description,
+             'category', category,
+             'priority', priority,
+             'related_keywords', related_keywords,
+             'documentation_section', documentation_section
+           ) ORDER BY id
+         ) as features,
+         MAX(extracted_at) as extracted_at,
+         COUNT(*) as documentation_count
+       FROM features
+       WHERE documentation_urls @> $1::text[]`,
+      [sortedUrls]
+    );
+
+    if (result.rows.length === 0 || !result.rows[0].features || result.rows[0].features.length === 0) {
+      return null;
+    }
+
+    const row = result.rows[0];
+    return {
+      features: row.features || [],
+      extracted_at: row.extracted_at?.toISOString() || new Date().toISOString(),
+      documentation_count: row.documentation_count || 0,
+    };
+  }
+
+  async clearFeaturesCache(): Promise<void> {
+    await query("DELETE FROM features");
   }
 }
 

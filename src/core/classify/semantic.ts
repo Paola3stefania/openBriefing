@@ -10,6 +10,7 @@ import { createHash } from "crypto";
 import type { GitHubIssue, DiscordMessage, ClassifiedMessage } from "./classifier.js";
 import { logWarn } from "../../mcp/logger.js";
 import { getConfig } from "../../config/index.js";
+import { query, checkConnection } from "../../storage/db/client.js";
 
 // Progress logging to stderr (doesn't interfere with MCP JSON-RPC on stdout)
 function logProgress(message: string) {
@@ -69,13 +70,64 @@ function hashIssueContent(issue: GitHubIssue): string {
   return createHash("md5").update(content).digest("hex");
 }
 
+// Cache whether database is available
+let dbAvailable: boolean | null = null;
+
 /**
- * Load persistent embedding cache from disk
+ * Check if database is available for storing embeddings
  */
-function loadPersistentCache(): PersistentEmbeddingCache {
-  const cachePath = getEmbeddingsCachePath();
+async function isDatabaseAvailable(): Promise<boolean> {
+  if (dbAvailable !== null) {
+    return dbAvailable;
+  }
   
+  try {
+    dbAvailable = await checkConnection();
+    return dbAvailable;
+  } catch {
+    dbAvailable = false;
+    return false;
+  }
+}
+
+/**
+ * Load persistent embedding cache from database or disk
+ */
+async function loadPersistentCache(): Promise<PersistentEmbeddingCache> {
   const currentModel = getEmbeddingModel();
+  
+  // Try database first if available
+  if (await isDatabaseAvailable()) {
+    try {
+      const result = await query<{
+        issue_number: number;
+        embedding: number[];
+        content_hash: string;
+      }>(
+        `SELECT issue_number, embedding, content_hash 
+         FROM issue_embeddings 
+         WHERE model = $1`,
+        [currentModel]
+      );
+      
+      const entries: { [key: string]: PersistentEmbeddingEntry } = {};
+      for (const row of result.rows) {
+        entries[row.issue_number.toString()] = {
+          embedding: row.embedding,
+          contentHash: row.content_hash,
+          createdAt: new Date().toISOString(),
+        };
+      }
+      
+      logProgress(`Loaded ${Object.keys(entries).length} issue embeddings from database`);
+      return { version: CACHE_VERSION, model: currentModel, entries };
+    } catch (error) {
+      logProgress(`Failed to load from database, falling back to JSON: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  
+  // Fall back to JSON file
+  const cachePath = getEmbeddingsCachePath();
   
   if (!existsSync(cachePath)) {
     return { version: CACHE_VERSION, model: currentModel, entries: {} };
@@ -99,14 +151,45 @@ function loadPersistentCache(): PersistentEmbeddingCache {
 }
 
 /**
- * Save persistent embedding cache to disk
+ * Save persistent embedding cache to database or disk
  */
-function savePersistentCache(cache: PersistentEmbeddingCache): void {
+async function savePersistentCache(cache: PersistentEmbeddingCache): Promise<void> {
+  const currentModel = cache.model;
+  const entries = cache.entries;
+  
+  // Try database first if available
+  if (await isDatabaseAvailable()) {
+    try {
+      // Save all entries to database in a batch
+      for (const [issueNumberStr, entry] of Object.entries(entries)) {
+        const issueNumber = parseInt(issueNumberStr, 10);
+        if (!isNaN(issueNumber)) {
+          await query(
+            `INSERT INTO issue_embeddings (issue_number, embedding, content_hash, model, updated_at)
+             VALUES ($1, $2::jsonb, $3, $4, NOW())
+             ON CONFLICT (issue_number) 
+             DO UPDATE SET 
+               embedding = $2::jsonb,
+               content_hash = $3,
+               model = $4,
+               updated_at = NOW()`,
+            [issueNumber, JSON.stringify(entry.embedding) as any, entry.contentHash, currentModel]
+          );
+        }
+      }
+      logProgress(`Saved ${Object.keys(entries).length} issue embeddings to database`);
+      return;
+    } catch (error) {
+      logProgress(`Failed to save to database, falling back to JSON: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  
+  // Fall back to JSON file
   const cachePath = getEmbeddingsCachePath();
   
   try {
     writeFileSync(cachePath, JSON.stringify(cache, null, 2), "utf-8");
-    logProgress(`Saved ${Object.keys(cache.entries).length} issue embeddings to cache`);
+    logProgress(`Saved ${Object.keys(entries).length} issue embeddings to cache`);
   } catch (error) {
     logWarn("Failed to save embedding cache:", error);
   }
@@ -232,7 +315,7 @@ function createIssueText(issue: GitHubIssue): string {
   const parts = [
     issue.title,
     issue.body || "",
-    ...issue.labels.map(label => label.name),
+    ...issue.labels.map(label => label.name).sort(),
   ];
   return parts.join("\n\n");
 }
@@ -315,12 +398,15 @@ async function precomputeIssueEmbeddings(
   apiKey: string,
   embeddingCache: EmbeddingCache
 ): Promise<void> {
-  // Load persistent cache from disk
-  const persistentCache = loadPersistentCache();
+  // Load persistent cache from database or disk
+  const persistentCache = await loadPersistentCache();
   
   // Determine which issues need new embeddings
   const issuesToEmbed: GitHubIssue[] = [];
   let cachedCount = 0;
+  
+  let hashMismatchCount = 0;
+  let missingFromCacheCount = 0;
   
   for (const issue of issues) {
     const issueKey = `issue:${issue.number}`;
@@ -333,12 +419,19 @@ async function precomputeIssueEmbeddings(
       cachedCount++;
     } else {
       // Need to compute new embedding
+      if (cachedEntry) {
+        // Entry exists but hash doesn't match (content changed)
+        hashMismatchCount++;
+      } else {
+        // Not in cache at all (new issue)
+        missingFromCacheCount++;
+      }
       issuesToEmbed.push(issue);
     }
   }
   
   const totalIssues = issues.length;
-  logProgress(`Found ${cachedCount}/${totalIssues} issues in embedding cache, ${issuesToEmbed.length} need embedding`);
+  logProgress(`Found ${cachedCount}/${totalIssues} issues in embedding cache, ${issuesToEmbed.length} need embedding (${missingFromCacheCount} new, ${hashMismatchCount} changed)`);
   
   if (issuesToEmbed.length === 0) {
     logProgress("All issue embeddings loaded from cache!");
@@ -401,7 +494,7 @@ async function precomputeIssueEmbeddings(
 
     // Save cache after each batch to avoid losing progress if process breaks
     if (cacheModified) {
-      savePersistentCache(persistentCache);
+      await savePersistentCache(persistentCache);
       cacheModified = false; // Reset flag after saving
     }
 

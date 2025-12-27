@@ -38,8 +38,6 @@ export async function extractFeaturesFromDocumentation(
     ? combinedContent.substring(0, maxChars) + "\n\n[... content truncated ...]"
     : combinedContent;
 
-  log(`Extracting features from ${docs.length} documentation source(s) (${contentToAnalyze.length} characters)`);
-
   try {
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
