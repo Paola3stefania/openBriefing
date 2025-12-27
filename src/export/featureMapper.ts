@@ -5,11 +5,14 @@
 
 import { log } from "../mcp/logger.js";
 import { createEmbedding } from "../core/classify/semantic.js";
+import { getFeatureEmbedding, saveFeatureEmbedding } from "../storage/db/embeddings.js";
+import { createHash } from "crypto";
 
 interface Feature {
   id: string;
   name: string;
   description?: string;
+  related_keywords?: string[];
 }
 
 interface GroupingGroup {
@@ -117,18 +120,34 @@ export async function mapGroupsToFeatures(
     throw new Error("OPENAI_API_KEY environment variable is required for feature mapping");
   }
 
-  // Step 1: Compute embeddings for all features
+  // Step 1: Get or compute embeddings for all features
   const featureEmbeddings = new Map<string, Embedding>();
   for (const feature of features) {
-    // Construct feature text, avoiding double colons if name ends with colon
-    const name = feature.name.trim();
-    const separator = name.endsWith(":") ? " " : ": ";
-    const featureText = `${name}${feature.description ? `${separator}${feature.description}` : ""}`;
-    try {
-      const embedding = await createEmbedding(featureText, apiKey);
+    // Try to get from database first
+    let embedding = await getFeatureEmbedding(feature.id);
+    
+    if (!embedding) {
+      // Compute if not found
+      const name = feature.name.trim();
+      const separator = name.endsWith(":") ? " " : ": ";
+      const keywords = (feature.related_keywords || []).length > 0 
+        ? ` Keywords: ${(feature.related_keywords || []).join(", ")}` 
+        : "";
+      const featureText = `${name}${feature.description ? `${separator}${feature.description}` : ""}${keywords}`;
+      try {
+        embedding = await createEmbedding(featureText, apiKey);
+        
+        // Save to database
+        const contentHash = createHash("md5").update(featureText).digest("hex");
+        await saveFeatureEmbedding(feature.id, embedding, contentHash);
+      } catch (error) {
+        log(`Failed to create embedding for feature ${feature.name}: ${error instanceof Error ? error.message : String(error)}`);
+        continue;
+      }
+    }
+    
+    if (embedding) {
       featureEmbeddings.set(feature.id, embedding);
-    } catch (error) {
-      log(`Failed to create embedding for feature ${feature.name}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 

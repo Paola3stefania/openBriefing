@@ -480,8 +480,8 @@ const tools: Tool[] = [
       properties: {
         action: {
           type: "string",
-          enum: ["list", "fetch", "extract_features", "clear"],
-          description: "Action to perform: 'list' (view cached docs), 'fetch' (pre-fetch and cache), 'extract_features' (extract features from cached docs), 'clear' (clear cache)",
+          enum: ["list", "fetch", "extract_features", "compute_embeddings", "clear"],
+          description: "Action to perform: 'list' (view cached docs), 'fetch' (pre-fetch and cache), 'extract_features' (extract features from cached docs), 'compute_embeddings' (compute embeddings for docs/sections/features), 'clear' (clear cache)",
           default: "list",
         },
         urls: {
@@ -3292,18 +3292,170 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           teamId = team.id;
         }
 
+        // STEP 1: Sync Linear projects to features (database if configured, otherwise JSON cache)
+        console.error(`[Linear Classification] Syncing Linear projects to features...`);
+        const allProjects = await linearTool.listProjects();
+        const { getStorage } = await import("../storage/factory.js");
+        const storage = getStorage();
+        
+        // Convert Linear projects to features and save (storage handles DB vs JSON automatically)
+        const projectFeatures = allProjects.map((project, index) => ({
+          id: `linear-project-${project.id}`,
+          name: project.name,
+          description: `Linear project: ${project.name}`,
+          category: "Linear Project",
+          priority: "medium" as const,
+          related_keywords: [project.name.toLowerCase()],
+          documentation_section: null,
+          documentation_urls: [], // Linear projects don't come from documentation
+        }));
+        
+        if (projectFeatures.length > 0) {
+          await storage.saveFeatures([], projectFeatures, 0);
+          const { hasDatabaseConfig: checkDbConfig } = await import("../storage/factory.js");
+          const storageType = checkDbConfig() ? "database" : "JSON cache";
+          console.error(`[Linear Classification] Synced ${projectFeatures.length} Linear projects to features (${storageType})`);
+        }
+
+        // STEP 1b: Create Linear projects for features that don't have a corresponding Linear project
+        // Check if database is configured, otherwise use JSON storage
+        const { hasDatabaseConfig: checkDbConfig } = await import("../storage/factory.js");
+        if (checkDbConfig()) {
+          // Database: Query features from database
+          console.error(`[Linear Classification] Checking for features without Linear projects (database)...`);
+          const { query } = await import("../storage/db/client.js");
+          const allFeatures = await query(
+            `SELECT id, name, description, category, priority
+             FROM features
+             WHERE id NOT LIKE 'linear-project-%'
+             ORDER BY name`
+          );
+          
+          const linearProjectNames = new Set(allProjects.map(p => p.name.toLowerCase().trim()));
+          let projectsCreated = 0;
+          
+          for (const feature of allFeatures.rows) {
+            const featureNameLower = feature.name.toLowerCase().trim();
+            
+            // Check if a Linear project with this name already exists
+            if (!linearProjectNames.has(featureNameLower)) {
+              try {
+                // Create Linear project for this feature
+                const projectId = await linearTool.createOrGetProject(
+                  feature.id,
+                  feature.name,
+                  feature.description || `Feature: ${feature.name}`
+                );
+                
+                // Update the feature in database to link it to the Linear project
+                await query(
+                  `UPDATE features 
+                   SET id = $1, updated_at = NOW()
+                   WHERE id = $2`,
+                  [`linear-project-${projectId}`, feature.id]
+                );
+                
+                // Add to allProjects list so it's available for matching
+                allProjects.push({ id: projectId, name: feature.name });
+                linearProjectNames.add(featureNameLower);
+                projectsCreated++;
+                console.error(`[Linear Classification] Created Linear project "${feature.name}" for feature`);
+              } catch (error) {
+                console.error(`[Linear Classification] Failed to create Linear project for feature "${feature.name}":`, error);
+              }
+            }
+          }
+          
+          if (projectsCreated > 0) {
+            console.error(`[Linear Classification] Created ${projectsCreated} Linear projects for features`);
+          }
+        } else {
+          // JSON: Get features from JSON cache
+          console.error(`[Linear Classification] Checking for features without Linear projects (JSON cache)...`);
+          try {
+            // Get features from JSON cache
+            const cachedFeatures = await storage.getFeatures([]);
+            if (cachedFeatures && cachedFeatures.features) {
+              const allFeatures = cachedFeatures.features.filter(
+                (f: any) => !f.id || !f.id.startsWith("linear-project-")
+              );
+              
+              const linearProjectNames = new Set(allProjects.map(p => p.name.toLowerCase().trim()));
+              let projectsCreated = 0;
+              
+              for (const feature of allFeatures) {
+                const featureNameLower = feature.name.toLowerCase().trim();
+                
+                // Check if a Linear project with this name already exists
+                if (!linearProjectNames.has(featureNameLower)) {
+                  try {
+                    // Create Linear project for this feature
+                    const projectId = await linearTool.createOrGetProject(
+                      feature.id || `feature-${feature.name}`,
+                      feature.name,
+                      feature.description || `Feature: ${feature.name}`
+                    );
+                    
+                    // Update feature in JSON cache to link it to the Linear project
+                    const updatedFeature = {
+                      ...feature,
+                      id: `linear-project-${projectId}`,
+                    };
+                    await storage.saveFeatures([], [updatedFeature], 0);
+                    
+                    // Add to allProjects list so it's available for matching
+                    allProjects.push({ id: projectId, name: feature.name });
+                    linearProjectNames.add(featureNameLower);
+                    projectsCreated++;
+                    console.error(`[Linear Classification] Created Linear project "${feature.name}" for feature`);
+                  } catch (error) {
+                    console.error(`[Linear Classification] Failed to create Linear project for feature "${feature.name}":`, error);
+                  }
+                }
+              }
+              
+              if (projectsCreated > 0) {
+                console.error(`[Linear Classification] Created ${projectsCreated} Linear projects for features`);
+              }
+            }
+          } catch (error) {
+            console.error(`[Linear Classification] Failed to get features from JSON cache:`, error);
+          }
+        }
+
+        // Ensure "General" project exists
+        const generalProject = allProjects.find(p => p.name.toLowerCase() === "general");
+        let generalProjectId: string | undefined;
+        if (!generalProject) {
+          // Create General project if it doesn't exist
+          try {
+            generalProjectId = await linearTool.createOrGetProject(
+              "general",
+              "General",
+              "General project for unclassified issues"
+            );
+            console.error(`[Linear Classification] Created "General" project`);
+          } catch (error) {
+            console.error(`[Linear Classification] Failed to create General project:`, error);
+          }
+        } else {
+          generalProjectId = generalProject.id;
+        }
+
         // Fetch all issues from the team
         console.error(`[Linear Classification] Fetching issues from team ${team_name} (${teamId})...`);
         const issues = await linearTool.listTeamIssues(teamId, limit);
         console.error(`[Linear Classification] Found ${issues.length} issues`);
 
-        // Get all existing projects
-        const allProjects = await linearTool.listProjects();
+        // Build project maps
         const projectNameMap = new Map<string, { id: string; name: string }>();
         const projectIdMap = new Map<string, string>(); // project_id -> project_name
         for (const project of allProjects) {
           projectNameMap.set(project.name.toLowerCase().trim(), project);
           projectIdMap.set(project.id, project.name);
+        }
+        if (generalProjectId && !projectIdMap.has(generalProjectId)) {
+          projectIdMap.set(generalProjectId, "General");
         }
 
         // Classify issues
@@ -3317,17 +3469,100 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           unclassified_issues: [] as Array<{ id: string; identifier: string; title: string }>,
         };
 
-        // Get features from cache or extract if needed
-        let features: Array<{ id: string; name: string; description?: string }> = [];
-        if (create_projects && config.pmIntegration.documentation_urls && config.pmIntegration.documentation_urls.length > 0) {
+        // STEP 2: Get all features from database (if configured) or JSON (fallback)
+        let features: Array<{ 
+          id: string; 
+          name: string; 
+          description?: string; 
+          category?: string; 
+          priority?: string; 
+          related_keywords?: string[];
+          documentation_urls?: string[];
+          documentation_section?: string;
+        }> = [];
+        
+        // Check if database is configured
+        if (checkDbConfig()) {
           try {
-            const { getFeaturesFromCacheOrExtract } = await import("../export/featureCache.js");
-            console.error(`[Linear Classification] Getting features (from cache or extracting)...`);
-            features = await getFeaturesFromCacheOrExtract(config.pmIntegration.documentation_urls);
-            console.error(`[Linear Classification] Using ${features.length} features`);
+            // Get features from database (includes Linear projects we just synced)
+            const { query } = await import("../storage/db/client.js");
+            const dbFeatures = await query(
+              `SELECT id, name, description, category, priority, related_keywords, documentation_urls, documentation_section
+               FROM features
+               ORDER BY name`
+            );
+            features = dbFeatures.rows.map((row: any) => ({
+              id: row.id,
+              name: row.name,
+              description: row.description || undefined,
+              category: row.category,
+              priority: row.priority,
+              related_keywords: row.related_keywords || [],
+              documentation_urls: row.documentation_urls || [],
+              documentation_section: row.documentation_section || undefined,
+            }));
+            console.error(`[Linear Classification] Using ${features.length} features from database (includes ${projectFeatures.length} Linear projects)`);
+            
+            // Also get documentation features if available (they should already be in DB, but ensure they're there)
+            if (config.pmIntegration.documentation_urls && config.pmIntegration.documentation_urls.length > 0) {
+              try {
+                const { getFeaturesFromCacheOrExtract } = await import("../export/featureCache.js");
+                const docFeatures = await getFeaturesFromCacheOrExtract(config.pmIntegration.documentation_urls);
+                // Merge documentation features (avoid duplicates)
+                for (const docFeature of docFeatures) {
+                  if (!features.find(f => f.id === docFeature.id)) {
+                    const docFeatureAny = docFeature as any;
+                    features.push({
+                      id: docFeature.id,
+                      name: docFeature.name,
+                      description: docFeature.description,
+                      category: docFeature.category,
+                      priority: docFeature.priority,
+                      related_keywords: docFeature.related_keywords || [],
+                      documentation_urls: docFeatureAny.documentation_urls || [],
+                      documentation_section: docFeatureAny.documentation_section || undefined,
+                    });
+                  }
+                }
+                console.error(`[Linear Classification] Total ${features.length} features (${projectFeatures.length} Linear projects + ${docFeatures.length} documentation features)`);
+              } catch (error) {
+                console.error(`[Linear Classification] Failed to get documentation features:`, error);
+              }
+            }
           } catch (error) {
-            console.error(`[Linear Classification] Failed to get features:`, error);
-            // Continue without features
+            console.error(`[Linear Classification] Failed to get features from database:`, error);
+            // Fallback to JSON/cache
+            if (config.pmIntegration.documentation_urls && config.pmIntegration.documentation_urls.length > 0) {
+              try {
+                const { getFeaturesFromCacheOrExtract } = await import("../export/featureCache.js");
+                features = await getFeaturesFromCacheOrExtract(config.pmIntegration.documentation_urls);
+                console.error(`[Linear Classification] Fallback: Using ${features.length} features from JSON cache`);
+              } catch (error) {
+                console.error(`[Linear Classification] Failed to get features from cache:`, error);
+              }
+            }
+          }
+        } else {
+          // Database not configured - use JSON storage
+          console.error(`[Linear Classification] Database not configured, using JSON storage for features`);
+          if (config.pmIntegration.documentation_urls && config.pmIntegration.documentation_urls.length > 0) {
+            try {
+              const { getFeaturesFromCacheOrExtract } = await import("../export/featureCache.js");
+              const cachedFeatures = await getFeaturesFromCacheOrExtract(config.pmIntegration.documentation_urls);
+              features = cachedFeatures.map((f: any) => ({
+                id: f.id,
+                name: f.name,
+                description: f.description,
+                category: f.category,
+                priority: f.priority,
+                related_keywords: f.related_keywords || [],
+                documentation_urls: f.documentation_urls || [],
+                documentation_section: f.documentation_section || undefined,
+              }));
+              console.error(`[Linear Classification] Using ${features.length} features from JSON cache`);
+            } catch (error) {
+              console.error(`[Linear Classification] Failed to get features from JSON cache:`, error);
+            }
           }
         }
 
@@ -3341,84 +3576,131 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             // Issue doesn't have a project - try to classify it
             results.without_projects++;
             
-            if (create_projects) {
-              // Try to match with existing features or create a new project
-              let matchedProjectId: string | undefined;
-              
-              // Try to match with existing features using semantic similarity
-              if (features.length > 0 && process.env.OPENAI_API_KEY) {
-                try {
-                  const { createEmbedding } = await import("../core/classify/semantic.js");
-                  const issueText = `${issue.title} ${issue.description || ""}`.trim();
-                  const issueEmbedding = await createEmbedding(issueText, process.env.OPENAI_API_KEY);
-                  
-                  let bestMatch: { feature: typeof features[0]; similarity: number } | null = null;
-                  
-                  for (const feature of features) {
-                    const featureText = `${feature.name}: ${feature.description || ""}`.trim();
-                    const featureEmbedding = await createEmbedding(featureText, process.env.OPENAI_API_KEY);
-                    
-                    // Calculate cosine similarity
-                    let dotProduct = 0;
-                    let normA = 0;
-                    let normB = 0;
-                    for (let i = 0; i < issueEmbedding.length; i++) {
-                      dotProduct += issueEmbedding[i] * featureEmbedding[i];
-                      normA += issueEmbedding[i] * issueEmbedding[i];
-                      normB += featureEmbedding[i] * featureEmbedding[i];
-                    }
-                    const similarity = dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
-                    
-                    if (similarity > 0.6 && (!bestMatch || similarity > bestMatch.similarity)) {
-                      bestMatch = { feature, similarity };
+            // STEP 3: Match issue to existing projects (features)
+            let matchedProjectId: string | undefined;
+            
+            // Try to match with existing projects using semantic similarity
+            if (features.length > 0 && process.env.OPENAI_API_KEY) {
+              try {
+                const { createEmbedding } = await import("../core/classify/semantic.js");
+                const issueText = `${issue.title} ${issue.description || ""}`.trim();
+                const issueEmbedding = await createEmbedding(issueText, process.env.OPENAI_API_KEY);
+                
+                let bestMatch: { feature: typeof features[0]; similarity: number; projectId?: string } | null = null;
+                let allSimilarities: Array<{ name: string; similarity: number; hasProject: boolean }> = [];
+                
+                for (const feature of features) {
+                  // Check if this feature corresponds to a Linear project
+                  let projectId: string | undefined;
+                  if (feature.id.startsWith("linear-project-")) {
+                    // Extract Linear project ID from feature ID
+                    const linearProjectId = feature.id.replace("linear-project-", "");
+                    projectId = linearProjectId;
+                  } else {
+                    // Try to find Linear project by feature name
+                    const project = allProjects.find(p => p.name.toLowerCase() === feature.name.toLowerCase());
+                    if (project) {
+                      projectId = project.id;
                     }
                   }
                   
-                  if (bestMatch) {
-                    // Create or get project for this feature
-                    matchedProjectId = await linearTool.createOrGetProject(
-                      bestMatch.feature.id,
-                      bestMatch.feature.name,
-                      bestMatch.feature.description
-                    );
-                    results.projects_matched++;
+                  // Build feature text for embedding - include documentation content if available
+                  let featureText = `${feature.name}: ${feature.description || ""}`.trim();
+                  
+                  // If feature has documentation URLs, fetch and include documentation content for better matching
+                  if (feature.documentation_urls && feature.documentation_urls.length > 0) {
+                    try {
+                      const { getStorage } = await import("../storage/factory.js");
+                      const storage = getStorage();
+                      
+                      // Fetch documentation for all URLs
+                      const docs = await storage.getDocumentationMultiple(feature.documentation_urls);
+                      
+                      // Add documentation content to feature text (limit to avoid token limits)
+                      const docTexts = docs
+                        .map(doc => doc.content.substring(0, 2000)) // Limit each doc to 2000 chars
+                        .join("\n\n");
+                      
+                      if (docTexts) {
+                        featureText = `${feature.name}: ${feature.description || ""}\n\nDocumentation:\n${docTexts}`.trim();
+                        console.error(`[Linear Classification] Using documentation for feature "${feature.name}" (${docs.length} docs, ${docTexts.length} chars)`);
+                      }
+                    } catch (error) {
+                      // If documentation fetch fails, continue with just name/description
+                      console.error(`[Linear Classification] Failed to fetch documentation for feature "${feature.name}":`, error);
+                    }
                   }
-                } catch (error) {
-                  console.error(`[Linear Classification] Failed to match issue ${issue.identifier}:`, error);
-                }
-              }
-              
-              // If no match found, create a project based on issue title
-              if (!matchedProjectId) {
-                try {
-                  // Use issue title as project name (truncate if too long)
-                  const projectName = issue.title.length > 50 ? issue.title.substring(0, 47) + "..." : issue.title;
-                  const projectId = await linearTool.createOrGetProject(
-                    `issue-${issue.id}`,
-                    projectName,
-                    `Project created from issue: ${issue.identifier}`
-                  );
-                  matchedProjectId = projectId;
-                  results.projects_created++;
-                } catch (error) {
-                  console.error(`[Linear Classification] Failed to create project for issue ${issue.identifier}:`, error);
-                  results.unclassified_issues.push({
-                    id: issue.id,
-                    identifier: issue.identifier,
-                    title: issue.title,
+                  
+                  const featureEmbedding = await createEmbedding(featureText, process.env.OPENAI_API_KEY);
+                  
+                  // Calculate cosine similarity
+                  let dotProduct = 0;
+                  let normA = 0;
+                  let normB = 0;
+                  for (let i = 0; i < issueEmbedding.length; i++) {
+                    dotProduct += issueEmbedding[i] * featureEmbedding[i];
+                    normA += issueEmbedding[i] * issueEmbedding[i];
+                    normB += featureEmbedding[i] * featureEmbedding[i];
+                  }
+                  const similarity = dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
+                  
+                  // Track all similarities for debugging
+                  allSimilarities.push({ 
+                    name: feature.name, 
+                    similarity, 
+                    hasProject: !!projectId 
                   });
+                  
+                  // Threshold 0.5 for matching, and require projectId
+                  if (similarity > 0.5 && projectId && (!bestMatch || similarity > bestMatch.similarity)) {
+                    bestMatch = { feature, similarity, projectId };
+                  }
                 }
+                
+                // Log top similarities for debugging
+                allSimilarities.sort((a, b) => b.similarity - a.similarity);
+                const top3 = allSimilarities.slice(0, 3);
+                console.error(`[Linear Classification] Issue ${issue.identifier} top matches: ${top3.map(t => `${t.name} (${t.similarity.toFixed(2)}, hasProject: ${t.hasProject})`).join(", ")}`);
+                
+                if (bestMatch && bestMatch.projectId) {
+                  matchedProjectId = bestMatch.projectId;
+                  results.projects_matched++;
+                  console.error(`[Linear Classification] ✓ Matched issue ${issue.identifier} to project "${bestMatch.feature.name}" (similarity: ${bestMatch.similarity.toFixed(2)})`);
+                } else {
+                  console.error(`[Linear Classification] ✗ No match found for issue ${issue.identifier} (best similarity: ${top3[0]?.similarity.toFixed(2) || "N/A"}, threshold: 0.5)`);
+                }
+              } catch (error) {
+                console.error(`[Linear Classification] Failed to match issue ${issue.identifier}:`, error);
               }
-              
-              // Link issue to project if we found/created one
-              if (matchedProjectId) {
-                try {
-                  await linearTool.updateIssue(issue.id, { project_id: matchedProjectId });
-                  const projectName = projectIdMap.get(matchedProjectId) || "Unknown";
-                  results.issues_by_project[projectName] = (results.issues_by_project[projectName] || 0) + 1;
-                } catch (error) {
-                  console.error(`[Linear Classification] Failed to link issue ${issue.identifier} to project:`, error);
-                }
+            } else {
+              if (features.length === 0) {
+                console.error(`[Linear Classification] No features available for matching issue ${issue.identifier}`);
+              }
+              if (!process.env.OPENAI_API_KEY) {
+                console.error(`[Linear Classification] OPENAI_API_KEY not set, skipping semantic matching for issue ${issue.identifier}`);
+              }
+            }
+            
+            // STEP 4: If no match found, assign to "General" project
+            if (!matchedProjectId && generalProjectId) {
+              matchedProjectId = generalProjectId;
+              results.issues_by_project["General"] = (results.issues_by_project["General"] || 0) + 1;
+              console.error(`[Linear Classification] Assigning issue ${issue.identifier} to "General" project (no match found)`);
+            }
+            
+            // Link issue to project
+            if (matchedProjectId) {
+              try {
+                await linearTool.updateIssue(issue.id, { project_id: matchedProjectId });
+                const projectName = projectIdMap.get(matchedProjectId) || "Unknown";
+                results.issues_by_project[projectName] = (results.issues_by_project[projectName] || 0) + 1;
+              } catch (error) {
+                console.error(`[Linear Classification] Failed to link issue ${issue.identifier} to project:`, error);
+                results.unclassified_issues.push({
+                  id: issue.id,
+                  identifier: issue.identifier,
+                  title: issue.title,
+                });
               }
             } else {
               results.unclassified_issues.push({
@@ -3450,7 +3732,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     case "manage_documentation_cache": {
       const { action = "list", urls, use_cache = true } = args as {
-        action?: "list" | "fetch" | "extract_features" | "clear";
+        action?: "list" | "fetch" | "extract_features" | "compute_embeddings" | "clear";
         urls?: string[];
         use_cache?: boolean;
       };
@@ -3476,6 +3758,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
                       url: doc.url,
                       title: doc.title,
                       content_length: doc.content.length,
+                      sections_count: doc.sections?.length || 0,
                       fetched_at: doc.fetched_at,
                     })),
                   }, null, 2),
@@ -3505,6 +3788,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
                         url: doc.url,
                         title: doc.title,
                         content_length: doc.content.length,
+                        sections_count: doc.sections?.length || 0,
                         fetched_at: doc.fetched_at,
                       })),
                     }, null, 2),
@@ -3525,6 +3809,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
                         url: doc.url,
                         title: doc.title,
                         content_length: doc.content.length,
+                        sections_count: doc.sections?.length || 0,
                         fetched_at: doc.fetched_at,
                       })),
                     }, null, 2),
@@ -3574,6 +3859,30 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
                       priority: f.priority,
                     })),
                     cache_info: cacheInfo,
+                  }, null, 2),
+                },
+              ],
+            };
+          }
+
+          case "compute_embeddings": {
+            // Compute embeddings for documentation, sections, and features
+            if (!process.env.OPENAI_API_KEY) {
+              throw new Error("OPENAI_API_KEY is required for computing embeddings.");
+            }
+
+            const { computeAllEmbeddings } = await import("../storage/db/embeddings.js");
+            
+            console.error("[Documentation Cache] Starting embedding computation...");
+            await computeAllEmbeddings(process.env.OPENAI_API_KEY);
+
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify({
+                    success: true,
+                    message: "Embeddings computed for all documentation, sections, and features",
                   }, null, 2),
                 },
               ],

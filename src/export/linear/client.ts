@@ -105,27 +105,45 @@ export class LinearIntegration extends BasePMTool {
    * Checks for duplicate project names before creating
    */
   async createOrGetProject(featureId: string, featureName: string, featureDescription?: string): Promise<string> {
+    // Sanitize feature ID - Linear project IDs must be valid UUIDs or short strings
+    // If featureId is too long or contains invalid chars, use a hash or truncate
+    let sanitizedFeatureId = featureId;
+    if (featureId.length > 50 || !/^[a-zA-Z0-9_-]+$/.test(featureId)) {
+      // Create a shorter, sanitized ID from the feature name
+      sanitizedFeatureId = featureName.toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .substring(0, 50);
+    }
+
     // Check cache by feature ID first
-    if (this.projectCache.has(featureId)) {
-      return this.projectCache.get(featureId)!;
+    if (this.projectCache.has(sanitizedFeatureId)) {
+      return this.projectCache.get(sanitizedFeatureId)!;
+    }
+
+    // Sanitize project name - Linear has limits on project name length
+    // Linear project names should be max 255 characters, but we'll be conservative
+    const sanitizedName = featureName.trim().substring(0, 100);
+    if (!sanitizedName) {
+      throw new Error(`Invalid project name: "${featureName}"`);
     }
 
     // Check cache by project name (case-insensitive) to avoid duplicates
-    const nameKey = featureName.toLowerCase().trim();
+    const nameKey = sanitizedName.toLowerCase().trim();
     if (this.projectNameCache.has(nameKey)) {
       const existingProjectId = this.projectNameCache.get(nameKey)!;
       // Also cache by feature ID for faster future lookups
-      this.projectCache.set(featureId, existingProjectId);
-      log(`Found existing Linear project by name: ${featureName} (${existingProjectId})`);
+      this.projectCache.set(sanitizedFeatureId, existingProjectId);
+      log(`Found existing Linear project by name: ${sanitizedName} (${existingProjectId})`);
       return existingProjectId;
     }
 
     // Try to find existing project by name in Linear
-    const existingProject = await this.findProjectByName(featureName);
+    const existingProject = await this.findProjectByName(sanitizedName);
     if (existingProject) {
       const projectId = existingProject.id;
       // Cache by both feature ID and name
-      this.projectCache.set(featureId, projectId);
+      this.projectCache.set(sanitizedFeatureId, projectId);
       this.projectNameCache.set(nameKey, projectId);
       log(`Found existing Linear project: ${existingProject.name} (${projectId})`);
       return projectId;
@@ -141,14 +159,22 @@ export class LinearIntegration extends BasePMTool {
             name
             url
           }
+          error {
+            message
+          }
         }
       }
     `;
 
+    // Sanitize description too
+    const sanitizedDescription = (featureDescription || `Project for ${sanitizedName} feature`)
+      .trim()
+      .substring(0, 1000); // Linear description limit
+
     const variables = {
       input: {
-        name: featureName,
-        description: featureDescription || `Project for ${featureName} feature`,
+        name: sanitizedName,
+        description: sanitizedDescription,
         // Note: teamIds is optional - projects are workspace-level in Linear
         // If teamId is provided, we can associate the project with the team
         ...(this.teamId && { teamIds: [this.teamId] }),
@@ -159,22 +185,42 @@ export class LinearIntegration extends BasePMTool {
       const response = await this.graphqlRequest(query, variables);
       
       if (!response.data?.projectCreate?.success) {
-        const errorMsg = response.errors ? JSON.stringify(response.errors) : "Unknown error";
-        throw new Error(`Failed to create Linear project: ${errorMsg}`);
+        const errorMsg = response.data?.projectCreate?.error?.message 
+          || (response.errors ? JSON.stringify(response.errors) : "Unknown error");
+        throw new Error(`Failed to create Linear project "${sanitizedName}": ${errorMsg}`);
       }
 
       const project = response.data.projectCreate.project;
+      if (!project) {
+        throw new Error(`Linear API returned success but no project data for "${sanitizedName}"`);
+      }
+
       const projectId = project.id;
       
       // Cache by both feature ID and name
-      this.projectCache.set(featureId, projectId);
+      this.projectCache.set(sanitizedFeatureId, projectId);
       this.projectNameCache.set(nameKey, projectId);
       
       log(`Created Linear project: ${project.name} (${projectId})`);
       
       return projectId;
     } catch (error) {
-      logError(`Failed to create Linear project for feature ${featureName}:`, error);
+      logError(`Failed to create Linear project for feature "${sanitizedName}" (ID: ${sanitizedFeatureId}):`, error);
+      // If it's a duplicate name error, try to find the existing project
+      if (error instanceof Error && (error.message.includes('duplicate') || error.message.includes('already exists'))) {
+        try {
+          const existingProject = await this.findProjectByName(sanitizedName);
+          if (existingProject) {
+            const projectId = existingProject.id;
+            this.projectCache.set(sanitizedFeatureId, projectId);
+            this.projectNameCache.set(nameKey, projectId);
+            log(`Found existing Linear project after duplicate error: ${existingProject.name} (${projectId})`);
+            return projectId;
+          }
+        } catch (findError) {
+          // Ignore find error, throw original error
+        }
+      }
       throw error;
     }
   }

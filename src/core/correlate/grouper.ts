@@ -124,7 +124,7 @@ async function getSignalEmbedding(
 }
 
 /**
- * Get or compute embedding for a feature
+ * Get or compute embedding for a feature (uses stored embeddings when available)
  */
 async function getFeatureEmbedding(
   feature: Feature,
@@ -135,9 +135,32 @@ async function getFeatureEmbedding(
     return featureEmbeddings.get(feature.id)!;
   }
   
+  // Try to get from database first
+  try {
+    const { getFeatureEmbedding: getStoredFeatureEmbedding } = await import("../../storage/db/embeddings.js");
+    const storedEmbedding = await getStoredFeatureEmbedding(feature.id);
+    if (storedEmbedding) {
+      featureEmbeddings.set(feature.id, storedEmbedding);
+      return storedEmbedding;
+    }
+  } catch (error) {
+    // Database not available or error, continue to compute
+  }
+  
+  // Compute if not found
   const content = `${feature.name}\n\n${feature.description}`;
   const embedding = await createEmbedding(content, apiKey);
   featureEmbeddings.set(feature.id, embedding);
+  
+  // Try to save to database (don't fail if it doesn't work)
+  try {
+    const { saveFeatureEmbedding } = await import("../../storage/db/embeddings.js");
+    const { createHash } = await import("crypto");
+    const contentHash = createHash("md5").update(content).digest("hex");
+    await saveFeatureEmbedding(feature.id, embedding, contentHash);
+  } catch (error) {
+    // Ignore errors when saving
+  }
   
   return embedding;
 }

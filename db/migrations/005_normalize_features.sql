@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS features (
 
 -- Add missing columns if table already exists
 ALTER TABLE features ADD COLUMN IF NOT EXISTS documentation_urls TEXT[];
+ALTER TABLE features ADD COLUMN IF NOT EXISTS documentation_section TEXT;
 ALTER TABLE features ADD COLUMN IF NOT EXISTS extracted_at TIMESTAMP DEFAULT NOW();
 
 -- Create index for faster lookups

@@ -6,6 +6,9 @@
 import { readFile, readdir } from "fs/promises";
 import { join } from "path";
 import { query, initDatabase, checkConnection } from "../src/storage/db/client.js";
+import dotenv from "dotenv";
+dotenv.config();
+
 
 async function runMigrations() {
   console.log("Setting up PostgreSQL database for UNMute MCP...\n");

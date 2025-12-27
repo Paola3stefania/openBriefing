@@ -17,7 +17,7 @@ import { DatabaseStorage } from "./db/index.js";
 /**
  * Check if database is configured
  */
-function hasDatabaseConfig(): boolean {
+export function hasDatabaseConfig(): boolean {
   return !!(
     process.env.DATABASE_URL ||
     (process.env.DB_HOST && process.env.DB_NAME)

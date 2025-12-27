@@ -533,30 +533,58 @@ export class DatabaseStorage implements IStorage {
 
     await transaction(async (client) => {
       for (const doc of docs) {
+        // Insert/update documentation
         await client.query(
-          `INSERT INTO documentation_cache (url, title, content, sections, fetched_at)
-           VALUES ($1, $2, $3, $4, $5)
+          `INSERT INTO documentation_cache (url, title, content, fetched_at)
+           VALUES ($1, $2, $3, $4)
            ON CONFLICT (url) DO UPDATE SET
              title = EXCLUDED.title,
              content = EXCLUDED.content,
-             sections = EXCLUDED.sections,
              fetched_at = EXCLUDED.fetched_at,
              updated_at = NOW()`,
           [
             doc.url,
             doc.title || null,
             doc.content,
-            doc.sections ? JSON.stringify(doc.sections) : null,
             doc.fetched_at ? new Date(doc.fetched_at) : new Date(),
           ]
         );
+
+        // Delete existing sections and insert new ones
+        if (doc.sections && doc.sections.length > 0) {
+          await client.query(
+            `DELETE FROM documentation_sections WHERE documentation_url = $1`,
+            [doc.url]
+          );
+
+          for (let i = 0; i < doc.sections.length; i++) {
+            const section = doc.sections[i];
+            await client.query(
+              `INSERT INTO documentation_sections (documentation_url, title, content, section_url, section_order)
+               VALUES ($1, $2, $3, $4, $5)`,
+              [
+                doc.url,
+                section.title,
+                section.content,
+                section.url || null,
+                i,
+              ]
+            );
+          }
+        } else {
+          // Remove sections if none provided
+          await client.query(
+            `DELETE FROM documentation_sections WHERE documentation_url = $1`,
+            [doc.url]
+          );
+        }
       }
     });
   }
 
   async getDocumentation(url: string): Promise<DocumentationContent | null> {
     const result = await query(
-      `SELECT url, title, content, sections, fetched_at
+      `SELECT url, title, content, fetched_at
        FROM documentation_cache
        WHERE url = $1`,
       [url]
@@ -567,11 +595,29 @@ export class DatabaseStorage implements IStorage {
     }
 
     const row = result.rows[0];
+
+    // Fetch sections from separate table
+    const sectionsResult = await query(
+      `SELECT title, content, section_url
+       FROM documentation_sections
+       WHERE documentation_url = $1
+       ORDER BY section_order ASC`,
+      [url]
+    );
+
+    const sections = sectionsResult.rows.length > 0
+      ? sectionsResult.rows.map((s: any) => ({
+          title: s.title,
+          content: s.content,
+          url: s.section_url || undefined,
+        }))
+      : undefined;
+
     return {
       url: row.url,
       title: row.title || undefined,
       content: row.content,
-      sections: row.sections ? JSON.parse(row.sections) : undefined,
+      sections,
       fetched_at: row.fetched_at?.toISOString() || new Date().toISOString(),
     };
   }
@@ -580,38 +626,89 @@ export class DatabaseStorage implements IStorage {
     if (urls.length === 0) return [];
 
     const result = await query(
-      `SELECT url, title, content, sections, fetched_at
+      `SELECT url, title, content, fetched_at
        FROM documentation_cache
        WHERE url = ANY($1)`,
       [urls]
     );
 
+    // Fetch all sections for these URLs in one query
+    const sectionsResult = await query(
+      `SELECT documentation_url, title, content, section_url, section_order
+       FROM documentation_sections
+       WHERE documentation_url = ANY($1)
+       ORDER BY documentation_url, section_order ASC`,
+      [urls]
+    );
+
+    // Group sections by URL
+    const sectionsByUrl = new Map<string, Array<{ title: string; content: string; url?: string }>>();
+    for (const section of sectionsResult.rows) {
+      if (!sectionsByUrl.has(section.documentation_url)) {
+        sectionsByUrl.set(section.documentation_url, []);
+      }
+      sectionsByUrl.get(section.documentation_url)!.push({
+        title: section.title,
+        content: section.content,
+        url: section.section_url || undefined,
+      });
+    }
+
     return result.rows.map((row: any) => ({
       url: row.url,
       title: row.title || undefined,
       content: row.content,
-      sections: row.sections ? JSON.parse(row.sections) : undefined,
+      sections: sectionsByUrl.get(row.url) || undefined,
       fetched_at: row.fetched_at?.toISOString() || new Date().toISOString(),
     }));
   }
 
   async getAllCachedDocumentation(): Promise<DocumentationContent[]> {
     const result = await query(
-      `SELECT url, title, content, sections, fetched_at
+      `SELECT url, title, content, fetched_at
        FROM documentation_cache
        ORDER BY fetched_at DESC`
     );
+
+    if (result.rows.length === 0) {
+      return [];
+    }
+
+    const urls = result.rows.map((row: any) => row.url);
+
+    // Fetch all sections
+    const sectionsResult = await query(
+      `SELECT documentation_url, title, content, section_url, section_order
+       FROM documentation_sections
+       WHERE documentation_url = ANY($1)
+       ORDER BY documentation_url, section_order ASC`,
+      [urls]
+    );
+
+    // Group sections by URL
+    const sectionsByUrl = new Map<string, Array<{ title: string; content: string; url?: string }>>();
+    for (const section of sectionsResult.rows) {
+      if (!sectionsByUrl.has(section.documentation_url)) {
+        sectionsByUrl.set(section.documentation_url, []);
+      }
+      sectionsByUrl.get(section.documentation_url)!.push({
+        title: section.title,
+        content: section.content,
+        url: section.section_url || undefined,
+      });
+    }
 
     return result.rows.map((row: any) => ({
       url: row.url,
       title: row.title || undefined,
       content: row.content,
-      sections: row.sections ? JSON.parse(row.sections) : undefined,
+      sections: sectionsByUrl.get(row.url) || undefined,
       fetched_at: row.fetched_at?.toISOString() || new Date().toISOString(),
     }));
   }
 
   async clearDocumentationCache(): Promise<void> {
+    // Sections will be deleted automatically due to CASCADE
     await query("DELETE FROM documentation_cache");
   }
 
