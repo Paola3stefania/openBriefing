@@ -20,6 +20,10 @@ if [ ! -d "node_modules" ]; then
   exit 1
 fi
 
+# Set up logging if MCP_LOG_FILE is not set but we want to enable it
+# Uncomment the line below to enable file logging:
+# export MCP_LOG_FILE="$PROJECT_DIR/logs/mcp-server.log"
+
 # Run the MCP server
 exec node dist/index.js
 

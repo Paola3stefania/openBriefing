@@ -97,7 +97,8 @@ function calculateAverageEmbedding(embeddings: Embedding[]): Embedding {
  */
 export async function mapGroupsToFeatures(
   groups: GroupingGroup[],
-  features: Feature[]
+  features: Feature[],
+  minSimilarity: number = 0.5
 ): Promise<GroupingGroup[]> {
   if (features.length === 0) {
     log("No features provided, skipping feature mapping");
@@ -192,7 +193,7 @@ export async function mapGroupsToFeatures(
       
       const similarity = cosineSimilarity(groupEmbedding, featureEmb);
       
-      if (similarity >= 0.5) { // Feature match threshold
+      if (similarity >= minSimilarity) {
         affectedFeatures.push({ id: feature.id, similarity });
       }
     }

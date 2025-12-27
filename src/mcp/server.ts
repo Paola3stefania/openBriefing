@@ -72,6 +72,20 @@ discord.once("clientReady", () => {
 });
 
 /**
+ * Safely parse JSON with better error messages
+ */
+function safeJsonParse<T = any>(content: string, filePath?: string): T {
+  try {
+    return JSON.parse(content) as T;
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const fileContext = filePath ? ` in file: ${filePath}` : "";
+    const preview = content.substring(0, 100).replace(/\n/g, " ");
+    throw new Error(`Failed to parse JSON${fileContext}: ${errorMessage}. Content preview: ${preview}...`);
+  }
+}
+
+/**
  * Find Discord cache file for a channel, handling files with timestamp suffixes
  */
 async function findDiscordCacheFile(channelId: string): Promise<string | null> {
@@ -442,13 +456,15 @@ mcpServer.server.setRequestHandler(ListToolsRequestSchema, async () => ({
 
 // Handle call tool request
 mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  // Extract name early so it's available in catch block
   const { name, arguments: args } = request.params;
-
+  
+  try {
     if (!discordReady) {
-    throw new Error("Discord client is not ready yet");
+      throw new Error("Discord client is not ready yet");
     }
 
-  switch (name) {
+    switch (name) {
     case "list_servers": {
     const guilds = discord.guilds.cache.map((guild) => ({
       id: guild.id,
@@ -1477,7 +1493,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         try {
           const filePath = join(resultsDir, file);
           const content = await readFile(filePath, "utf-8");
-          const parsed = JSON.parse(content);
+          const parsed = safeJsonParse(content, filePath);
           const threadCount = parsed.classified_threads?.length || 0;
           
           if (threadCount > maxThreads) {
@@ -1493,7 +1509,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         outputPath = join(resultsDir, bestFile);
         try {
           const existingContent = await readFile(outputPath, "utf-8");
-          const existingData = JSON.parse(existingContent);
+          const existingData = safeJsonParse(existingContent, outputPath);
           existingClassifiedThreads = existingData.classified_threads || [];
           console.error(`[Classification] Will merge into existing file: ${bestFile} (${existingClassifiedThreads.length} threads)`);
         } catch {
@@ -1900,7 +1916,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           sourceFile = grouping_data_path;
           console.error(`[Export] Using grouping data from ${grouping_data_path}`);
           const groupingContent = await readFile(grouping_data_path, "utf-8");
-          const groupingData = JSON.parse(groupingContent);
+          const groupingData = safeJsonParse(groupingContent, grouping_data_path);
           
           // Import the export function for grouping data
           const { exportGroupingToPMTool } = await import("../export/groupingExporter.js");
@@ -2141,7 +2157,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           try {
             const filePath = join(resultsDir, file);
             const content = await readFile(filePath, "utf-8");
-            const parsed = JSON.parse(content) as ClassificationResults;
+            const parsed = safeJsonParse<ClassificationResults>(content, filePath);
             const threadCount = parsed.classified_threads?.length || 0;
             
             if (threadCount > maxThreads) {
@@ -2157,7 +2173,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (bestFile && !semantic_only) {
           const classificationPath = join(resultsDir, bestFile);
           const classificationContent = await readFile(classificationPath, "utf-8");
-          const parsed = JSON.parse(classificationContent) as ClassificationResults;
+          const parsed = safeJsonParse<ClassificationResults>(classificationContent, classificationPath);
           
           // Only use if it has actual data
           if (parsed.classified_threads && parsed.classified_threads.length > 0) {
@@ -2187,7 +2203,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
               throw new Error("No GitHub issues cache found. Run fetch_github_issues first.");
             }
             const issuesCacheContent = await readFile(issuesCachePath, "utf-8");
-            const issuesCache = JSON.parse(issuesCacheContent) as IssuesCache;
+            const issuesCache = safeJsonParse<IssuesCache>(issuesCacheContent, issuesCachePath);
             
             // Organize Discord messages by thread
             const allMessages = getAllMessagesFromCache(discordCache);
@@ -2424,14 +2440,16 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           let outputPath: string;
           let existingGroups: any[] = [];
           let existingUngrouped: any[] = [];
+          let originalTimestamp: string | undefined; // Preserve original timestamp
 
           if (existingGroupingFile) {
             outputPath = join(resultsDir, existingGroupingFile);
             try {
               const existingContent = await readFile(outputPath, "utf-8");
-              const existingData = JSON.parse(existingContent);
+              const existingData = safeJsonParse(existingContent, outputPath);
               existingGroups = existingData.groups || [];
               existingUngrouped = existingData.ungrouped_threads || [];
+              originalTimestamp = existingData.timestamp; // Preserve original timestamp
               console.error(`[Grouping] Merging with existing file: ${existingGroupingFile} (${existingGroups.length} groups, ${existingUngrouped.length} ungrouped)`);
             } catch {
               outputPath = join(resultsDir, `grouping-${actualChannelId}-${Date.now()}.json`);
@@ -2457,7 +2475,8 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             const mergedUngrouped = Array.from(allUngroupedMap.values());
             
             const outputData = {
-              timestamp: new Date().toISOString(),
+              timestamp: originalTimestamp || new Date().toISOString(), // Preserve original or create new
+              updated_at: new Date().toISOString(), // Always update to current time
               channel_id: actualChannelId,
               grouping_method: "issue-based",
               options: { min_similarity, max_groups },
@@ -2675,7 +2694,8 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           
           // Final save with merged data (mergedGroups and mergedUngrouped already computed above)
           outputData = {
-            timestamp: new Date().toISOString(),
+            timestamp: originalTimestamp || new Date().toISOString(), // Preserve original or create new
+            updated_at: new Date().toISOString(), // Always update to current time
             channel_id: actualChannelId,
             grouping_method: "issue-based",
             options: { min_similarity, max_groups },
@@ -2744,7 +2764,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             throw new Error("No GitHub issues cache found. Run fetch_github_issues first.");
           }
           const issuesCacheContent = await readFile(issuesCachePath, "utf-8");
-          const issuesCache = JSON.parse(issuesCacheContent) as IssuesCache;
+          const issuesCache = safeJsonParse<IssuesCache>(issuesCacheContent, issuesCachePath);
           
           // Convert to Signal format
           const signals: Signal[] = [];
@@ -2863,7 +2883,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             semanticOutputPath = join(resultsDir, existingSemanticFile);
             try {
               const existingContent = await readFile(semanticOutputPath, "utf-8");
-              const existingData = JSON.parse(existingContent);
+              const existingData = safeJsonParse(existingContent, semanticOutputPath);
               existingSemanticGroups = existingData.groups || [];
               console.error(`[Grouping] Merging with existing file: ${existingSemanticFile} (${existingSemanticGroups.length} groups)`);
             } catch {
@@ -2924,6 +2944,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           
           outputData = {
             timestamp: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
             channel_id: actualChannelId,
             grouping_method: "semantic",
             options: { min_similarity, max_groups },
@@ -3019,15 +3040,16 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Load grouping data
         console.error(`[Feature Matching] Loading grouping data from ${groupingPath}...`);
         const groupingContent = await readFile(groupingPath, "utf-8");
-        const groupingData = JSON.parse(groupingContent) as {
+        const groupingData = safeJsonParse<{
           timestamp: string;
+          updated_at?: string;
           channel_id: string;
           grouping_method: string;
           stats: any;
           groups: any[];
           ungrouped_threads?: any[];
           features?: Array<{ id: string; name: string }>;
-        };
+        }>(groupingContent, groupingPath);
 
         // Extract features from documentation
         console.error(`[Feature Matching] Extracting features from documentation...`);
@@ -3056,11 +3078,17 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Map groups to features
         console.error(`[Feature Matching] Mapping ${groupingData.groups.length} groups to features...`);
         const { mapGroupsToFeatures } = await import("../export/featureMapper.js");
-        const groupsWithFeatures = await mapGroupsToFeatures(groupingData.groups, features);
+        const groupsWithFeatures = await mapGroupsToFeatures(groupingData.groups, features, min_similarity);
 
         // Update grouping data
         groupingData.groups = groupsWithFeatures;
         groupingData.features = features.map(f => ({ id: f.id, name: f.name }));
+        
+        // Update timestamp fields - preserve original timestamp, update updated_at
+        if (!groupingData.timestamp) {
+          groupingData.timestamp = new Date().toISOString();
+        }
+        groupingData.updated_at = new Date().toISOString();
         
         // Update stats
         const crossCuttingCount = groupsWithFeatures.filter(g => g.is_cross_cutting).length;
@@ -3102,6 +3130,22 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     default:
       throw new Error(`Unknown tool: ${name}`);
+    }
+  } catch (error) {
+    // Catch and format errors properly for MCP client
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    
+    // Check if it's a JSON parsing error and provide more context
+    if (errorMessage.includes("Unexpected token")) {
+      logError("JSON parsing error:", error);
+      throw new Error(`Invalid JSON data encountered: ${errorMessage}. This may indicate a corrupted or invalid file.`);
+    }
+    
+    // Log the error for debugging
+    logError(`Error handling command: ${name}`, error);
+    
+    // Re-throw with formatted message
+    throw new Error(`Command failed: ${errorMessage}`);
   }
 });
 
