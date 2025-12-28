@@ -110,28 +110,28 @@ export async function saveClassificationHistory(
   const hasDatabase = !!(process.env.DATABASE_URL || (process.env.DB_HOST && process.env.DB_NAME));
 
   if (hasDatabase) {
-    // Save to database
+    // Save to database using Prisma
     try {
-      const { transaction } = await import("../db/client.js");
+      const { prisma } = await import("../db/prisma.js");
       const { getStorage } = await import("../factory.js");
       const storage = getStorage();
-      
-      await transaction(async (client: any) => {
-        // First, ensure all channels exist (to satisfy foreign key constraints)
-        const channelIds = new Set<string>();
-        for (const [messageId, msg] of Object.entries(history.messages)) {
-          channelIds.add(msg.channel_id);
-        }
-        for (const [threadId, thread] of Object.entries(history.threads || {})) {
-          channelIds.add(thread.channel_id);
-        }
-        
-        // Upsert all channels
-        for (const channelId of channelIds) {
-          await storage.upsertChannel(channelId);
-        }
-        
-        // Save all message classifications
+
+      // First, ensure all channels exist (to satisfy foreign key constraints)
+      const channelIds = new Set<string>();
+      for (const [messageId, msg] of Object.entries(history.messages)) {
+        channelIds.add(msg.channel_id);
+      }
+      for (const [threadId, thread] of Object.entries(history.threads || {})) {
+        channelIds.add(thread.channel_id);
+      }
+
+      // Upsert all channels
+      for (const channelId of channelIds) {
+        await storage.upsertChannel(channelId);
+      }
+
+      // Save all message classifications in a transaction
+      await prisma.$transaction(async (tx) => {
         for (const [messageId, msg] of Object.entries(history.messages)) {
           // Find thread_id for this message by checking threads
           let threadId: string | undefined;
@@ -146,14 +146,24 @@ export async function saveClassificationHistory(
             }
           }
 
-          await client.query(
-            `INSERT INTO classification_history (channel_id, message_id, thread_id, classified_at)
-             VALUES ($1, $2, $3, $4)
-             ON CONFLICT (channel_id, message_id) DO UPDATE SET
-               thread_id = EXCLUDED.thread_id,
-               classified_at = EXCLUDED.classified_at`,
-            [msg.channel_id, messageId, threadId || null, new Date(msg.classified_at)]
-          );
+          await tx.classificationHistory.upsert({
+            where: {
+              channelId_messageId: {
+                channelId: msg.channel_id,
+                messageId: messageId,
+              },
+            },
+            update: {
+              threadId: threadId || null,
+              classifiedAt: new Date(msg.classified_at),
+            },
+            create: {
+              channelId: msg.channel_id,
+              messageId: messageId,
+              threadId: threadId || null,
+              classifiedAt: new Date(msg.classified_at),
+            },
+          });
         }
       });
     } catch (error) {

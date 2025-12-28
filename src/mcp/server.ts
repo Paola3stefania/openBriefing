@@ -3398,20 +3398,21 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Check if database is configured, otherwise use JSON storage
         const { hasDatabaseConfig: checkDbConfig } = await import("../storage/factory.js");
         if (checkDbConfig()) {
-          // Database: Query features from database
+          // Database: Query features from database using Prisma
           console.error(`[Linear Classification] Checking for features without Linear projects (database)...`);
-          const { query } = await import("../storage/db/client.js");
-          const allFeatures = await query(
-            `SELECT id, name, description, category, priority
-             FROM features
-             WHERE id NOT LIKE 'linear-project-%'
-             ORDER BY name`
-          );
-          
+          const { prisma } = await import("../storage/db/prisma.js");
+          const allFeatures = await prisma.feature.findMany({
+            where: {
+              NOT: { id: { startsWith: "linear-project-" } },
+            },
+            select: { id: true, name: true, description: true, category: true, priority: true },
+            orderBy: { name: "asc" },
+          });
+
           const linearProjectNames = new Set(allProjects.map(p => p.name.toLowerCase().trim()));
           let projectsCreated = 0;
-          
-          for (const feature of allFeatures.rows) {
+
+          for (const feature of allFeatures) {
             const featureNameLower = feature.name.toLowerCase().trim();
             
             // Check if a Linear project with this name already exists
@@ -3423,15 +3424,21 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
                   feature.name,
                   feature.description || `Feature: ${feature.name}`
                 );
-                
+
                 // Update the feature in database to link it to the Linear project
-                await query(
-                  `UPDATE features 
-                   SET id = $1, updated_at = NOW()
-                   WHERE id = $2`,
-                  [`linear-project-${projectId}`, feature.id]
-                );
-                
+                // Since Prisma doesn't allow updating the primary key directly, we need to delete and recreate
+                const existingFeature = await prisma.feature.findUnique({ where: { id: feature.id } });
+                if (existingFeature) {
+                  await prisma.feature.delete({ where: { id: feature.id } });
+                  await prisma.feature.create({
+                    data: {
+                      ...existingFeature,
+                      id: `linear-project-${projectId}`,
+                      updatedAt: new Date(),
+                    },
+                  });
+                }
+
                 // Add to allProjects list so it's available for matching
                 allProjects.push({ id: projectId, name: feature.name });
                 linearProjectNames.add(featureNameLower);
@@ -3561,22 +3568,20 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Check if database is configured
         if (checkDbConfig()) {
           try {
-            // Get features from database (includes Linear projects we just synced)
-            const { query } = await import("../storage/db/client.js");
-            const dbFeatures = await query(
-              `SELECT id, name, description, category, priority, related_keywords, documentation_urls, documentation_section
-               FROM features
-               ORDER BY name`
-            );
-            features = dbFeatures.rows.map((row: any) => ({
+            // Get features from database using Prisma (includes Linear projects we just synced)
+            const { prisma } = await import("../storage/db/prisma.js");
+            const dbFeatures = await prisma.feature.findMany({
+              orderBy: { name: "asc" },
+            });
+            features = dbFeatures.map((row) => ({
               id: row.id,
               name: row.name,
               description: row.description || undefined,
-              category: row.category,
-              priority: row.priority,
-              related_keywords: row.related_keywords || [],
-              documentation_urls: row.documentation_urls || [],
-              documentation_section: row.documentation_section || undefined,
+              category: row.category || undefined,
+              priority: row.priority || undefined,
+              related_keywords: row.relatedKeywords || [],
+              documentation_urls: row.documentationUrls || [],
+              documentation_section: row.documentationSection || undefined,
             }));
             console.error(`[Linear Classification] Using ${features.length} features from database (includes ${projectFeatures.length} Linear projects)`);
             
