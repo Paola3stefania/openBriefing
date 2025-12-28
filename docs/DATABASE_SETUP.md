@@ -47,7 +47,11 @@ DATABASE_URL=postgresql://user@localhost:5432/unmute
 ### 4. Run Migrations
 
 ```bash
-npm run db:migrate
+# Generate Prisma Client and apply migrations
+npx prisma migrate deploy
+
+# Or for development (creates migration files)
+npx prisma migrate dev
 ```
 
 ## Switch Back to JSON

@@ -25,6 +25,155 @@ export class DatabaseStorage implements IStorage {
     });
   }
 
+  async saveDiscordMessage(message: {
+    id: string;
+    channelId: string;
+    authorId: string;
+    authorUsername?: string;
+    authorDiscriminator?: string;
+    authorBot?: boolean;
+    authorAvatar?: string;
+    content: string;
+    createdAt: string;
+    editedAt?: string | null;
+    timestamp: string;
+    channelName?: string;
+    guildId?: string;
+    guildName?: string;
+    attachments?: Array<{
+      id: string;
+      filename: string;
+      url: string;
+      size: number;
+      content_type?: string;
+    }>;
+    embeds?: number;
+    mentions?: string[];
+    reactions?: Array<{
+      emoji: string;
+      count: number;
+    }>;
+    threadId?: string;
+    threadName?: string;
+    messageReference?: {
+      message_id: string;
+      channel_id: string;
+      guild_id?: string;
+    } | null;
+    url?: string;
+  }): Promise<void> {
+    await this.saveDiscordMessages([message]);
+  }
+
+  async saveDiscordMessages(messages: Array<{
+    id: string;
+    channelId: string;
+    authorId: string;
+    authorUsername?: string;
+    authorDiscriminator?: string;
+    authorBot?: boolean;
+    authorAvatar?: string;
+    content: string;
+    createdAt: string;
+    editedAt?: string | null;
+    timestamp: string;
+    channelName?: string;
+    guildId?: string;
+    guildName?: string;
+    attachments?: Array<{
+      id: string;
+      filename: string;
+      url: string;
+      size: number;
+      content_type?: string;
+    }>;
+    embeds?: number;
+    mentions?: string[];
+    reactions?: Array<{
+      emoji: string;
+      count: number;
+    }>;
+    threadId?: string;
+    threadName?: string;
+    messageReference?: {
+      message_id: string;
+      channel_id: string;
+      guild_id?: string;
+    } | null;
+    url?: string;
+  }>): Promise<void> {
+    if (messages.length === 0) return;
+
+    await prisma.$transaction(async (tx) => {
+      for (const msg of messages) {
+        // Ensure channel exists
+        await tx.channel.upsert({
+          where: { id: msg.channelId },
+          update: {
+            name: msg.channelName ?? null,
+            guildId: msg.guildId ?? null,
+          },
+          create: {
+            id: msg.channelId,
+            name: msg.channelName ?? null,
+            guildId: msg.guildId ?? null,
+          },
+        });
+
+        // Upsert message
+        await tx.discordMessage.upsert({
+          where: { id: msg.id },
+          update: {
+            authorId: msg.authorId,
+            authorUsername: msg.authorUsername ?? null,
+            authorDiscriminator: msg.authorDiscriminator ?? null,
+            authorBot: msg.authorBot ?? false,
+            authorAvatar: msg.authorAvatar ?? null,
+            content: msg.content,
+            createdAt: new Date(msg.createdAt),
+            editedAt: msg.editedAt ? new Date(msg.editedAt) : null,
+            timestamp: msg.timestamp,
+            channelName: msg.channelName ?? null,
+            guildId: msg.guildId ?? null,
+            guildName: msg.guildName ?? null,
+            attachments: msg.attachments ? JSON.parse(JSON.stringify(msg.attachments)) : [],
+            embeds: msg.embeds ?? 0,
+            mentions: msg.mentions ?? [],
+            reactions: msg.reactions ? JSON.parse(JSON.stringify(msg.reactions)) : [],
+            threadId: msg.threadId ?? null,
+            threadName: msg.threadName ?? null,
+            messageReference: msg.messageReference ? JSON.parse(JSON.stringify(msg.messageReference)) : null,
+            url: msg.url ?? null,
+          },
+          create: {
+            id: msg.id,
+            channelId: msg.channelId,
+            authorId: msg.authorId,
+            authorUsername: msg.authorUsername ?? null,
+            authorDiscriminator: msg.authorDiscriminator ?? null,
+            authorBot: msg.authorBot ?? false,
+            authorAvatar: msg.authorAvatar ?? null,
+            content: msg.content,
+            createdAt: new Date(msg.createdAt),
+            editedAt: msg.editedAt ? new Date(msg.editedAt) : null,
+            timestamp: msg.timestamp,
+            channelName: msg.channelName ?? null,
+            guildId: msg.guildId ?? null,
+            guildName: msg.guildName ?? null,
+            attachments: msg.attachments ? JSON.parse(JSON.stringify(msg.attachments)) : [],
+            embeds: msg.embeds ?? 0,
+            mentions: msg.mentions ?? [],
+            reactions: msg.reactions ? JSON.parse(JSON.stringify(msg.reactions)) : [],
+            threadId: msg.threadId ?? null,
+            threadName: msg.threadName ?? null,
+            messageReference: msg.messageReference ? JSON.parse(JSON.stringify(msg.messageReference)) : null,
+            url: msg.url ?? null,
+          },
+        });
+      }
+    });
+  }
+
   async saveClassifiedThread(thread: ClassifiedThread): Promise<void> {
     await this.saveClassifiedThreads([thread]);
   }

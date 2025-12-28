@@ -21,6 +21,7 @@ model Channel {
   groups            Group[]
   ungroupedThreads  UngroupedThread[]
   history           ClassificationHistory[]
+  messages          DiscordMessage[]
 
   @@index([guildId])
   @@map("channels")
@@ -358,5 +359,41 @@ model UngroupedIssue {
   @@index([exportStatus])
   @@index([issueState])
   @@map("ungrouped_issues")
+}
+
+model DiscordMessage {
+  id              String   @id
+  channelId       String   @map("channel_id")
+  authorId        String   @map("author_id")
+  authorUsername  String?  @map("author_username")
+  authorDiscriminator String? @map("author_discriminator")
+  authorBot       Boolean  @default(false) @map("author_bot")
+  authorAvatar    String?  @map("author_avatar")
+  content         String   @db.Text
+  createdAt       DateTime @map("created_at")
+  editedAt        DateTime? @map("edited_at")
+  timestamp       String   // Discord timestamp as string
+  channelName     String?  @map("channel_name")
+  guildId         String?  @map("guild_id")
+  guildName       String?  @map("guild_name")
+  attachments     Json     @default("[]") // Array of attachment objects
+  embeds          Int      @default(0)
+  mentions        String[] // Array of user IDs
+  reactions       Json     @default("[]") // Array of reaction objects
+  threadId        String?  @map("thread_id")
+  threadName      String?  @map("thread_name")
+  messageReference Json?   @map("message_reference") // Reference object or null
+  url             String?  @map("url")
+  fetchedAt       DateTime @default(now()) @map("fetched_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  channel Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  @@index([channelId])
+  @@index([authorId])
+  @@index([createdAt])
+  @@index([threadId])
+  @@index([guildId])
+  @@map("discord_messages")
 }
 

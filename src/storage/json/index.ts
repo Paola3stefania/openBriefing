@@ -26,6 +26,90 @@ export class JsonStorage implements IStorage {
     // Channels are implicit in file names
   }
 
+  async saveDiscordMessage(message: {
+    id: string;
+    channelId: string;
+    authorId: string;
+    authorUsername?: string;
+    authorDiscriminator?: string;
+    authorBot?: boolean;
+    authorAvatar?: string;
+    content: string;
+    createdAt: string;
+    editedAt?: string | null;
+    timestamp: string;
+    channelName?: string;
+    guildId?: string;
+    guildName?: string;
+    attachments?: Array<{
+      id: string;
+      filename: string;
+      url: string;
+      size: number;
+      content_type?: string;
+    }>;
+    embeds?: number;
+    mentions?: string[];
+    reactions?: Array<{
+      emoji: string;
+      count: number;
+    }>;
+    threadId?: string;
+    threadName?: string;
+    messageReference?: {
+      message_id: string;
+      channel_id: string;
+      guild_id?: string;
+    } | null;
+    url?: string;
+  }): Promise<void> {
+    await this.saveDiscordMessages([message]);
+  }
+
+  async saveDiscordMessages(messages: Array<{
+    id: string;
+    channelId: string;
+    authorId: string;
+    authorUsername?: string;
+    authorDiscriminator?: string;
+    authorBot?: boolean;
+    authorAvatar?: string;
+    content: string;
+    createdAt: string;
+    editedAt?: string | null;
+    timestamp: string;
+    channelName?: string;
+    guildId?: string;
+    guildName?: string;
+    attachments?: Array<{
+      id: string;
+      filename: string;
+      url: string;
+      size: number;
+      content_type?: string;
+    }>;
+    embeds?: number;
+    mentions?: string[];
+    reactions?: Array<{
+      emoji: string;
+      count: number;
+    }>;
+    threadId?: string;
+    threadName?: string;
+    messageReference?: {
+      message_id: string;
+      channel_id: string;
+      guild_id?: string;
+    } | null;
+    url?: string;
+  }>): Promise<void> {
+    // JSON storage for Discord messages is handled in the fetch handler
+    // which writes directly to cache files. This is a no-op for JSON storage
+    // as the messages are already saved to JSON cache files in the fetch handler.
+    // If we're using JSON storage, it means DB is not available, and the
+    // fetch handler will handle JSON caching directly.
+  }
+
   async saveClassifiedThread(thread: ClassifiedThread): Promise<void> {
     await this.saveClassifiedThreads([thread]);
   }

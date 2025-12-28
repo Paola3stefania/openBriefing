@@ -158,7 +158,7 @@ Switch between backends using `STORAGE_BACKEND` environment variable or by setti
    DATABASE_URL=postgresql://user:password@localhost:5432/unmute_mcp
    
    # Run migrations to create tables
-   npm run db:migrate
+   npx prisma migrate deploy
    
    # (Optional) Import existing JSON cache files into database
    # This imports: GitHub issues, issue embeddings, and Discord messages

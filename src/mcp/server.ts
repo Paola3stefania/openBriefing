@@ -1173,16 +1173,14 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           };
         }
 
-        // Check if database is configured - save to database if available
-        const { hasDatabaseConfig } = await import("../storage/factory.js");
+        // Try to save to database first, fallback to JSON
+        const { hasDatabaseConfig, getStorage } = await import("../storage/factory.js");
         const useDatabase = hasDatabaseConfig();
         
         let savedToDatabase = false;
         
         if (useDatabase) {
-          // Save to database
           try {
-            const { getStorage } = await import("../storage/factory.js");
             const storage = getStorage();
             
             // Check if database is actually available
@@ -1190,41 +1188,61 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             if (!dbAvailable) {
               console.error(`[Discord Messages] DATABASE_URL is set but database is not available. Falling back to JSON.`);
             } else {
-              // Note: Discord messages are stored in JSON cache for classification processing
-              // The database is used for classification results, not raw messages
-              // So we don't save messages to database, but we check availability for consistency
-              savedToDatabase = true; // Mark as "saved" since we're using database for results
-              console.error(`[Discord Messages] Using database for classification results.`);
+              // Ensure channel exists
+              await storage.upsertChannel(actualChannelId, channelName, guildId);
+              
+              // Flatten messages for database storage (extract nested author, thread, message_reference)
+              const flattenedMessages = formattedMessages.map(msg => ({
+                id: msg.id,
+                channelId: msg.channel_id,
+                authorId: msg.author.id,
+                authorUsername: msg.author.username,
+                authorDiscriminator: msg.author.discriminator,
+                authorBot: msg.author.bot,
+                authorAvatar: msg.author.avatar ?? undefined,
+                content: msg.content,
+                createdAt: msg.created_at,
+                editedAt: msg.edited_at ?? undefined,
+                timestamp: msg.timestamp,
+                channelName: msg.channel_name,
+                guildId: msg.guild_id,
+                guildName: msg.guild_name,
+                attachments: msg.attachments,
+                embeds: msg.embeds,
+                mentions: msg.mentions,
+                reactions: msg.reactions,
+                threadId: msg.thread?.id,
+                threadName: msg.thread?.name,
+                messageReference: msg.message_reference ?? undefined,
+                url: msg.url,
+              }));
+              
+              // Save to database
+              await storage.saveDiscordMessages(flattenedMessages);
+              savedToDatabase = true;
+              console.error(`[Discord Messages] Saved ${flattenedMessages.length} messages to database.`);
             }
           } catch (dbError) {
-            console.error(`[Discord Messages] Database check error (falling back to JSON):`, dbError);
+            console.error(`[Discord Messages] Database save error (falling back to JSON):`, dbError);
             // Fall through to JSON save
           }
         } else {
           console.error(`[Discord Messages] DATABASE_URL not set. Using JSON storage.`);
         }
 
-        // Save to JSON file only if database is not configured
-        // Discord messages are cached in JSON for classification processing
-        if (!savedToDatabase && !useDatabase) {
-          // Ensure cache directory exists
-          try {
-            await mkdir(cacheDir, { recursive: true });
-          } catch (error) {
-            // Directory might already exist
-          }
+        // Always save to JSON cache as well (needed for classification processing)
+        // This ensures backward compatibility and serves as a backup
+        try {
+          await mkdir(cacheDir, { recursive: true });
+        } catch (error) {
+          // Directory might already exist
+        }
 
-          await writeFile(cachePath, JSON.stringify(cacheData, null, 2), "utf-8");
-          console.error(`[Discord Messages] Saved to JSON cache (database not configured).`);
-        } else if (!savedToDatabase && useDatabase) {
-          // Database was configured but check failed - save to JSON as fallback
-          try {
-            await mkdir(cacheDir, { recursive: true });
-          } catch (error) {
-            // Directory might already exist
-          }
-          await writeFile(cachePath, JSON.stringify(cacheData, null, 2), "utf-8");
-          console.error(`[Discord Messages] Database check failed, saved to JSON cache as fallback.`);
+        await writeFile(cachePath, JSON.stringify(cacheData, null, 2), "utf-8");
+        if (savedToDatabase) {
+          console.error(`[Discord Messages] Also saved to JSON cache for classification processing.`);
+        } else {
+          console.error(`[Discord Messages] Saved to JSON cache (database not available).`);
         }
 
         return {

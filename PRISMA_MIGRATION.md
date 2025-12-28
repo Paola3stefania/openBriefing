@@ -143,7 +143,7 @@ npx prisma generate
 ## Notes
 
 - The old `client.ts` file can be safely deleted after verifying everything works
-- All existing SQL migrations in `db/migrations/` are kept for reference
+- All migrations are now managed by Prisma in `prisma/migrations/`
 - Prisma will manage future migrations going forward
 - The JSON file fallback in embedding cache still works as before
 
