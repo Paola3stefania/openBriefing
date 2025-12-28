@@ -44,9 +44,10 @@ export interface PMToolIssue {
   source_id: string;
   labels?: string[];
   priority?: "high" | "medium" | "low";
-  metadata?: Record<string, any>;
+  metadata?: Record<string, unknown>;
   linear_issue_id?: string; // Store Linear issue ID for mapping
   linear_issue_identifier?: string; // Store Linear issue identifier (e.g., "LIN-123") for display
+  linear_issue_url?: string; // Store Linear issue URL for direct access
 }
 
 export interface PMToolConfig {

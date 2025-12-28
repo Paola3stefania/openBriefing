@@ -71,8 +71,8 @@ export async function runExportWorkflow(
     // Auto-create UNMute team if not configured
     if (pmToolConfig.type === "linear") {
       const pmTool = createPMTool(pmToolConfig);
-      const linearTool = pmTool as any;
-      if (typeof linearTool.validateTeam === "function") {
+      const linearTool = pmTool as import("./base.js").LinearPMTool;
+      if (linearTool.validateTeam) {
         // Create UNMute team if no team_id is configured
         await linearTool.validateTeam(true, "UNMute");
         // Update team_id if it was auto-created
@@ -118,10 +118,9 @@ export async function runExportWorkflow(
     
     if (pmToolConfig.type === "linear") {
       log("Creating/ensuring Linear Projects for features...");
-      // Type assertion for Linear-specific method
-      const linearTool = pmTool as any;
+      const linearTool = pmTool as import("./base.js").LinearPMTool;
       
-      if (typeof linearTool.createOrGetProject === "function") {
+      if (linearTool.createOrGetProject) {
         for (const mapping of featureMappings) {
           try {
             const projectId = await linearTool.createOrGetProject(

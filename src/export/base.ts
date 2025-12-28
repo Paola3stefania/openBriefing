@@ -5,6 +5,15 @@
 
 import { PMToolIssue, PMToolConfig, ExportResult } from "./types.js";
 
+/**
+ * Linear-specific interface for methods not in base IPMTool
+ */
+export interface LinearPMTool {
+  teamId?: string;
+  validateTeam?(createIfMissing: boolean, defaultTeamName: string): Promise<boolean>;
+  createOrGetProject?(featureId: string, featureName: string, featureDescription?: string): Promise<string>;
+}
+
 export interface IPMTool {
   /**
    * Create an issue in the PM tool
@@ -69,9 +78,8 @@ export abstract class BasePMTool implements IPMTool {
         
         if (issue.linear_issue_id) {
           // Verify the stored ID exists in Linear
-          const linearTool = this as any;
-          if (typeof linearTool.getIssue === "function") {
-            const verifiedIssue = await linearTool.getIssue(issue.linear_issue_id);
+          if ('getIssue' in this && typeof this.getIssue === "function") {
+            const verifiedIssue = await this.getIssue(issue.linear_issue_id);
             if (verifiedIssue) {
               existing = {
                 id: verifiedIssue.id,
@@ -84,10 +92,11 @@ export abstract class BasePMTool implements IPMTool {
         // If no stored ID or verification failed, try finding by source ID
         // Pass title to enable title-based search fallback for duplicate detection
         if (!existing) {
-          const linearTool = this as any;
-          if (typeof linearTool.findIssueBySourceId === "function" && linearTool.findIssueBySourceId.length > 1) {
+          // Check if findIssueBySourceId accepts optional title parameter (Linear implementation)
+          const findMethod = this.findIssueBySourceId as ((sourceId: string, title?: string) => Promise<{ id: string; url: string } | null>) | undefined;
+          if (findMethod && findMethod.length > 1) {
             // Linear implementation accepts title parameter
-            existing = await linearTool.findIssueBySourceId(issue.source_id, issue.title);
+            existing = await findMethod(issue.source_id, issue.title);
           } else {
             // Other implementations only accept sourceId
             existing = await this.findIssueBySourceId(issue.source_id);
@@ -115,7 +124,7 @@ export abstract class BasePMTool implements IPMTool {
             issue.linear_issue_identifier = created.identifier;
           }
           if (created.url) {
-            (issue as any).linear_issue_url = created.url;
+            issue.linear_issue_url = created.url;
           }
         }
       } catch (error) {

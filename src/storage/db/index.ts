@@ -104,74 +104,102 @@ export class DatabaseStorage implements IStorage {
   }>): Promise<void> {
     if (messages.length === 0) return;
 
-    await prisma.$transaction(async (tx) => {
-      for (const msg of messages) {
-        // Ensure channel exists
-        await tx.channel.upsert({
-          where: { id: msg.channelId },
-          update: {
-            name: msg.channelName ?? null,
-            guildId: msg.guildId ?? null,
-          },
-          create: {
-            id: msg.channelId,
-            name: msg.channelName ?? null,
-            guildId: msg.guildId ?? null,
-          },
-        });
+    // Process messages in batches to avoid transaction timeout
+    // Batch size of 500 should keep each transaction under 5 seconds
+    const BATCH_SIZE = 500;
+    const batches: typeof messages[] = [];
+    
+    for (let i = 0; i < messages.length; i += BATCH_SIZE) {
+      batches.push(messages.slice(i, i + BATCH_SIZE));
+    }
 
-        // Upsert message
-        await tx.discordMessage.upsert({
-          where: { id: msg.id },
-          update: {
-            authorId: msg.authorId,
-            authorUsername: msg.authorUsername ?? null,
-            authorDiscriminator: msg.authorDiscriminator ?? null,
-            authorBot: msg.authorBot ?? false,
-            authorAvatar: msg.authorAvatar ?? null,
-            content: msg.content,
-            createdAt: new Date(msg.createdAt),
-            editedAt: msg.editedAt ? new Date(msg.editedAt) : null,
-            timestamp: msg.timestamp,
-            channelName: msg.channelName ?? null,
-            guildId: msg.guildId ?? null,
-            guildName: msg.guildName ?? null,
-            attachments: msg.attachments ? JSON.parse(JSON.stringify(msg.attachments)) : [],
-            embeds: msg.embeds ?? 0,
-            mentions: msg.mentions ?? [],
-            reactions: msg.reactions ? JSON.parse(JSON.stringify(msg.reactions)) : [],
-            threadId: msg.threadId ?? null,
-            threadName: msg.threadName ?? null,
-            messageReference: msg.messageReference ? JSON.parse(JSON.stringify(msg.messageReference)) : null,
-            url: msg.url ?? null,
-          },
-          create: {
-            id: msg.id,
-            channelId: msg.channelId,
-            authorId: msg.authorId,
-            authorUsername: msg.authorUsername ?? null,
-            authorDiscriminator: msg.authorDiscriminator ?? null,
-            authorBot: msg.authorBot ?? false,
-            authorAvatar: msg.authorAvatar ?? null,
-            content: msg.content,
-            createdAt: new Date(msg.createdAt),
-            editedAt: msg.editedAt ? new Date(msg.editedAt) : null,
-            timestamp: msg.timestamp,
-            channelName: msg.channelName ?? null,
-            guildId: msg.guildId ?? null,
-            guildName: msg.guildName ?? null,
-            attachments: msg.attachments ? JSON.parse(JSON.stringify(msg.attachments)) : [],
-            embeds: msg.embeds ?? 0,
-            mentions: msg.mentions ?? [],
-            reactions: msg.reactions ? JSON.parse(JSON.stringify(msg.reactions)) : [],
-            threadId: msg.threadId ?? null,
-            threadName: msg.threadName ?? null,
-            messageReference: msg.messageReference ? JSON.parse(JSON.stringify(msg.messageReference)) : null,
-            url: msg.url ?? null,
-          },
-        });
-      }
-    });
+    // Process each batch in a separate transaction with increased timeout
+    for (const batch of batches) {
+      await prisma.$transaction(async (tx) => {
+        // First, collect unique channels and upsert them in bulk
+        const uniqueChannels = new Map<string, { channelId: string; channelName?: string; guildId?: string }>();
+        for (const msg of batch) {
+          if (!uniqueChannels.has(msg.channelId)) {
+            uniqueChannels.set(msg.channelId, {
+              channelId: msg.channelId,
+              channelName: msg.channelName,
+              guildId: msg.guildId,
+            });
+          }
+        }
+
+        // Upsert all unique channels first
+        for (const channel of uniqueChannels.values()) {
+          await tx.channel.upsert({
+            where: { id: channel.channelId },
+            update: {
+              name: channel.channelName ?? null,
+              guildId: channel.guildId ?? null,
+            },
+            create: {
+              id: channel.channelId,
+              name: channel.channelName ?? null,
+              guildId: channel.guildId ?? null,
+            },
+          });
+        }
+
+        // Then upsert all messages in the batch
+        for (const msg of batch) {
+          await tx.discordMessage.upsert({
+            where: { id: msg.id },
+            update: {
+              authorId: msg.authorId,
+              authorUsername: msg.authorUsername ?? null,
+              authorDiscriminator: msg.authorDiscriminator ?? null,
+              authorBot: msg.authorBot ?? false,
+              authorAvatar: msg.authorAvatar ?? null,
+              content: msg.content,
+              createdAt: new Date(msg.createdAt),
+              editedAt: msg.editedAt ? new Date(msg.editedAt) : null,
+              timestamp: msg.timestamp,
+              channelName: msg.channelName ?? null,
+              guildId: msg.guildId ?? null,
+              guildName: msg.guildName ?? null,
+              attachments: msg.attachments ? JSON.parse(JSON.stringify(msg.attachments)) : [],
+              embeds: msg.embeds ?? 0,
+              mentions: msg.mentions ?? [],
+              reactions: msg.reactions ? JSON.parse(JSON.stringify(msg.reactions)) : [],
+              threadId: msg.threadId ?? null,
+              threadName: msg.threadName ?? null,
+              messageReference: msg.messageReference ? JSON.parse(JSON.stringify(msg.messageReference)) : null,
+              url: msg.url ?? null,
+            },
+            create: {
+              id: msg.id,
+              channelId: msg.channelId,
+              authorId: msg.authorId,
+              authorUsername: msg.authorUsername ?? null,
+              authorDiscriminator: msg.authorDiscriminator ?? null,
+              authorBot: msg.authorBot ?? false,
+              authorAvatar: msg.authorAvatar ?? null,
+              content: msg.content,
+              createdAt: new Date(msg.createdAt),
+              editedAt: msg.editedAt ? new Date(msg.editedAt) : null,
+              timestamp: msg.timestamp,
+              channelName: msg.channelName ?? null,
+              guildId: msg.guildId ?? null,
+              guildName: msg.guildName ?? null,
+              attachments: msg.attachments ? JSON.parse(JSON.stringify(msg.attachments)) : [],
+              embeds: msg.embeds ?? 0,
+              mentions: msg.mentions ?? [],
+              reactions: msg.reactions ? JSON.parse(JSON.stringify(msg.reactions)) : [],
+              threadId: msg.threadId ?? null,
+              threadName: msg.threadName ?? null,
+              messageReference: msg.messageReference ? JSON.parse(JSON.stringify(msg.messageReference)) : null,
+              url: msg.url ?? null,
+            },
+          });
+        }
+      }, {
+        timeout: 30000, // 30 seconds timeout per batch (should be more than enough for 500 messages)
+      });
+    }
   }
 
   async saveClassifiedThread(thread: ClassifiedThread): Promise<void> {

@@ -49,7 +49,7 @@ export async function saveDocumentationSectionEmbedding(
     create: {
       sectionId,
       documentationUrl,
-      embedding: embedding as any,
+      embedding: embedding as Prisma.InputJsonValue,
       contentHash,
       model,
     },
@@ -87,13 +87,13 @@ export async function saveDocumentationEmbedding(
   await prisma.documentationEmbedding.upsert({
     where: { documentationUrl: url },
     update: {
-      embedding: embedding as any,
+      embedding: embedding as Prisma.InputJsonValue,
       contentHash,
       model,
     },
     create: {
       documentationUrl: url,
-      embedding: embedding as any,
+      embedding: embedding as Prisma.InputJsonValue,
       contentHash,
       model,
     },
@@ -129,13 +129,13 @@ export async function saveFeatureEmbedding(
   await prisma.featureEmbedding.upsert({
     where: { featureId },
     update: {
-      embedding: embedding as any,
+      embedding: embedding as Prisma.InputJsonValue,
       contentHash,
       model,
     },
     create: {
       featureId,
-      embedding: embedding as any,
+      embedding: embedding as Prisma.InputJsonValue,
       contentHash,
       model,
     },
@@ -239,14 +239,14 @@ export async function computeAndSaveDocumentationSectionEmbeddings(
               where: { sectionId: section.id },
               update: {
                 documentationUrl: section.url,
-                embedding: embedding as any,
+                embedding: embedding as Prisma.InputJsonValue,
                 contentHash,
                 model,
               },
               create: {
                 sectionId: section.id,
                 documentationUrl: section.url,
-                embedding: embedding as any,
+                embedding: embedding as Prisma.InputJsonValue,
                 contentHash,
                 model,
               },
@@ -384,13 +384,13 @@ export async function computeAndSaveDocumentationEmbeddings(
             return tx.documentationEmbedding.upsert({
               where: { documentationUrl: doc.url },
               update: {
-                embedding: embedding as any,
+                embedding: embedding as Prisma.InputJsonValue,
                 contentHash,
                 model,
               },
               create: {
                 documentationUrl: doc.url,
-                embedding: embedding as any,
+                embedding: embedding as Prisma.InputJsonValue,
                 contentHash,
                 model,
               },
@@ -535,13 +535,13 @@ export async function computeAndSaveFeatureEmbeddings(
             return tx.featureEmbedding.upsert({
               where: { featureId: feature.id },
               update: {
-                embedding: embedding as any,
+                embedding: embedding as Prisma.InputJsonValue,
                 contentHash,
                 model,
               },
               create: {
                 featureId: feature.id,
-                embedding: embedding as any,
+                embedding: embedding as Prisma.InputJsonValue,
                 contentHash,
                 model,
               },

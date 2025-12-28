@@ -414,7 +414,7 @@ export class JsonStorage implements IStorage {
         .reverse()[0];
 
       let outputPath: string;
-      let existingGroups: any[] = [];
+      let existingGroups: Group[] = [];
 
       if (existingFile) {
         outputPath = join(this.resultsDir, existingFile);

@@ -71,6 +71,11 @@ interface GroupingData {
     author?: string;
     timestamp?: string;
     reason: "no_matches" | "below_threshold";
+    export_status?: "pending" | "exported" | null;
+    exported_at?: string;
+    linear_issue_id?: string;
+    linear_issue_url?: string;
+    linear_issue_identifier?: string;
     top_issue?: {
       number: number;
       title: string;
@@ -218,8 +223,8 @@ export async function exportGroupingToPMTool(
     
     // Validate team for Linear
     if (pmToolConfig.type === "linear") {
-      const linearTool = pmTool as any;
-      if (typeof linearTool.validateTeam === "function") {
+      const linearTool = pmTool as import("./base.js").LinearPMTool;
+      if (linearTool.validateTeam) {
         await linearTool.validateTeam(true, "UNMute");
         if (linearTool.teamId && !pmToolConfig.team_id) {
           pmToolConfig.team_id = linearTool.teamId;
@@ -237,8 +242,8 @@ export async function exportGroupingToPMTool(
     const projectMappings = new Map<string, string>(); // feature_id -> project_id
     
     if (pmToolConfig.type === "linear") {
-      const linearTool = pmTool as any;
-      if (typeof linearTool.createOrGetProject === "function") {
+      const linearTool = pmTool as import("./base.js").LinearPMTool;
+      if (linearTool.createOrGetProject) {
         // Ensure "general" feature is always in the list
         const hasGeneral = features.some(f => f.id === "general");
         if (!hasGeneral) {
@@ -492,8 +497,7 @@ export async function exportGroupingToPMTool(
         },
       });
       
-      // Store mapping for updating export status
-      (ungroupedThread as any)._exportIndex = ungroupedThreadIssueIndex;
+      // Note: ungroupedThreadIssueIndex is stored in pmIssues array, no need to store on thread object
     }
     
     // STEP 3: Export ungrouped issues (GitHub issues that don't match any thread)
@@ -642,7 +646,7 @@ export async function exportGroupingToPMTool(
                 // This can happen if Prisma client hasn't been regenerated after schema update
                 logError(`UngroupedIssue model not available in Prisma client. Please run 'npx prisma generate'. Saving to GitHubIssue table instead.`);
                 // Type assertion needed until Prisma client is regenerated
-                await (prisma as any).gitHubIssue.upsert({
+                await prisma.gitHubIssue.upsert({
                   where: { issueNumber: issue.number },
                   update: {
                     issueTitle: issue.title || `Issue #${issue.number}`,
@@ -698,7 +702,7 @@ export async function exportGroupingToPMTool(
       if (group) {
         if (issue.linear_issue_id) {
           // Get URL from issue object (set by base class) or construct from identifier
-          const issueUrl = (issue as any).linear_issue_url || 
+          const issueUrl = issue.linear_issue_url || 
             (issue.linear_issue_identifier ? `https://linear.app/${pmToolConfig.workspace_id || 'workspace'}/issue/${issue.linear_issue_identifier}` : '');
           
           groupToIssueMap.set(group.id, {
@@ -723,7 +727,7 @@ export async function exportGroupingToPMTool(
       if (issue.source_id && issue.source_id.startsWith("ungrouped-thread-")) {
         const threadId = issue.source_id.replace("ungrouped-thread-", "");
         if (issue.linear_issue_id) {
-          const issueUrl = (issue as any).linear_issue_url || 
+          const issueUrl = issue.linear_issue_url || 
             (issue.linear_issue_identifier ? `https://linear.app/${pmToolConfig.workspace_id || 'workspace'}/issue/${issue.linear_issue_identifier}` : '');
           
           ungroupedThreadToIssueMap.set(threadId, {
@@ -735,12 +739,12 @@ export async function exportGroupingToPMTool(
           // Update ungrouped thread in grouping data
           const ungroupedThread = ungroupedThreads.find(ut => ut.thread_id === threadId);
           if (ungroupedThread) {
-            (ungroupedThread as any).export_status = "exported";
-            (ungroupedThread as any).exported_at = new Date().toISOString();
-            (ungroupedThread as any).linear_issue_id = issue.linear_issue_id;
-            (ungroupedThread as any).linear_issue_url = issueUrl;
+            ungroupedThread.export_status = "exported";
+            ungroupedThread.exported_at = new Date().toISOString();
+            ungroupedThread.linear_issue_id = issue.linear_issue_id;
+            ungroupedThread.linear_issue_url = issueUrl;
             if (issue.linear_issue_identifier) {
-              (ungroupedThread as any).linear_issue_identifier = issue.linear_issue_identifier;
+              ungroupedThread.linear_issue_identifier = issue.linear_issue_identifier;
             }
           }
         }
@@ -751,7 +755,7 @@ export async function exportGroupingToPMTool(
       if (issue.source_id && issue.source_id.startsWith("ungrouped-issue-")) {
         const issueNumber = parseInt(issue.source_id.replace("ungrouped-issue-", ""), 10);
         if (!isNaN(issueNumber) && issue.linear_issue_id) {
-          const issueUrl = (issue as any).linear_issue_url || 
+          const issueUrl = issue.linear_issue_url || 
             (issue.linear_issue_identifier ? `https://linear.app/${pmToolConfig.workspace_id || 'workspace'}/issue/${issue.linear_issue_identifier}` : '');
           
           ungroupedIssueToIssueMap.set(issueNumber, {
@@ -781,7 +785,7 @@ export async function exportGroupingToPMTool(
               linearIssueId: issueInfo.id,
               linearIssueUrl: issueInfo.url,
               linearIssueIdentifier: issueInfo.identifier || null,
-            } as any, // Cast entire data object - exportStatus field exists in schema
+            },
           });
         } catch (error) {
           // If update fails (record might not exist), try upsert
@@ -795,7 +799,7 @@ export async function exportGroupingToPMTool(
                 linearIssueId: issueInfo.id,
                 linearIssueUrl: issueInfo.url,
                 linearIssueIdentifier: issueInfo.identifier || null,
-              } as any, // Cast entire update object
+              },
               create: {
                 threadId,
                 channelId: groupingData.channel_id,
@@ -805,7 +809,7 @@ export async function exportGroupingToPMTool(
                 linearIssueId: issueInfo.id,
                 linearIssueUrl: issueInfo.url,
                 linearIssueIdentifier: issueInfo.identifier || null,
-              } as any, // Cast entire create object
+              },
             });
           } catch (upsertError) {
             logError(`Error updating ungrouped thread ${threadId} export status:`, upsertError);
@@ -824,7 +828,7 @@ export async function exportGroupingToPMTool(
               linearIssueId: issueInfo.id,
               linearIssueUrl: issueInfo.url,
               linearIssueIdentifier: issueInfo.identifier || null,
-            } as any, // Cast entire data object - exportStatus field exists in schema
+            },
           });
         } catch (error) {
           // If update fails, log but don't fail - thread might not be classified yet
@@ -836,9 +840,8 @@ export async function exportGroupingToPMTool(
       for (const [issueNumber, issueInfo] of ungroupedIssueToIssueMap.entries()) {
         try {
           // Try to use UngroupedIssue model (should exist in Prisma client if schema is up to date)
-          const ungroupedIssueModel = (prisma as any).ungroupedIssue;
-          if (ungroupedIssueModel) {
-            await ungroupedIssueModel.upsert({
+          if (prisma.ungroupedIssue) {
+            await prisma.ungroupedIssue.upsert({
               where: { issueNumber },
               update: {
                 exportStatus: "exported",
@@ -861,7 +864,7 @@ export async function exportGroupingToPMTool(
           } else {
             // Fallback: update GitHubIssue model export status using update (single record)
             // Type assertion needed: exportStatus exists in schema but Prisma client types may be out of sync
-            await (prisma as any).gitHubIssue.update({
+            await prisma.gitHubIssue.update({
               where: { issueNumber },
               data: {
                 exportStatus: "exported",

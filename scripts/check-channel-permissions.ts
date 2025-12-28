@@ -103,7 +103,7 @@ discord.once("ready", async () => {
           });
           console.log(`Error: #${channelInfo.name} - ${reason}`);
         }
-      } catch (error: any) {
+      } catch (error: unknown) {
         inaccessibleChannels.push({
           name: channelInfo.name,
           id: channelInfo.id,
