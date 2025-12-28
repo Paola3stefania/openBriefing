@@ -78,6 +78,7 @@ export interface UngroupedThread {
     title: string;
     similarity_score: number;
   };
+  affects_features?: Array<{ id: string; name: string }>; // Features matched via semantic similarity
 }
 
 export interface StorageStats {

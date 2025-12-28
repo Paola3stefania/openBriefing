@@ -286,6 +286,229 @@ export async function mapGroupsToFeatures(
 }
 
 /**
+ * Map ungrouped threads to features using semantic similarity
+ */
+export async function mapUngroupedThreadsToFeatures(
+  ungroupedThreads: Array<{
+    thread_id: string;
+    channel_id?: string;
+    thread_name?: string;
+    url?: string;
+    author?: string;
+    timestamp?: string;
+    reason: "no_matches" | "below_threshold";
+    top_issue?: {
+      number: number;
+      title: string;
+      similarity_score: number;
+    };
+  }>,
+  features: Feature[],
+  minSimilarity: number = 0.6
+): Promise<Array<{
+  thread_id: string;
+  channel_id?: string;
+  thread_name?: string;
+  url?: string;
+  author?: string;
+  timestamp?: string;
+  reason: "no_matches" | "below_threshold";
+  top_issue?: {
+    number: number;
+    title: string;
+    similarity_score: number;
+  };
+  affects_features?: Array<{ id: string; name: string }>;
+}>> {
+  if (features.length === 0 || ungroupedThreads.length === 0) {
+    return ungroupedThreads.map(thread => ({
+      ...thread,
+      affects_features: [{ id: "general", name: "General" }],
+    }));
+  }
+
+  log(`Mapping ${ungroupedThreads.length} ungrouped threads to ${features.length} features...`);
+
+  // Get API key
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    log("OPENAI_API_KEY not set, assigning all ungrouped threads to General");
+    return ungroupedThreads.map(thread => ({
+      ...thread,
+      affects_features: [{ id: "general", name: "General" }],
+    }));
+  }
+
+  // Step 1: Get or compute embeddings for all features (reuse from mapGroupsToFeatures logic)
+  const featureEmbeddings = new Map<string, Embedding>();
+  
+  const featuresToEmbed: Array<{ feature: Feature; featureText: string }> = [];
+  
+  for (const feature of features) {
+    let embedding = await getFeatureEmbedding(feature.id);
+    
+    if (!embedding) {
+      const name = feature.name.trim();
+      const separator = name.endsWith(":") ? " " : ": ";
+      const keywords = (feature.related_keywords || []).length > 0 
+        ? ` Keywords: ${(feature.related_keywords || []).join(", ")}` 
+        : "";
+      const featureText = `${name}${feature.description ? `${separator}${feature.description}` : ""}${keywords}`;
+      featuresToEmbed.push({ feature, featureText });
+    } else {
+      featureEmbeddings.set(feature.id, embedding);
+    }
+  }
+  
+  // Batch compute embeddings for features that need them
+  if (featuresToEmbed.length > 0) {
+    const batchSize = 50;
+    for (let i = 0; i < featuresToEmbed.length; i += batchSize) {
+      const batch = featuresToEmbed.slice(i, i + batchSize);
+      
+      try {
+        const texts = batch.map(item => item.featureText);
+        const embeddings = await createEmbeddings(texts, apiKey);
+        
+        for (let j = 0; j < batch.length; j++) {
+          const item = batch[j];
+          const embedding = embeddings[j];
+          
+          featureEmbeddings.set(item.feature.id, embedding);
+          
+          try {
+            const contentHash = createHash("md5").update(item.featureText).digest("hex");
+            await saveFeatureEmbedding(item.feature.id, embedding, contentHash);
+          } catch (error) {
+            log(`Failed to save embedding for feature ${item.feature.name}: ${error instanceof Error ? error.message : String(error)}`);
+          }
+        }
+      } catch (error) {
+        log(`Batch embedding failed, falling back to individual: ${error instanceof Error ? error.message : String(error)}`);
+        for (const item of batch) {
+          try {
+            const embedding = await createEmbedding(item.featureText, apiKey);
+            featureEmbeddings.set(item.feature.id, embedding);
+            
+            const contentHash = createHash("md5").update(item.featureText).digest("hex");
+            await saveFeatureEmbedding(item.feature.id, embedding, contentHash);
+          } catch (individualError) {
+            log(`Failed to create embedding for feature ${item.feature.name}: ${individualError instanceof Error ? individualError.message : String(individualError)}`);
+          }
+        }
+      }
+    }
+  }
+
+  // Step 2: Get thread embeddings from database (if available)
+  const { getThreadEmbedding } = await import("../storage/db/embeddings.js");
+  const { hasDatabaseConfig, getStorage } = await import("../storage/factory.js");
+  const useDatabase = hasDatabaseConfig() && await getStorage().isAvailable();
+
+  // Step 3: Map each ungrouped thread to features
+  const mappedThreads: Array<{
+    thread_id: string;
+    thread_name?: string;
+    url?: string;
+    author?: string;
+    timestamp?: string;
+    reason: "no_matches" | "below_threshold";
+    top_issue?: {
+      number: number;
+      title: string;
+      similarity_score: number;
+    };
+    affects_features?: Array<{ id: string; name: string }>;
+  }> = [];
+  
+  for (const thread of ungroupedThreads) {
+    // Build thread text from thread name and top issue (if available)
+    const threadTextParts: string[] = [];
+    
+    if (thread.thread_name) {
+      threadTextParts.push(thread.thread_name);
+    }
+    
+    if (thread.top_issue?.title) {
+      threadTextParts.push(thread.top_issue.title);
+    }
+    
+    const threadText = threadTextParts.join(" ");
+    
+    if (!threadText.trim()) {
+      // No text to analyze, assign to general
+      mappedThreads.push({
+        ...thread,
+        affects_features: [{ id: "general", name: "General" }],
+      });
+      continue;
+    }
+    
+    // Try to get thread embedding from database first
+    let threadEmbedding: Embedding | null = null;
+    if (useDatabase) {
+      try {
+        threadEmbedding = await getThreadEmbedding(thread.thread_id);
+      } catch (error) {
+        // Thread embedding not found, will compute on-the-fly
+      }
+    }
+    
+    // Compute thread embedding if not in database
+    if (!threadEmbedding) {
+      try {
+        threadEmbedding = await createEmbedding(threadText, apiKey);
+      } catch (error) {
+        log(`Failed to create embedding for ungrouped thread ${thread.thread_id}: ${error instanceof Error ? error.message : String(error)}`);
+        mappedThreads.push({
+          ...thread,
+          affects_features: [{ id: "general", name: "General" }],
+        });
+        continue;
+      }
+    }
+    
+    // Find matching features
+    const affectedFeatures: Array<{ id: string; similarity: number }> = [];
+    
+    for (const feature of features) {
+      const featureEmb = featureEmbeddings.get(feature.id);
+      if (!featureEmb) continue;
+      
+      const similarity = cosineSimilarity(threadEmbedding, featureEmb);
+      
+      if (similarity >= minSimilarity) {
+        affectedFeatures.push({ id: feature.id, similarity });
+      }
+    }
+    
+    // Sort by similarity and take top matches
+    affectedFeatures.sort((a, b) => b.similarity - a.similarity);
+    const topFeatures = affectedFeatures.slice(0, 5);
+    
+    // Map to feature objects
+    const affectsFeatures = topFeatures.length > 0
+      ? topFeatures.map(f => {
+          const feature = features.find(fe => fe.id === f.id);
+          return {
+            id: f.id,
+            name: feature?.name || f.id,
+          };
+        })
+      : [{ id: "general", name: "General" }];
+    
+    mappedThreads.push({
+      ...thread,
+      affects_features: affectsFeatures,
+    });
+  }
+  
+  log(`Mapped ${ungroupedThreads.length} ungrouped threads to features. ${mappedThreads.filter(t => t.affects_features && t.affects_features.length > 1).length} matched multiple features.`);
+  
+  return mappedThreads;
+}
+
+/**
  * Map classified data to features (legacy function for workflow.ts)
  * @deprecated This function is kept for backward compatibility but may not be fully implemented
  */

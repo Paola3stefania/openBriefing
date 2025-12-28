@@ -75,7 +75,7 @@ discord.once("clientReady", () => {
 /**
  * Safely parse JSON with better error messages
  */
-function safeJsonParse<T = any>(content: string, filePath?: string): T {
+function safeJsonParse<T = unknown>(content: string, filePath?: string): T {
   try {
     return JSON.parse(content) as T;
   } catch (error) {
@@ -1899,7 +1899,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           try {
             const filePath = join(resultsDir, file);
             const content = await readFile(filePath, "utf-8");
-            const parsed = safeJsonParse(content, filePath);
+            const parsed = safeJsonParse<ClassificationResults>(content, filePath);
             const threadCount = parsed.classified_threads?.length || 0;
             
             if (threadCount > maxThreads) {
@@ -1915,7 +1915,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           outputPath = join(resultsDir, bestFile);
           try {
             const existingContent = await readFile(outputPath, "utf-8");
-            const existingData = safeJsonParse(existingContent, outputPath);
+            const existingData = safeJsonParse<{ classified_threads?: ClassifiedThread[] }>(existingContent, outputPath);
             existingClassifiedThreads = existingData.classified_threads || [];
             console.error(`[Classification] Will merge into existing file: ${bestFile} (${existingClassifiedThreads.length} threads)`);
           } catch {
@@ -2501,10 +2501,10 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           sourceFile = grouping_data_path;
           console.error(`[Export] Using grouping data from ${grouping_data_path}`);
           const groupingContent = await readFile(grouping_data_path, "utf-8");
-          const groupingData = safeJsonParse(groupingContent, grouping_data_path);
-          
           // Import the export function for grouping data
           const { exportGroupingToPMTool } = await import("../export/groupingExporter.js");
+          type GroupingDataForExport = Parameters<typeof exportGroupingToPMTool>[0];
+          const groupingData = safeJsonParse<GroupingDataForExport>(groupingContent, grouping_data_path);
           result = await exportGroupingToPMTool(groupingData, pmToolConfig);
           
           // Update grouping JSON file with export status and suggested titles
@@ -2513,7 +2513,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             if (result.group_export_mappings) {
               const exportMappings = new Map(result.group_export_mappings.map(m => [m.group_id, m]));
               
-              for (const group of groupingData.groups) {
+              for (const group of groupingData.groups || []) {
                 const mapping = exportMappings.get(group.id);
                 if (mapping) {
                   // Mark as exported
@@ -2530,7 +2530,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 
                 // Ensure suggested_title is set (should already be set by exporter, but double-check)
                 if (!group.suggested_title) {
-                  group.suggested_title = group.github_issue?.title || "Untitled Group";
+                  group.suggested_title = "Untitled Group";
                 }
               }
             }
@@ -3139,7 +3139,11 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             outputPath = join(resultsDir, existingGroupingFile);
             try {
               const existingContent = await readFile(outputPath, "utf-8");
-              const existingData = safeJsonParse(existingContent, outputPath);
+              const existingData = safeJsonParse<{
+                groups?: Group[];
+                ungrouped_threads?: UngroupedThread[];
+                timestamp?: string;
+              }>(existingContent, outputPath);
               existingGroups = existingData.groups || [];
               existingUngrouped = existingData.ungrouped_threads || [];
               originalTimestamp = existingData.timestamp; // Preserve original timestamp
@@ -3347,7 +3351,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const mergedGroups = Array.from(groupMap.values());
           
           // Merge ungrouped threads
-          const ungroupedMap = new Map<string, any>();
+          const ungroupedMap = new Map<string, UngroupedThread>();
           for (const thread of existingUngrouped) {
             ungroupedMap.set(thread.thread_id, thread);
           }
@@ -3577,7 +3581,9 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             semanticOutputPath = join(resultsDir, existingSemanticFile);
             try {
               const existingContent = await readFile(semanticOutputPath, "utf-8");
-              const existingData = safeJsonParse(existingContent, semanticOutputPath);
+              const existingData = safeJsonParse<{
+                groups?: Group[];
+              }>(existingContent, semanticOutputPath);
               existingSemanticGroups = existingData.groups || [];
               console.error(`[Grouping] Merging with existing file: ${existingSemanticFile} (${existingSemanticGroups.length} groups)`);
             } catch {
@@ -3793,9 +3799,10 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             embeddingsComputed?: number;
             embeddingsFromCache?: number;
             ungrouped_count?: number;
+            ungrouped_threads_matched?: number;
           };
           groups: Group[];
-          ungrouped_threads?: UngroupedThread[];
+          ungrouped_threads?: Array<UngroupedThread & { channel_id?: string }>;
           features?: Array<{ id: string; name: string }>;
         }>(groupingContent, groupingPath);
 
@@ -3819,8 +3826,29 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Map groups to features
         // Log removed to avoid interfering with MCP JSON protocol
         // console.error(`[Feature Matching] Mapping ${groupingData.groups.length} groups to features...`);
-        const { mapGroupsToFeatures } = await import("../export/featureMapper.js");
+        const { mapGroupsToFeatures, mapUngroupedThreadsToFeatures } = await import("../export/featureMapper.js");
         const groupsWithFeatures = await mapGroupsToFeatures(groupingData.groups, features, min_similarity) as Group[];
+
+        // Map ungrouped threads to features
+        if (groupingData.ungrouped_threads && groupingData.ungrouped_threads.length > 0) {
+          // Log removed to avoid interfering with MCP JSON protocol
+          // console.error(`[Feature Matching] Mapping ${groupingData.ungrouped_threads.length} ungrouped threads to features...`);
+          // Ensure channel_id is preserved for ungrouped threads
+          const ungroupedThreadsWithChannelId = groupingData.ungrouped_threads.map(t => ({
+            ...t,
+            channel_id: t.channel_id || groupingData.channel_id,
+          }));
+          const ungroupedThreadsWithFeatures = await mapUngroupedThreadsToFeatures(
+            ungroupedThreadsWithChannelId,
+            features,
+            min_similarity
+          );
+          // Preserve channel_id in the result
+          groupingData.ungrouped_threads = ungroupedThreadsWithFeatures.map(t => ({
+            ...t,
+            channel_id: t.channel_id || groupingData.channel_id,
+          })) as UngroupedThread[];
+        }
 
         // Update grouping data  
         groupingData.groups = groupsWithFeatures;
@@ -3834,11 +3862,16 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         
         // Update stats
         const crossCuttingCount = groupsWithFeatures.filter(g => g.is_cross_cutting).length;
+        const ungroupedThreadsMatched = groupingData.ungrouped_threads?.filter(t => 
+          t.affects_features && t.affects_features.length > 0 && 
+          !(t.affects_features.length === 1 && t.affects_features[0].id === "general")
+        ).length || 0;
         groupingData.stats = {
           ...groupingData.stats,
           cross_cutting_groups: crossCuttingCount,
           features_extracted: features.length,
           groups_matched: groupsWithFeatures.length,
+          ungrouped_threads_matched: ungroupedThreadsMatched,
         };
 
         // Save updated grouping file
@@ -3852,12 +3885,14 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
               type: "text",
               text: JSON.stringify({
                 success: true,
-                message: `Matched ${groupsWithFeatures.length} groups to ${features.length} features`,
+                message: `Matched ${groupsWithFeatures.length} groups and ${ungroupedThreadsMatched} ungrouped threads to ${features.length} features`,
                 stats: {
                   total_groups: groupsWithFeatures.length,
                   cross_cutting_groups: crossCuttingCount,
                   features_extracted: features.length,
                   groups_matched: groupsWithFeatures.length,
+                  ungrouped_threads_matched: ungroupedThreadsMatched,
+                  total_ungrouped_threads: groupingData.ungrouped_threads?.length || 0,
                 },
                 features: features.map(f => ({ id: f.id, name: f.name })),
                 output_file: groupingPath,

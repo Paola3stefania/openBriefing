@@ -81,6 +81,7 @@ interface GroupingData {
       title: string;
       similarity_score: number;
     };
+    affects_features?: Array<{ id: string; name: string }>;
   }>;
 }
 
@@ -475,25 +476,46 @@ export async function exportGroupingToPMTool(
         descriptionParts.push(`- **Created:** ${new Date(ungroupedThread.timestamp).toLocaleString()}`);
       }
       
-      // Assign to "General" project
-      const generalProjectId = projectMappings.get("general");
+      // Use matched features if available, otherwise default to "General"
+      const affectsFeatures = ungroupedThread.affects_features || [{ id: "general", name: "General" }];
+      
+      // Ensure we have at least one feature (default to "general")
+      const primaryFeature = affectsFeatures[0] || { id: "general", name: "General" };
+      const featureId = primaryFeature.id;
+      
+      // Get project ID for the primary feature
+      let projectId = projectMappings.get(featureId);
+      if (!projectId) {
+        // Fallback to general if feature project not found
+        projectId = projectMappings.get("general");
+      }
+      
+      // Build labels
+      const labels = ["ungrouped", "discord-thread"];
+      if (affectsFeatures.length > 0) {
+        // Add feature labels
+        for (const feature of affectsFeatures) {
+          labels.push(feature.name.toLowerCase().replace(/\s+/g, "-"));
+        }
+      }
       
       const ungroupedThreadIssueIndex = pmIssues.length;
       pmIssues.push({
         title,
         description: descriptionParts.join("\n"),
-        feature_id: "general",
-        feature_name: "General",
-        project_id: generalProjectId,
+        feature_id: featureId,
+        feature_name: primaryFeature.name,
+        project_id: projectId,
         source: "discord",
         source_url: ungroupedThread.url || "",
         source_id: `ungrouped-thread-${ungroupedThread.thread_id}`,
-        labels: ["ungrouped", "discord-thread"],
+        labels: labels,
         priority: "low",
         metadata: {
           thread_id: ungroupedThread.thread_id,
           reason: ungroupedThread.reason,
           top_issue: ungroupedThread.top_issue,
+          affects_features: affectsFeatures.map(f => f.name),
         },
       });
       
