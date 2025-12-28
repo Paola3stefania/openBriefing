@@ -12,6 +12,7 @@ import type { GitHubIssue, DiscordMessage, ClassifiedMessage } from "./classifie
 import { logWarn } from "../../mcp/logger.js";
 import { getConfig } from "../../config/index.js";
 import { prisma, checkPrismaConnection } from "../../storage/db/prisma.js";
+import { getThreadEmbedding } from "../../storage/db/embeddings.js";
 
 // Progress logging to stderr (doesn't interfere with MCP JSON-RPC on stdout)
 function logProgress(message: string) {
@@ -565,8 +566,55 @@ async function precomputeIssueEmbeddings(
 }
 
 /**
+ * Pre-load thread embeddings from database for messages
+ * Returns a map of threadId -> embedding
+ */
+async function preloadThreadEmbeddings(
+  messages: DiscordMessage[]
+): Promise<Map<string, Embedding>> {
+  const threadEmbeddings = new Map<string, Embedding>();
+  
+  // Check if database is available
+  if (!(await isDatabaseAvailable())) {
+    return threadEmbeddings;
+  }
+
+  // Extract unique thread IDs from messages
+  // Messages can have threadId property, or use message.id as threadId for standalone messages
+  const threadIds = new Set<string>();
+  for (const msg of messages) {
+    const threadMsg = msg as DiscordMessage & { threadId?: string };
+    const threadId = threadMsg.threadId || msg.id;
+    threadIds.add(threadId);
+  }
+
+  logProgress(`Loading ${threadIds.size} thread embeddings from database...`);
+  
+  // Load embeddings from database in parallel
+  const loadPromises = Array.from(threadIds).map(async (threadId) => {
+    try {
+      const embedding = await getThreadEmbedding(threadId);
+      if (embedding) {
+        threadEmbeddings.set(threadId, embedding);
+      }
+    } catch (error) {
+      // Skip if embedding doesn't exist or error loading
+      // Will create on-the-fly later
+    }
+  });
+
+  await Promise.all(loadPromises);
+  
+  const loadedCount = threadEmbeddings.size;
+  logProgress(`Loaded ${loadedCount}/${threadIds.size} thread embeddings from database`);
+  
+  return threadEmbeddings;
+}
+
+/**
  * Classify multiple Discord messages using semantic embeddings
  * Processes messages in batches to handle rate limits efficiently
+ * Uses pre-computed thread embeddings from database when available
  */
 export async function classifyMessagesSemantic(
   messages: DiscordMessage[],
@@ -584,24 +632,52 @@ export async function classifyMessagesSemantic(
   // Pre-compute all issue embeddings first (more efficient)
   await precomputeIssueEmbeddings(issues, apiKey, embeddingCache);
 
+  // Pre-load thread embeddings from database
+  const threadEmbeddings = await preloadThreadEmbeddings(messages);
+  
+  // Add thread embeddings to cache
+  for (const [threadId, embedding] of threadEmbeddings.entries()) {
+    embeddingCache[`thread:${threadId}`] = embedding;
+  }
+
   // Now process messages - issue embeddings are already cached
   // Process messages sequentially to avoid rate limits
   const delayMs = 200; // 200ms delay between messages
 
   const totalMessages = messages.length;
   let processedMessages = 0;
+  let cachedEmbeddingsUsed = 0;
+  let newEmbeddingsCreated = 0;
   logProgress(`Classifying ${totalMessages} messages...`);
 
   const results: ClassifiedMessage[] = [];
 
   for (const msg of messages) {
     try {
-      // Get or create message embedding
+      // Determine thread ID (use threadId if available, otherwise use message.id for standalone messages)
+      const threadMsg = msg as DiscordMessage & { threadId?: string };
+      const threadId = threadMsg.threadId || msg.id;
+      
+      // Try to get embedding from cache (either pre-loaded from DB or already computed)
+      const threadCacheKey = `thread:${threadId}`;
       const messageCacheKey = `msg:${msg.id}`;
-      if (!embeddingCache[messageCacheKey]) {
-        embeddingCache[messageCacheKey] = await createEmbedding(msg.content, apiKey);
+      
+      let messageEmbedding: Embedding;
+      
+      // First, try thread embedding from database (most efficient)
+      if (embeddingCache[threadCacheKey]) {
+        messageEmbedding = embeddingCache[threadCacheKey];
+        cachedEmbeddingsUsed++;
+      } else if (embeddingCache[messageCacheKey]) {
+        // Fall back to message-level cache
+        messageEmbedding = embeddingCache[messageCacheKey];
+        cachedEmbeddingsUsed++;
+      } else {
+        // Create embedding on-the-fly if not in database
+        messageEmbedding = await createEmbedding(msg.content, apiKey);
+        embeddingCache[messageCacheKey] = messageEmbedding;
+        newEmbeddingsCreated++;
       }
-      const messageEmbedding = embeddingCache[messageCacheKey];
 
       // Compare with all issue embeddings (already cached)
       const similarities = issues.map((issue) => {
@@ -628,7 +704,7 @@ export async function classifyMessagesSemantic(
 
       processedMessages++;
       if (processedMessages % 10 === 0 || processedMessages === totalMessages) {
-        logProgress(`Classified ${processedMessages}/${totalMessages} messages (${Math.round((processedMessages / totalMessages) * 100)}%)`);
+        logProgress(`Classified ${processedMessages}/${totalMessages} messages (${Math.round((processedMessages / totalMessages) * 100)}%) - ${cachedEmbeddingsUsed} cached, ${newEmbeddingsCreated} new`);
       }
 
       // Small delay between messages to respect rate limits
@@ -639,11 +715,20 @@ export async function classifyMessagesSemantic(
         await new Promise(resolve => setTimeout(resolve, 5000));
         // Retry this message
         try {
+          const threadMsg = msg as DiscordMessage & { threadId?: string };
+          const threadId = threadMsg.threadId || msg.id;
+          const threadCacheKey = `thread:${threadId}`;
           const messageCacheKey = `msg:${msg.id}`;
-          if (!embeddingCache[messageCacheKey]) {
-            embeddingCache[messageCacheKey] = await createEmbedding(msg.content, apiKey);
+          
+          let messageEmbedding: Embedding;
+          if (embeddingCache[threadCacheKey]) {
+            messageEmbedding = embeddingCache[threadCacheKey];
+          } else if (embeddingCache[messageCacheKey]) {
+            messageEmbedding = embeddingCache[messageCacheKey];
+          } else {
+            messageEmbedding = await createEmbedding(msg.content, apiKey);
+            embeddingCache[messageCacheKey] = messageEmbedding;
           }
-          const messageEmbedding = embeddingCache[messageCacheKey];
 
           const similarities = issues.map((issue) => {
             const issueCacheKey = `issue:${issue.number}`;
@@ -676,7 +761,7 @@ export async function classifyMessagesSemantic(
     }
   }
 
-  logProgress(`Completed classifying all ${totalMessages} messages`);
+  logProgress(`Completed classifying all ${totalMessages} messages - ${cachedEmbeddingsUsed} used cached embeddings, ${newEmbeddingsCreated} created new embeddings`);
 
   // Filter by minimum similarity
   const filteredResults = results.filter(result => {

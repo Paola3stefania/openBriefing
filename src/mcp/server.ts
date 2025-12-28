@@ -1429,6 +1429,18 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       await mkdir(issuesCacheDir, { recursive: true });
       await writeFile(issuesCachePath, JSON.stringify(issuesCacheData, null, 2), "utf-8");
 
+      // Step 1.5: Compute missing issue embeddings before classification
+      if (process.env.OPENAI_API_KEY && useDatabase) {
+        try {
+          console.error("[Classification] Computing missing GitHub issue embeddings...");
+          const { computeAndSaveIssueEmbeddings } = await import("../storage/db/embeddings.js");
+          const issueEmbeddingResult = await computeAndSaveIssueEmbeddings(process.env.OPENAI_API_KEY);
+          console.error(`[Classification] Issue embeddings: ${issueEmbeddingResult.computed} computed, ${issueEmbeddingResult.cached} cached`);
+        } catch (embeddingError) {
+          console.error(`[Classification] Warning: Failed to compute issue embeddings (continuing anyway):`, embeddingError);
+        }
+      }
+
       // Step 2: Fetch/sync Discord messages (incremental) before classification
       const discordCacheDir = join(process.cwd(), classifyConfig.paths.cacheDir);
       const cacheFileName = `discord-messages-${actualChannelId}.json`;
@@ -1661,6 +1673,20 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         } catch (dbError) {
           // Database not available or error, continue with JSON history only
           console.error(`[Classification] Could not load from database (continuing with JSON history):`, dbError);
+        }
+      }
+
+      // Step 2.5: Compute missing thread embeddings before classification (if using semantic classification)
+      if (process.env.OPENAI_API_KEY && useDatabase) {
+        try {
+          console.error(`[Classification] Computing missing Discord thread embeddings for channel ${actualChannelId}...`);
+          const { computeAndSaveThreadEmbeddings } = await import("../storage/db/embeddings.js");
+          const threadEmbeddingResult = await computeAndSaveThreadEmbeddings(process.env.OPENAI_API_KEY, {
+            channelId: actualChannelId,
+          });
+          console.error(`[Classification] Thread embeddings: ${threadEmbeddingResult.computed} computed, ${threadEmbeddingResult.cached} cached`);
+        } catch (embeddingError) {
+          console.error(`[Classification] Warning: Failed to compute thread embeddings (continuing anyway):`, embeddingError);
         }
       }
 
@@ -2717,6 +2743,33 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const existingGroupStats = getGroupingStats(history);
         
         console.error(`[Grouping] Existing groups: ${existingGroupStats.totalGroups} (${existingGroupStats.exportedGroups} exported, ${existingGroupStats.pendingGroups} pending)`);
+
+        // ============================================================
+        // STEP 0: Compute missing embeddings before grouping
+        // ============================================================
+        const { hasDatabaseConfig, getStorage } = await import("../storage/factory.js");
+        const storage = getStorage();
+        const useDatabase = hasDatabaseConfig() && await storage.isAvailable();
+        
+        if (useDatabase) {
+          try {
+            // Compute missing issue embeddings
+            console.error("[Grouping] Computing missing GitHub issue embeddings...");
+            const { computeAndSaveIssueEmbeddings } = await import("../storage/db/embeddings.js");
+            const issueEmbeddingResult = await computeAndSaveIssueEmbeddings(process.env.OPENAI_API_KEY);
+            console.error(`[Grouping] Issue embeddings: ${issueEmbeddingResult.computed} computed, ${issueEmbeddingResult.cached} cached`);
+            
+            // Compute missing thread embeddings
+            console.error(`[Grouping] Computing missing Discord thread embeddings for channel ${actualChannelId}...`);
+            const { computeAndSaveThreadEmbeddings } = await import("../storage/db/embeddings.js");
+            const threadEmbeddingResult = await computeAndSaveThreadEmbeddings(process.env.OPENAI_API_KEY, {
+              channelId: actualChannelId,
+            });
+            console.error(`[Grouping] Thread embeddings: ${threadEmbeddingResult.computed} computed, ${threadEmbeddingResult.cached} cached`);
+          } catch (embeddingError) {
+            console.error(`[Grouping] Warning: Failed to compute embeddings (continuing anyway):`, embeddingError);
+          }
+        }
 
         // ============================================================
         // STEP 1: Check for existing classification results

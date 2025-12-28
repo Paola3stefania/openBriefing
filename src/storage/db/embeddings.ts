@@ -690,7 +690,10 @@ export async function computeAndSaveThreadEmbeddings(
     // Get all messages for this thread
     const messages = await prisma.discordMessage.findMany({
       where: { threadId: thread.threadId },
-      select: { content: true },
+      select: { 
+        content: true,
+        authorUsername: true,
+      },
       orderBy: { createdAt: "asc" },
     });
 
@@ -698,8 +701,11 @@ export async function computeAndSaveThreadEmbeddings(
       continue; // Skip threads with no messages
     }
 
-    // Build thread content by combining all messages
-    const threadContent = messages.map(m => m.content).join('\n');
+    // Build thread content by combining all messages with author context
+    // This matches the format used in classification (server.ts line 1797-1799)
+    const threadContent = messages
+      .map(m => `${m.authorUsername || 'Unknown'}: ${m.content}`)
+      .join('\n\n');
     const currentHash = hashContent(threadContent);
     const existingHash = existingHashes.get(thread.threadId);
 
