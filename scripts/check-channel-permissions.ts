@@ -92,10 +92,15 @@ discord.once("ready", async () => {
           });
           console.log(`#${channelInfo.name} - Accessible`);
         } catch (error: unknown) {
-          const reason = error.code === 50001 ? "Missing Access" : 
-                        error.code === 50013 ? "Missing Permissions" :
-                        error.code === 50001 ? "Missing Access" :
-                        error.message || "Unknown error";
+          let reason = "Unknown error";
+          if (error && typeof error === "object" && "code" in error) {
+            const errorCode = (error as { code: number }).code;
+            reason = errorCode === 50001 ? "Missing Access" : 
+                     errorCode === 50013 ? "Missing Permissions" :
+                     "Unknown error";
+          } else if (error instanceof Error) {
+            reason = error.message;
+          }
           inaccessibleChannels.push({
             name: channelInfo.name,
             id: channelInfo.id,
@@ -142,16 +147,18 @@ discord.once("ready", async () => {
 
     console.log("\n" + "=".repeat(70));
 
-  } catch (error) {
-    console.error("Error: Error:", error instanceof Error ? error.message : error);
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    console.error("Error: Error:", errorMessage);
   } finally {
     await discord.destroy();
     process.exit(0);
   }
 });
 
-discord.login(DISCORD_TOKEN).catch((error) => {
-  console.error("Error: Failed to login:", error.message);
+discord.login(DISCORD_TOKEN).catch((error: unknown) => {
+  const errorMessage = error instanceof Error ? error.message : String(error);
+  console.error("Error: Failed to login:", errorMessage);
   process.exit(1);
 });
 
