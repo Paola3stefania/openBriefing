@@ -201,6 +201,9 @@ Switch between backends using `STORAGE_BACKEND` environment variable or by setti
    - `manage_documentation_cache` with `action: "fetch"` - Fetches and caches documentation (does NOT compute embeddings)
    - `manage_documentation_cache` with `action: "extract_features"` - Extracts product features from cached documentation
    - `manage_documentation_cache` with `action: "compute_embeddings"` - Computes embeddings for all documentation, sections, and features (requires `OPENAI_API_KEY`)
+   - `manage_documentation_cache` with `action: "compute_docs_embeddings"` - Computes embeddings for documentation pages only
+   - `manage_documentation_cache` with `action: "compute_sections_embeddings"` - Computes embeddings for documentation sections only
+   - `manage_documentation_cache` with `action: "compute_features_embeddings"` - Computes embeddings for features only
    
    See [docs/DATABASE_SETUP.md](docs/DATABASE_SETUP.md) for detailed setup instructions.
 
@@ -396,7 +399,7 @@ These tools are used internally by the workflow tools, but can also be called di
 
 | Tool | Description |
 |------|-------------|
-| `manage_documentation_cache` | Manage documentation cache: `fetch` (fetch docs), `extract_features` (extract features), `compute_embeddings` (compute embeddings - separate step), `list` (list cached docs), `clear` (clear cache) |
+| `manage_documentation_cache` | Manage documentation cache: `fetch` (fetch docs), `extract_features` (extract features), `compute_embeddings` (compute all embeddings), `compute_docs_embeddings` (docs only), `compute_sections_embeddings` (sections only), `compute_features_embeddings` (features only), `list` (list cached docs), `clear` (clear cache) |
 | `list_linear_teams` | List Linear teams (for configuration) |
 | `validate_pm_setup` | Validate PM tool configuration |
 

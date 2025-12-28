@@ -128,13 +128,13 @@ export async function mapGroupsToFeatures(
     
     if (!embedding) {
       // Compute if not found
-      const name = feature.name.trim();
-      const separator = name.endsWith(":") ? " " : ": ";
+    const name = feature.name.trim();
+    const separator = name.endsWith(":") ? " " : ": ";
       const keywords = (feature.related_keywords || []).length > 0 
         ? ` Keywords: ${(feature.related_keywords || []).join(", ")}` 
         : "";
       const featureText = `${name}${feature.description ? `${separator}${feature.description}` : ""}${keywords}`;
-      try {
+    try {
         embedding = await createEmbedding(featureText, apiKey);
         
         // Save to database

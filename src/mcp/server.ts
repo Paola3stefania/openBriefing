@@ -484,8 +484,8 @@ const tools: Tool[] = [
       properties: {
         action: {
           type: "string",
-          enum: ["list", "fetch", "extract_features", "compute_embeddings", "clear"],
-          description: "Action to perform: 'list' (view cached docs), 'fetch' (pre-fetch and cache), 'extract_features' (extract features from cached docs), 'compute_embeddings' (compute embeddings for docs/sections/features), 'clear' (clear cache)",
+          enum: ["list", "fetch", "extract_features", "compute_embeddings", "compute_docs_embeddings", "compute_sections_embeddings", "compute_features_embeddings", "clear"],
+          description: "Action to perform: 'list' (view cached docs), 'fetch' (pre-fetch and cache), 'extract_features' (extract features from cached docs), 'compute_embeddings' (compute embeddings for all: docs/sections/features), 'compute_docs_embeddings' (compute embeddings for documentation pages only), 'compute_sections_embeddings' (compute embeddings for documentation sections only), 'compute_features_embeddings' (compute embeddings for features only), 'clear' (clear cache)",
           default: "list",
         },
         urls: {
@@ -3758,7 +3758,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     case "manage_documentation_cache": {
       const { action = "list", urls, use_cache = true } = args as {
-        action?: "list" | "fetch" | "extract_features" | "compute_embeddings" | "clear";
+        action?: "list" | "fetch" | "extract_features" | "compute_embeddings" | "compute_docs_embeddings" | "compute_sections_embeddings" | "compute_features_embeddings" | "clear";
         urls?: string[];
         use_cache?: boolean;
       };
@@ -3909,6 +3909,78 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
                   text: JSON.stringify({
                     success: true,
                     message: "Embeddings computed for all documentation, sections, and features",
+                  }, null, 2),
+                },
+              ],
+            };
+          }
+
+          case "compute_docs_embeddings": {
+            // Compute embeddings for documentation pages only
+            if (!process.env.OPENAI_API_KEY) {
+              throw new Error("OPENAI_API_KEY is required for computing embeddings.");
+            }
+
+            const { computeAndSaveDocumentationEmbeddings } = await import("../storage/db/embeddings.js");
+            
+            console.error("[Documentation Cache] Starting documentation embeddings computation...");
+            await computeAndSaveDocumentationEmbeddings(process.env.OPENAI_API_KEY);
+
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify({
+                    success: true,
+                    message: "Embeddings computed for all documentation pages",
+                  }, null, 2),
+                },
+              ],
+            };
+          }
+
+          case "compute_sections_embeddings": {
+            // Compute embeddings for documentation sections only
+            if (!process.env.OPENAI_API_KEY) {
+              throw new Error("OPENAI_API_KEY is required for computing embeddings.");
+            }
+
+            const { computeAndSaveDocumentationSectionEmbeddings } = await import("../storage/db/embeddings.js");
+            
+            console.error("[Documentation Cache] Starting documentation section embeddings computation...");
+            await computeAndSaveDocumentationSectionEmbeddings(process.env.OPENAI_API_KEY);
+
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify({
+                    success: true,
+                    message: "Embeddings computed for all documentation sections",
+                  }, null, 2),
+                },
+              ],
+            };
+          }
+
+          case "compute_features_embeddings": {
+            // Compute embeddings for features only
+            if (!process.env.OPENAI_API_KEY) {
+              throw new Error("OPENAI_API_KEY is required for computing embeddings.");
+            }
+
+            const { computeAndSaveFeatureEmbeddings } = await import("../storage/db/embeddings.js");
+            
+            console.error("[Documentation Cache] Starting feature embeddings computation...");
+            await computeAndSaveFeatureEmbeddings(process.env.OPENAI_API_KEY);
+
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify({
+                    success: true,
+                    message: "Embeddings computed for all features",
                   }, null, 2),
                 },
               ],
