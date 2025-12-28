@@ -50,6 +50,7 @@ model ClassifiedThread {
   groupThreads GroupThread[]
   ungrouped    UngroupedThread?
   history      ClassificationHistory[]
+  embedding    ThreadEmbedding?
 
   @@index([channelId])
   @@index([status])
@@ -216,6 +217,21 @@ model IssueEmbedding {
   @@index([contentHash])
   @@index([model])
   @@map("issue_embeddings")
+}
+
+model ThreadEmbedding {
+  threadId    String   @id @map("thread_id")
+  embedding   Json     // Array of floats (1536 dimensions)
+  contentHash String   @map("content_hash")
+  model       String
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  thread ClassifiedThread @relation(fields: [threadId], references: [threadId], onDelete: Cascade)
+
+  @@index([contentHash])
+  @@index([model])
+  @@map("thread_embeddings")
 }
 
 model DocumentationCache {
