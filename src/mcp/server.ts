@@ -477,6 +477,29 @@ const tools: Tool[] = [
     },
   },
   {
+    name: "compute_discord_embeddings",
+    description: "Compute and update embeddings for Discord message threads. This pre-computes embeddings for all classified threads, which improves performance for classification and grouping operations. Only computes embeddings for threads that don't have embeddings or have changed content.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        channel_id: {
+          type: "string",
+          description: "Optional channel ID to compute embeddings for threads in a specific channel. If not provided, computes for all channels.",
+        },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "compute_github_issue_embeddings",
+    description: "Compute and update embeddings for GitHub issues. This pre-computes embeddings for all issues, which improves performance for classification and grouping operations. Only computes embeddings for issues that don't have embeddings or have changed content.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      required: [],
+    },
+  },
+  {
     name: "manage_documentation_cache",
     description: "Manage documentation cache - view cached docs, pre-fetch and cache documentation, extract features from cache, or clear cache. This avoids re-fetching documentation every time features are needed.",
     inputSchema: {
@@ -986,6 +1009,71 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       } catch (error) {
         throw new Error(`Failed to fetch GitHub issues: ${error instanceof Error ? error.message : error}`);
       }
+    }
+
+    case "compute_discord_embeddings": {
+      const { channel_id } = args as { channel_id?: string };
+      
+      if (!process.env.OPENAI_API_KEY) {
+        throw new Error("OPENAI_API_KEY is required for computing embeddings.");
+      }
+
+      const { computeAndSaveThreadEmbeddings } = await import("../storage/db/embeddings.js");
+      
+      if (channel_id) {
+        console.error(`[Embeddings] Starting Discord thread embeddings computation for channel ${channel_id}...`);
+      } else {
+        console.error("[Embeddings] Starting Discord thread embeddings computation for all channels...");
+      }
+      
+      // Compute embeddings (with optional channel filter)
+      const result = await computeAndSaveThreadEmbeddings(process.env.OPENAI_API_KEY, {
+        channelId: channel_id,
+      });
+      
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              success: true,
+              message: channel_id
+                ? `Embeddings computed for Discord threads in channel ${channel_id}: ${result.computed} computed, ${result.cached} cached, ${result.total} total`
+                : `Embeddings computed for Discord threads: ${result.computed} computed, ${result.cached} cached, ${result.total} total`,
+              computed: result.computed,
+              cached: result.cached,
+              total: result.total,
+              ...(channel_id ? { channel_id } : {}),
+            }, null, 2),
+          },
+        ],
+      };
+    }
+
+    case "compute_github_issue_embeddings": {
+      if (!process.env.OPENAI_API_KEY) {
+        throw new Error("OPENAI_API_KEY is required for computing embeddings.");
+      }
+
+      const { computeAndSaveIssueEmbeddings } = await import("../storage/db/embeddings.js");
+      
+      console.error("[Embeddings] Starting GitHub issue embeddings computation...");
+      const result = await computeAndSaveIssueEmbeddings(process.env.OPENAI_API_KEY);
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              success: true,
+              message: `Embeddings computed for GitHub issues: ${result.computed} computed, ${result.cached} cached, ${result.total} total`,
+              computed: result.computed,
+              cached: result.cached,
+              total: result.total,
+            }, null, 2),
+          },
+        ],
+      };
     }
 
     case "fetch_discord_messages": {
@@ -4358,8 +4446,11 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
             const { computeAllEmbeddings } = await import("../storage/db/embeddings.js");
             
-            console.error("[Documentation Cache] Starting embedding computation...");
-            await computeAllEmbeddings(process.env.OPENAI_API_KEY);
+            console.error("[Embeddings] Starting embedding computation for documentation, sections, and features...");
+            await computeAllEmbeddings(process.env.OPENAI_API_KEY, {
+              skipThreads: true,
+              skipIssues: true,
+            });
 
             return {
               content: [
@@ -4367,7 +4458,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
                   type: "text",
                   text: JSON.stringify({
                     success: true,
-                    message: "Embeddings computed for all documentation, sections, and features",
+                    message: "Embeddings computed for all documentation, sections, and features. Use compute_discord_embeddings and compute_github_issue_embeddings for threads and issues.",
                   }, null, 2),
                 },
               ],
@@ -4430,7 +4521,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
             const { computeAndSaveFeatureEmbeddings } = await import("../storage/db/embeddings.js");
             
-            console.error("[Documentation Cache] Starting feature embeddings computation...");
+            console.error("[Embeddings] Starting feature embeddings computation...");
             await computeAndSaveFeatureEmbeddings(process.env.OPENAI_API_KEY);
 
             return {

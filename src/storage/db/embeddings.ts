@@ -604,6 +604,377 @@ export async function computeAndSaveFeatureEmbeddings(
 }
 
 /**
+ * Save thread embedding
+ */
+export async function saveThreadEmbedding(
+  threadId: string,
+  embedding: Embedding,
+  contentHash: string
+): Promise<void> {
+  const model = getEmbeddingModel();
+  await prisma.threadEmbedding.upsert({
+    where: { threadId },
+    update: {
+      embedding: embedding as Prisma.InputJsonValue,
+      contentHash,
+      model,
+    },
+    create: {
+      threadId,
+      embedding: embedding as Prisma.InputJsonValue,
+      contentHash,
+      model,
+    },
+  });
+}
+
+/**
+ * Get thread embedding
+ */
+export async function getThreadEmbedding(threadId: string): Promise<Embedding | null> {
+  const model = getEmbeddingModel();
+  const result = await prisma.threadEmbedding.findUnique({
+    where: { threadId },
+    select: { embedding: true, model: true },
+  });
+
+  if (!result || result.model !== model) {
+    return null;
+  }
+
+  return result.embedding as Embedding;
+}
+
+/**
+ * Compute and save embeddings for all Discord message threads
+ */
+export async function computeAndSaveThreadEmbeddings(
+  apiKey: string,
+  options?: {
+    channelId?: string;
+    onProgress?: (processed: number, total: number) => void;
+  }
+): Promise<{ computed: number; cached: number; total: number }> {
+  const onProgress = options?.onProgress;
+  
+  // Get all classified threads (optionally filtered by channel)
+  const allThreads = await prisma.classifiedThread.findMany({
+    where: options?.channelId ? { channelId: options.channelId } : undefined,
+    select: {
+      threadId: true,
+      threadName: true,
+    },
+    orderBy: { threadId: "asc" },
+  });
+
+  const model = getEmbeddingModel();
+
+  // Check which threads already have embeddings
+  const existingEmbeddings = await prisma.threadEmbedding.findMany({
+    where: { model },
+    select: {
+      threadId: true,
+      contentHash: true,
+    },
+  });
+
+  const existingHashes = new Map<string, string>();
+  for (const row of existingEmbeddings) {
+    existingHashes.set(row.threadId, row.contentHash);
+  }
+
+  // Get all messages for threads to build content
+  const threadsToEmbed: Array<{ threadId: string; threadName: string | null; content: string }> = [];
+  
+  for (const thread of allThreads) {
+    // Get all messages for this thread
+    const messages = await prisma.discordMessage.findMany({
+      where: { threadId: thread.threadId },
+      select: { content: true },
+      orderBy: { createdAt: "asc" },
+    });
+
+    if (messages.length === 0) {
+      continue; // Skip threads with no messages
+    }
+
+    // Build thread content by combining all messages
+    const threadContent = messages.map(m => m.content).join('\n');
+    const currentHash = hashContent(threadContent);
+    const existingHash = existingHashes.get(thread.threadId);
+
+    if (!existingHash || existingHash !== currentHash) {
+      threadsToEmbed.push({
+        threadId: thread.threadId,
+        threadName: thread.threadName,
+        content: threadContent,
+      });
+    }
+  }
+
+  console.error(`[Embeddings] Found ${allThreads.length} threads, ${threadsToEmbed.length} need embeddings`);
+
+  // Process in batches using batch embedding API
+  const batchSize = 25; // Threads can be long, use smaller batches
+  let processed = 0;
+  let cached = allThreads.length - threadsToEmbed.length;
+  let retryCount = 0;
+
+  for (let i = 0; i < threadsToEmbed.length; i += batchSize) {
+    const batch = threadsToEmbed.slice(i, i + batchSize);
+
+    try {
+      // Prepare texts for batch embedding
+      const textsToEmbed = batch.map((thread) => thread.content);
+
+      // Batch create embeddings
+      const embeddings = await createEmbeddings(textsToEmbed, apiKey);
+
+      // Batch save all embeddings in a single transaction
+      await prisma.$transaction(async (tx: Omit<typeof prisma, "$connect" | "$disconnect" | "$on" | "$transaction" | "$use" | "$extends">) => {
+        await Promise.all(
+          embeddings.map((embedding, j) => {
+            const thread = batch[j];
+            const contentText = textsToEmbed[j];
+            const contentHash = hashContent(contentText);
+            return tx.threadEmbedding.upsert({
+              where: { threadId: thread.threadId },
+              update: {
+                embedding: embedding as Prisma.InputJsonValue,
+                contentHash,
+                model,
+              },
+              create: {
+                threadId: thread.threadId,
+                embedding: embedding as Prisma.InputJsonValue,
+                contentHash,
+                model,
+              },
+            });
+          })
+        );
+      });
+
+      processed += batch.length;
+      retryCount = 0; // Reset retry count on successful batch
+      if (onProgress) {
+        onProgress(processed, threadsToEmbed.length);
+      }
+    } catch (error) {
+      // If batch fails, fall back to individual processing
+      const isRateLimit = error instanceof Error && (error.message.includes("429") || error.message.includes("rate limit"));
+      if (isRateLimit) {
+        // Exponential backoff for rate limit errors: 1s, 2s, 4s, etc.
+        retryCount++;
+        const delay = Math.min(1000 * Math.pow(2, retryCount), 30000); // Max 30s
+        console.error(`[Embeddings] Rate limit error (retry ${retryCount}), waiting ${delay}ms before retry...`);
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        // Retry the batch instead of falling back to individual
+        i -= batchSize; // Rewind to retry this batch
+        continue;
+      }
+      
+      retryCount = 0; // Reset retry count for non-rate-limit errors
+      
+      console.error(`[Embeddings] Batch embedding failed, falling back to individual:`, error);
+      for (const thread of batch) {
+        try {
+          const embedding = await createEmbedding(thread.content, apiKey);
+          const contentHash = hashContent(thread.content);
+
+          await saveThreadEmbedding(thread.threadId, embedding, contentHash);
+          processed++;
+
+          if (onProgress) {
+            onProgress(processed, threadsToEmbed.length);
+          }
+
+          // Small delay to respect rate limits
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        } catch (individualError) {
+          console.error(`[Embeddings] Failed to embed thread ${thread.threadId}:`, individualError);
+        }
+      }
+    }
+
+    // Small delay between batches to respect rate limits
+    if (i + batchSize < threadsToEmbed.length) {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+  }
+
+  console.error(`[Embeddings] Completed thread embeddings: ${processed}/${threadsToEmbed.length} computed, ${cached} cached`);
+  return { computed: processed, cached, total: allThreads.length };
+}
+
+/**
+ * Compute and save embeddings for all GitHub issues
+ */
+export async function computeAndSaveIssueEmbeddings(
+  apiKey: string,
+  onProgress?: (processed: number, total: number) => void
+): Promise<{ computed: number; cached: number; total: number }> {
+  // Get all issues
+  const allIssues = await prisma.gitHubIssue.findMany({
+    select: {
+      issueNumber: true,
+      issueTitle: true,
+      issueBody: true,
+      issueLabels: true,
+    },
+    orderBy: { issueNumber: "asc" },
+  });
+
+  const model = getEmbeddingModel();
+
+  // Check which issues already have embeddings
+  const existingEmbeddings = await prisma.issueEmbedding.findMany({
+    where: { model },
+    select: {
+      issueNumber: true,
+      contentHash: true,
+    },
+  });
+
+  const existingHashes = new Map<number, string>();
+  for (const row of existingEmbeddings) {
+    existingHashes.set(row.issueNumber, row.contentHash);
+  }
+
+  // Compute content hashes and find issues that need embeddings
+  // Build issue text in same format as used in classification: title + body + labels
+  const issuesToEmbed: Array<{ issueNumber: number; issueTitle: string; issueBody: string | null; issueLabels: string[]; content: string }> = [];
+  for (const issue of allIssues) {
+    const issueText = [
+      issue.issueTitle,
+      issue.issueBody || "",
+      ...issue.issueLabels.sort(),
+    ].join("\n\n");
+    
+    const currentHash = hashContent(issueText);
+    const existingHash = existingHashes.get(issue.issueNumber);
+
+    if (!existingHash || existingHash !== currentHash) {
+      issuesToEmbed.push({
+        issueNumber: issue.issueNumber,
+        issueTitle: issue.issueTitle,
+        issueBody: issue.issueBody,
+        issueLabels: issue.issueLabels,
+        content: issueText,
+      });
+    }
+  }
+
+  console.error(`[Embeddings] Found ${allIssues.length} issues, ${issuesToEmbed.length} need embeddings`);
+
+  // Process in batches using batch embedding API
+  // Issues (title + body) are typically shorter than documentation, so can use larger batches
+  const batchSize = 50;
+  let processed = 0;
+  let cached = allIssues.length - issuesToEmbed.length;
+  let retryCount = 0;
+
+  for (let i = 0; i < issuesToEmbed.length; i += batchSize) {
+    const batch = issuesToEmbed.slice(i, i + batchSize);
+
+    try {
+      // Prepare texts for batch embedding
+      const textsToEmbed = batch.map((issue) => issue.content);
+
+      // Batch create embeddings
+      const embeddings = await createEmbeddings(textsToEmbed, apiKey);
+
+      // Batch save all embeddings in a single transaction
+      await prisma.$transaction(async (tx: Omit<typeof prisma, "$connect" | "$disconnect" | "$on" | "$transaction" | "$use" | "$extends">) => {
+        await Promise.all(
+          embeddings.map((embedding, j) => {
+            const issue = batch[j];
+            const contentText = textsToEmbed[j];
+            const contentHash = hashContent(contentText);
+            return tx.issueEmbedding.upsert({
+              where: { issueNumber: issue.issueNumber },
+              update: {
+                embedding: embedding as Prisma.InputJsonValue,
+                contentHash,
+                model,
+              },
+              create: {
+                issueNumber: issue.issueNumber,
+                embedding: embedding as Prisma.InputJsonValue,
+                contentHash,
+                model,
+              },
+            });
+          })
+        );
+      });
+
+      processed += batch.length;
+      retryCount = 0; // Reset retry count on successful batch
+      if (onProgress) {
+        onProgress(processed, issuesToEmbed.length);
+      }
+    } catch (error) {
+      // If batch fails, fall back to individual processing
+      const isRateLimit = error instanceof Error && (error.message.includes("429") || error.message.includes("rate limit"));
+      if (isRateLimit) {
+        // Exponential backoff for rate limit errors: 1s, 2s, 4s, etc.
+        retryCount++;
+        const delay = Math.min(1000 * Math.pow(2, retryCount), 30000); // Max 30s
+        console.error(`[Embeddings] Rate limit error (retry ${retryCount}), waiting ${delay}ms before retry...`);
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        // Retry the batch instead of falling back to individual
+        i -= batchSize; // Rewind to retry this batch
+        continue;
+      }
+      
+      retryCount = 0; // Reset retry count for non-rate-limit errors
+      
+      console.error(`[Embeddings] Batch embedding failed, falling back to individual:`, error);
+      for (const issue of batch) {
+        try {
+          const embedding = await createEmbedding(issue.content, apiKey);
+          const contentHash = hashContent(issue.content);
+
+          await prisma.issueEmbedding.upsert({
+            where: { issueNumber: issue.issueNumber },
+            update: {
+              embedding: embedding as Prisma.InputJsonValue,
+              contentHash,
+              model,
+            },
+            create: {
+              issueNumber: issue.issueNumber,
+              embedding: embedding as Prisma.InputJsonValue,
+              contentHash,
+              model,
+            },
+          });
+          processed++;
+
+          if (onProgress) {
+            onProgress(processed, issuesToEmbed.length);
+          }
+
+          // Small delay to respect rate limits
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        } catch (individualError) {
+          console.error(`[Embeddings] Failed to embed issue ${issue.issueNumber}:`, individualError);
+        }
+      }
+    }
+
+    // Small delay between batches to respect rate limits
+    if (i + batchSize < issuesToEmbed.length) {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+  }
+
+  console.error(`[Embeddings] Completed issue embeddings: ${processed}/${issuesToEmbed.length} computed, ${cached} cached`);
+  return { computed: processed, cached, total: allIssues.length };
+}
+
+/**
  * Compute embeddings for all documentation, sections, and features
  */
 export async function computeAllEmbeddings(
@@ -612,6 +983,8 @@ export async function computeAllEmbeddings(
     skipDocs?: boolean;
     skipSections?: boolean;
     skipFeatures?: boolean;
+    skipThreads?: boolean;
+    skipIssues?: boolean;
   }
 ): Promise<void> {
   console.error("[Embeddings] Starting batch embedding computation...");
@@ -626,6 +999,14 @@ export async function computeAllEmbeddings(
 
   if (!options?.skipFeatures) {
     await computeAndSaveFeatureEmbeddings(apiKey);
+  }
+
+  if (!options?.skipThreads) {
+    await computeAndSaveThreadEmbeddings(apiKey, {});
+  }
+
+  if (!options?.skipIssues) {
+    await computeAndSaveIssueEmbeddings(apiKey);
   }
 
   console.error("[Embeddings] Completed all embedding computations");
