@@ -113,7 +113,24 @@ export async function saveClassificationHistory(
     // Save to database
     try {
       const { transaction } = await import("../db/client.js");
+      const { getStorage } = await import("../factory.js");
+      const storage = getStorage();
+      
       await transaction(async (client: any) => {
+        // First, ensure all channels exist (to satisfy foreign key constraints)
+        const channelIds = new Set<string>();
+        for (const [messageId, msg] of Object.entries(history.messages)) {
+          channelIds.add(msg.channel_id);
+        }
+        for (const [threadId, thread] of Object.entries(history.threads || {})) {
+          channelIds.add(thread.channel_id);
+        }
+        
+        // Upsert all channels
+        for (const channelId of channelIds) {
+          await storage.upsertChannel(channelId);
+        }
+        
         // Save all message classifications
         for (const [messageId, msg] of Object.entries(history.messages)) {
           // Find thread_id for this message by checking threads

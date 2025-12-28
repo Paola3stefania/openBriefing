@@ -1,12 +1,13 @@
 /**
  * Embedding storage operations for documentation, sections, and features
+ * Using Prisma for type-safe database access
  */
 
-import { query, transaction } from "./client.js";
+import { prisma } from "./prisma.js";
 import { createHash } from "crypto";
 import type { DocumentationContent } from "../../export/documentationFetcher.js";
 import type { ProductFeature } from "../../export/types.js";
-import { createEmbedding } from "../../core/classify/semantic.js";
+import { createEmbedding, createEmbeddings } from "../../core/classify/semantic.js";
 import { getConfig } from "../../config/index.js";
 
 export type Embedding = number[];
@@ -36,17 +37,22 @@ export async function saveDocumentationSectionEmbedding(
   contentHash: string
 ): Promise<void> {
   const model = getEmbeddingModel();
-  await query(
-    `INSERT INTO documentation_section_embeddings (section_id, documentation_url, embedding, content_hash, model)
-     VALUES ($1, $2, $3::jsonb, $4, $5)
-     ON CONFLICT (section_id) DO UPDATE SET
-       embedding = EXCLUDED.embedding,
-       content_hash = EXCLUDED.content_hash,
-       model = EXCLUDED.model,
-       documentation_url = EXCLUDED.documentation_url,
-       updated_at = NOW()`,
-    [sectionId, documentationUrl, JSON.stringify(embedding), contentHash, model]
-  );
+  await prisma.documentationSectionEmbedding.upsert({
+    where: { sectionId },
+    update: {
+      documentationUrl,
+      embedding: embedding as any, // Prisma JSON type
+      contentHash,
+      model,
+    },
+    create: {
+      sectionId,
+      documentationUrl,
+      embedding: embedding as any,
+      contentHash,
+      model,
+    },
+  });
 }
 
 /**
@@ -54,17 +60,18 @@ export async function saveDocumentationSectionEmbedding(
  */
 export async function getDocumentationSectionEmbedding(sectionId: number): Promise<Embedding | null> {
   const model = getEmbeddingModel();
-  const result = await query(
-    `SELECT embedding FROM documentation_section_embeddings
-     WHERE section_id = $1 AND model = $2`,
-    [sectionId, model]
-  );
+  const result = await prisma.documentationSectionEmbedding.findUnique({
+    where: {
+      sectionId,
+    },
+    select: { embedding: true, model: true },
+  });
 
-  if (result.rows.length === 0) {
+  if (!result || result.model !== model) {
     return null;
   }
 
-  return result.rows[0].embedding as Embedding;
+  return result.embedding as Embedding;
 }
 
 /**
@@ -76,16 +83,20 @@ export async function saveDocumentationEmbedding(
   contentHash: string
 ): Promise<void> {
   const model = getEmbeddingModel();
-  await query(
-    `INSERT INTO documentation_embeddings (documentation_url, embedding, content_hash, model)
-     VALUES ($1, $2::jsonb, $3, $4)
-     ON CONFLICT (documentation_url) DO UPDATE SET
-       embedding = EXCLUDED.embedding,
-       content_hash = EXCLUDED.content_hash,
-       model = EXCLUDED.model,
-       updated_at = NOW()`,
-    [url, JSON.stringify(embedding), contentHash, model]
-  );
+  await prisma.documentationEmbedding.upsert({
+    where: { documentationUrl: url },
+    update: {
+      embedding: embedding as any,
+      contentHash,
+      model,
+    },
+    create: {
+      documentationUrl: url,
+      embedding: embedding as any,
+      contentHash,
+      model,
+    },
+  });
 }
 
 /**
@@ -93,17 +104,16 @@ export async function saveDocumentationEmbedding(
  */
 export async function getDocumentationEmbedding(url: string): Promise<Embedding | null> {
   const model = getEmbeddingModel();
-  const result = await query(
-    `SELECT embedding FROM documentation_embeddings
-     WHERE documentation_url = $1 AND model = $2`,
-    [url, model]
-  );
+  const result = await prisma.documentationEmbedding.findUnique({
+    where: { documentationUrl: url },
+    select: { embedding: true, model: true },
+  });
 
-  if (result.rows.length === 0) {
+  if (!result || result.model !== model) {
     return null;
   }
 
-  return result.rows[0].embedding as Embedding;
+  return result.embedding as Embedding;
 }
 
 /**
@@ -115,16 +125,20 @@ export async function saveFeatureEmbedding(
   contentHash: string
 ): Promise<void> {
   const model = getEmbeddingModel();
-  await query(
-    `INSERT INTO feature_embeddings (feature_id, embedding, content_hash, model)
-     VALUES ($1, $2::jsonb, $3, $4)
-     ON CONFLICT (feature_id) DO UPDATE SET
-       embedding = EXCLUDED.embedding,
-       content_hash = EXCLUDED.content_hash,
-       model = EXCLUDED.model,
-       updated_at = NOW()`,
-    [featureId, JSON.stringify(embedding), contentHash, model]
-  );
+  await prisma.featureEmbedding.upsert({
+    where: { featureId },
+    update: {
+      embedding: embedding as any,
+      contentHash,
+      model,
+    },
+    create: {
+      featureId,
+      embedding: embedding as any,
+      contentHash,
+      model,
+    },
+  });
 }
 
 /**
@@ -132,17 +146,16 @@ export async function saveFeatureEmbedding(
  */
 export async function getFeatureEmbedding(featureId: string): Promise<Embedding | null> {
   const model = getEmbeddingModel();
-  const result = await query(
-    `SELECT embedding FROM feature_embeddings
-     WHERE feature_id = $1 AND model = $2`,
-    [featureId, model]
-  );
+  const result = await prisma.featureEmbedding.findUnique({
+    where: { featureId },
+    select: { embedding: true, model: true },
+  });
 
-  if (result.rows.length === 0) {
+  if (!result || result.model !== model) {
     return null;
   }
 
-  return result.rows[0].embedding as Embedding;
+  return result.embedding as Embedding;
 }
 
 /**
@@ -153,26 +166,30 @@ export async function computeAndSaveDocumentationSectionEmbeddings(
   onProgress?: (processed: number, total: number) => void
 ): Promise<void> {
   // Get all sections that need embeddings
-  const sectionsResult = await query(
-    `SELECT id, documentation_url, title, content
-     FROM documentation_sections
-     ORDER BY id`
-  );
+  const allSections = await prisma.documentationSection.findMany({
+    orderBy: { id: "asc" },
+    select: {
+      id: true,
+      documentationUrl: true,
+      title: true,
+      content: true,
+    },
+  });
 
-  const allSections = sectionsResult.rows;
   const model = getEmbeddingModel();
 
   // Check which sections already have embeddings
-  const existingEmbeddings = await query(
-    `SELECT section_id, content_hash
-     FROM documentation_section_embeddings
-     WHERE model = $1`,
-    [model]
-  );
+  const existingEmbeddings = await prisma.documentationSectionEmbedding.findMany({
+    where: { model },
+    select: {
+      sectionId: true,
+      contentHash: true,
+    },
+  });
 
   const existingHashes = new Map<number, string>();
-  for (const row of existingEmbeddings.rows) {
-    existingHashes.set(row.section_id, row.content_hash);
+  for (const row of existingEmbeddings) {
+    existingHashes.set(row.sectionId, row.contentHash);
   }
 
   // Compute content hashes and find sections that need embeddings
@@ -185,7 +202,7 @@ export async function computeAndSaveDocumentationSectionEmbeddings(
     if (!existingHash || existingHash !== currentHash) {
       sectionsToEmbed.push({
         id: section.id,
-        url: section.documentation_url,
+        url: section.documentationUrl,
         title: section.title,
         content: section.content,
       });
@@ -194,36 +211,95 @@ export async function computeAndSaveDocumentationSectionEmbeddings(
 
   console.error(`[Embeddings] Found ${allSections.length} sections, ${sectionsToEmbed.length} need embeddings`);
 
-  // Process in batches
-  const batchSize = 10;
+  // Process in batches using batch embedding API
+  const batchSize = 25;
   let processed = 0;
+  let retryCount = 0;
 
   for (let i = 0; i < sectionsToEmbed.length; i += batchSize) {
     const batch = sectionsToEmbed.slice(i, i + batchSize);
 
-    for (const section of batch) {
-      try {
-        const contentText = `${section.title}\n\n${section.content}`;
-        const embedding = await createEmbedding(contentText, apiKey);
-        const contentHash = hashContent(contentText);
+    try {
+      // Prepare texts for batch embedding
+      const textsToEmbed = batch.map((section) => `${section.title}\n\n${section.content}`);
 
-        await saveDocumentationSectionEmbedding(section.id, section.url, embedding, contentHash);
-        processed++;
+      // Batch create embeddings
+      const embeddings = await createEmbeddings(textsToEmbed, apiKey);
 
-        if (onProgress) {
-          onProgress(processed, sectionsToEmbed.length);
+      // Batch save all embeddings in a single transaction
+      const model = getEmbeddingModel();
+      await prisma.$transaction(async (tx: any) => {
+        await Promise.all(
+          embeddings.map((embedding, j) => {
+            const section = batch[j];
+            const contentText = textsToEmbed[j];
+            const contentHash = hashContent(contentText);
+            return tx.documentationSectionEmbedding.upsert({
+              where: { sectionId: section.id },
+              update: {
+                documentationUrl: section.url,
+                embedding: embedding as any,
+                contentHash,
+                model,
+              },
+              create: {
+                sectionId: section.id,
+                documentationUrl: section.url,
+                embedding: embedding as any,
+                contentHash,
+                model,
+              },
+            });
+          })
+        );
+      });
+
+      processed += batch.length;
+      retryCount = 0; // Reset retry count on successful batch
+      if (onProgress) {
+        onProgress(processed, sectionsToEmbed.length);
+      }
+    } catch (error) {
+      // If batch fails, fall back to individual processing
+      const isRateLimit = error instanceof Error && (error.message.includes("429") || error.message.includes("rate limit"));
+      if (isRateLimit) {
+        // Exponential backoff for rate limit errors: 1s, 2s, 4s, etc.
+        retryCount++;
+        const delay = Math.min(1000 * Math.pow(2, retryCount), 30000); // Max 30s
+        console.error(`[Embeddings] Rate limit error (retry ${retryCount}), waiting ${delay}ms before retry...`);
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        // Retry the batch instead of falling back to individual
+        i -= batchSize; // Rewind to retry this batch
+        continue;
+      }
+      
+      retryCount = 0; // Reset retry count for non-rate-limit errors
+      
+      console.error(`[Embeddings] Batch embedding failed, falling back to individual:`, error);
+      for (const section of batch) {
+        try {
+          const contentText = `${section.title}\n\n${section.content}`;
+          const embedding = await createEmbedding(contentText, apiKey);
+          const contentHash = hashContent(contentText);
+
+          await saveDocumentationSectionEmbedding(section.id, section.url, embedding, contentHash);
+          processed++;
+
+          if (onProgress) {
+            onProgress(processed, sectionsToEmbed.length);
+          }
+
+          // Small delay to respect rate limits
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        } catch (individualError) {
+          console.error(`[Embeddings] Failed to embed section ${section.id}:`, individualError);
         }
-
-        // Small delay to respect rate limits
-        await new Promise(resolve => setTimeout(resolve, 100));
-      } catch (error) {
-        console.error(`[Embeddings] Failed to embed section ${section.id}:`, error);
       }
     }
 
-    // Delay between batches
+    // Small delay between batches to respect rate limits (reduced since we're batching saves)
     if (i + batchSize < sectionsToEmbed.length) {
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      await new Promise((resolve) => setTimeout(resolve, 200));
     }
   }
 
@@ -238,26 +314,29 @@ export async function computeAndSaveDocumentationEmbeddings(
   onProgress?: (processed: number, total: number) => void
 ): Promise<void> {
   // Get all documentation that needs embeddings
-  const docsResult = await query(
-    `SELECT url, title, content
-     FROM documentation_cache
-     ORDER BY url`
-  );
+  const allDocs = await prisma.documentationCache.findMany({
+    orderBy: { url: "asc" },
+    select: {
+      url: true,
+      title: true,
+      content: true,
+    },
+  });
 
-  const allDocs = docsResult.rows;
   const model = getEmbeddingModel();
 
   // Check which docs already have embeddings
-  const existingEmbeddings = await query(
-    `SELECT documentation_url, content_hash
-     FROM documentation_embeddings
-     WHERE model = $1`,
-    [model]
-  );
+  const existingEmbeddings = await prisma.documentationEmbedding.findMany({
+    where: { model },
+    select: {
+      documentationUrl: true,
+      contentHash: true,
+    },
+  });
 
   const existingHashes = new Map<string, string>();
-  for (const row of existingEmbeddings.rows) {
-    existingHashes.set(row.documentation_url, row.content_hash);
+  for (const row of existingEmbeddings) {
+    existingHashes.set(row.documentationUrl, row.contentHash);
   }
 
   // Compute content hashes and find docs that need embeddings
@@ -278,36 +357,92 @@ export async function computeAndSaveDocumentationEmbeddings(
 
   console.error(`[Embeddings] Found ${allDocs.length} docs, ${docsToEmbed.length} need embeddings`);
 
-  // Process in batches
-  const batchSize = 10;
+  // Process in batches using batch embedding API
+  const batchSize = 25;
   let processed = 0;
+  let retryCount = 0;
 
   for (let i = 0; i < docsToEmbed.length; i += batchSize) {
     const batch = docsToEmbed.slice(i, i + batchSize);
 
-    for (const doc of batch) {
-      try {
-        const contentText = doc.title ? `${doc.title}\n\n${doc.content}` : doc.content;
-        const embedding = await createEmbedding(contentText, apiKey);
-        const contentHash = hashContent(contentText);
+    try {
+      // Prepare texts for batch embedding
+      const textsToEmbed = batch.map((doc) => (doc.title ? `${doc.title}\n\n${doc.content}` : doc.content));
 
-        await saveDocumentationEmbedding(doc.url, embedding, contentHash);
-        processed++;
+      // Batch create embeddings
+      const embeddings = await createEmbeddings(textsToEmbed, apiKey);
 
-        if (onProgress) {
-          onProgress(processed, docsToEmbed.length);
+      // Batch save all embeddings in a single transaction
+      const model = getEmbeddingModel();
+      await prisma.$transaction(async (tx: any) => {
+        await Promise.all(
+          embeddings.map((embedding, j) => {
+            const doc = batch[j];
+            const contentText = textsToEmbed[j];
+            const contentHash = hashContent(contentText);
+            return tx.documentationEmbedding.upsert({
+              where: { documentationUrl: doc.url },
+              update: {
+                embedding: embedding as any,
+                contentHash,
+                model,
+              },
+              create: {
+                documentationUrl: doc.url,
+                embedding: embedding as any,
+                contentHash,
+                model,
+              },
+            });
+          })
+        );
+      });
+
+      processed += batch.length;
+      retryCount = 0; // Reset retry count on successful batch
+      if (onProgress) {
+        onProgress(processed, docsToEmbed.length);
+      }
+    } catch (error) {
+      // If batch fails, fall back to individual processing
+      const isRateLimit = error instanceof Error && (error.message.includes("429") || error.message.includes("rate limit"));
+      if (isRateLimit) {
+        // Exponential backoff for rate limit errors: 1s, 2s, 4s, etc.
+        retryCount++;
+        const delay = Math.min(1000 * Math.pow(2, retryCount), 30000); // Max 30s
+        console.error(`[Embeddings] Rate limit error (retry ${retryCount}), waiting ${delay}ms before retry...`);
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        // Retry the batch instead of falling back to individual
+        i -= batchSize; // Rewind to retry this batch
+        continue;
+      }
+      
+      retryCount = 0; // Reset retry count for non-rate-limit errors
+      console.error(`[Embeddings] Batch embedding failed, falling back to individual:`, error);
+      for (const doc of batch) {
+        try {
+          const contentText = doc.title ? `${doc.title}\n\n${doc.content}` : doc.content;
+          const embedding = await createEmbedding(contentText, apiKey);
+          const contentHash = hashContent(contentText);
+
+          await saveDocumentationEmbedding(doc.url, embedding, contentHash);
+          processed++;
+
+          if (onProgress) {
+            onProgress(processed, docsToEmbed.length);
+          }
+
+          // Small delay to respect rate limits
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        } catch (individualError) {
+          console.error(`[Embeddings] Failed to embed doc ${doc.url}:`, individualError);
         }
-
-        // Small delay to respect rate limits
-        await new Promise(resolve => setTimeout(resolve, 100));
-      } catch (error) {
-        console.error(`[Embeddings] Failed to embed doc ${doc.url}:`, error);
       }
     }
 
-    // Delay between batches
+    // Small delay between batches to respect rate limits (reduced since we're batching saves)
     if (i + batchSize < docsToEmbed.length) {
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      await new Promise((resolve) => setTimeout(resolve, 200));
     }
   }
 
@@ -322,32 +457,36 @@ export async function computeAndSaveFeatureEmbeddings(
   onProgress?: (processed: number, total: number) => void
 ): Promise<void> {
   // Get all features that need embeddings
-  const featuresResult = await query(
-    `SELECT id, name, description, related_keywords
-     FROM features
-     ORDER BY id`
-  );
+  const allFeatures = await prisma.feature.findMany({
+    orderBy: { id: "asc" },
+    select: {
+      id: true,
+      name: true,
+      description: true,
+      relatedKeywords: true,
+    },
+  });
 
-  const allFeatures = featuresResult.rows;
   const model = getEmbeddingModel();
 
   // Check which features already have embeddings
-  const existingEmbeddings = await query(
-    `SELECT feature_id, content_hash
-     FROM feature_embeddings
-     WHERE model = $1`,
-    [model]
-  );
+  const existingEmbeddings = await prisma.featureEmbedding.findMany({
+    where: { model },
+    select: {
+      featureId: true,
+      contentHash: true,
+    },
+  });
 
   const existingHashes = new Map<string, string>();
-  for (const row of existingEmbeddings.rows) {
-    existingHashes.set(row.feature_id, row.content_hash);
+  for (const row of existingEmbeddings) {
+    existingHashes.set(row.featureId, row.contentHash);
   }
 
   // Compute content hashes and find features that need embeddings
   const featuresToEmbed: Array<{ id: string; name: string; description: string; keywords: string[] }> = [];
   for (const feature of allFeatures) {
-    const keywords = Array.isArray(feature.related_keywords) ? feature.related_keywords : [];
+    const keywords = Array.isArray(feature.relatedKeywords) ? feature.relatedKeywords : [];
     const contentText = `${feature.name}${feature.description ? `: ${feature.description}` : ""}${keywords.length > 0 ? ` Keywords: ${keywords.join(", ")}` : ""}`;
     const currentHash = hashContent(contentText);
     const existingHash = existingHashes.get(feature.id);
@@ -364,37 +503,99 @@ export async function computeAndSaveFeatureEmbeddings(
 
   console.error(`[Embeddings] Found ${allFeatures.length} features, ${featuresToEmbed.length} need embeddings`);
 
-  // Process in batches
-  const batchSize = 10;
+  // Process in batches using batch embedding API
+  // Features are shorter than documentation (name + description + keywords), so can use larger batches
+  // Target: ~50k tokens per batch (50 features × 1000 avg tokens = 50k tokens)
+  const batchSize = 50;
   let processed = 0;
+  let retryCount = 0;
 
   for (let i = 0; i < featuresToEmbed.length; i += batchSize) {
     const batch = featuresToEmbed.slice(i, i + batchSize);
 
-    for (const feature of batch) {
-      try {
+    try {
+      // Prepare texts for batch embedding
+      const textsToEmbed = batch.map((feature) => {
         const keywords = feature.keywords.length > 0 ? ` Keywords: ${feature.keywords.join(", ")}` : "";
-        const contentText = `${feature.name}${feature.description ? `: ${feature.description}` : ""}${keywords}`;
-        const embedding = await createEmbedding(contentText, apiKey);
-        const contentHash = hashContent(contentText);
+        return `${feature.name}${feature.description ? `: ${feature.description}` : ""}${keywords}`;
+      });
 
-        await saveFeatureEmbedding(feature.id, embedding, contentHash);
-        processed++;
+      // Batch create embeddings
+      const embeddings = await createEmbeddings(textsToEmbed, apiKey);
 
-        if (onProgress) {
-          onProgress(processed, featuresToEmbed.length);
+      // Batch save all embeddings in a single transaction
+      const model = getEmbeddingModel();
+      await prisma.$transaction(async (tx: any) => {
+        await Promise.all(
+          embeddings.map((embedding, j) => {
+            const feature = batch[j];
+            const contentText = textsToEmbed[j];
+            const contentHash = hashContent(contentText);
+            return tx.featureEmbedding.upsert({
+              where: { featureId: feature.id },
+              update: {
+                embedding: embedding as any,
+                contentHash,
+                model,
+              },
+              create: {
+                featureId: feature.id,
+                embedding: embedding as any,
+                contentHash,
+                model,
+              },
+            });
+          })
+        );
+      });
+
+      processed += batch.length;
+      retryCount = 0; // Reset retry count on successful batch
+      if (onProgress) {
+        onProgress(processed, featuresToEmbed.length);
+      }
+    } catch (error) {
+      // If batch fails, fall back to individual processing
+      const isRateLimit = error instanceof Error && (error.message.includes("429") || error.message.includes("rate limit"));
+      if (isRateLimit) {
+        // Exponential backoff for rate limit errors: 1s, 2s, 4s, etc.
+        retryCount++;
+        const delay = Math.min(1000 * Math.pow(2, retryCount), 30000); // Max 30s
+        console.error(`[Embeddings] Rate limit error (retry ${retryCount}), waiting ${delay}ms before retry...`);
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        // Retry the batch instead of falling back to individual
+        i -= batchSize; // Rewind to retry this batch
+        continue;
+      }
+      
+      retryCount = 0; // Reset retry count for non-rate-limit errors
+      
+      console.error(`[Embeddings] Batch embedding failed, falling back to individual:`, error);
+      for (const feature of batch) {
+        try {
+          const keywords = feature.keywords.length > 0 ? ` Keywords: ${feature.keywords.join(", ")}` : "";
+          const contentText = `${feature.name}${feature.description ? `: ${feature.description}` : ""}${keywords}`;
+          const embedding = await createEmbedding(contentText, apiKey);
+          const contentHash = hashContent(contentText);
+
+          await saveFeatureEmbedding(feature.id, embedding, contentHash);
+          processed++;
+
+          if (onProgress) {
+            onProgress(processed, featuresToEmbed.length);
+          }
+
+          // Small delay to respect rate limits
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        } catch (individualError) {
+          console.error(`[Embeddings] Failed to embed feature ${feature.id}:`, individualError);
         }
-
-        // Small delay to respect rate limits
-        await new Promise(resolve => setTimeout(resolve, 100));
-      } catch (error) {
-        console.error(`[Embeddings] Failed to embed feature ${feature.id}:`, error);
       }
     }
 
-    // Delay between batches
+    // Small delay between batches to respect rate limits (reduced since we're batching saves)
     if (i + batchSize < featuresToEmbed.length) {
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      await new Promise((resolve) => setTimeout(resolve, 200));
     }
   }
 
@@ -428,4 +629,3 @@ export async function computeAllEmbeddings(
 
   console.error("[Embeddings] Completed all embedding computations");
 }
-

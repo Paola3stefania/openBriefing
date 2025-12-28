@@ -33,8 +33,10 @@ export function initDatabase(config?: DatabaseConfig): pg.Pool {
     user: config?.user || process.env.DB_USER,
     password: config?.password || process.env.DB_PASSWORD,
     max: 20, // Maximum number of clients in the pool
-    idleTimeoutMillis: 30000,
-    connectionTimeoutMillis: 2000,
+    min: 2, // Minimum number of clients in the pool (keep some connections warm)
+    idleTimeoutMillis: 30000, // Close idle clients after 30s
+    connectionTimeoutMillis: 2000, // Timeout when acquiring connection from pool
+    allowExitOnIdle: false, // Keep pool alive even when idle (for long-running processes)
   };
 
   pool = new Pool(dbConfig);

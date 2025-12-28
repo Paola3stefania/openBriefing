@@ -5,7 +5,7 @@
  * Can map groups to product features for cross-cutting analysis
  */
 import type { Signal, GroupCandidate, IssueRef } from "../../types/signal.js";
-import { createEmbedding, isLLMClassificationAvailable } from "../classify/semantic.js";
+import { createEmbedding, createEmbeddings, isLLMClassificationAvailable } from "../classify/semantic.js";
 import { 
   getCachedEmbedding, 
   setCachedEmbedding, 
@@ -187,26 +187,146 @@ export async function groupSignalsSemantic(
   
   console.error(`[Grouping] Processing ${signals.length} signals...`);
   
-  // Step 1: Compute embeddings for all signals
+  // Step 1: Compute embeddings for all signals (with batching)
   const signalEmbeddings = new Map<string, Embedding>();
+  
+  // Collect signals that need embedding
+  const signalsToEmbed: Array<{ signal: Signal; key: string; content: string; contentHash: string; cacheType: "issues" | "discord" }> = [];
+  
   for (const signal of signals) {
     const key = `${signal.source}:${signal.sourceId}`;
-    const embedding = await getSignalEmbedding(signal, apiKey, stats);
-    signalEmbeddings.set(key, embedding);
+    const sessionKey = `${signal.source}:${signal.sourceId}`;
     
-    // Rate limit protection
-    if (stats.computed > 0 && stats.computed % 10 === 0) {
-      await new Promise(r => setTimeout(r, 200));
+    // Check session cache first
+    if (sessionEmbeddingCache.has(sessionKey)) {
+      signalEmbeddings.set(key, sessionEmbeddingCache.get(sessionKey)!);
+      stats.cached++;
+      continue;
+    }
+    
+    // Check persistent cache
+    const content = getSignalContent(signal);
+    const contentHash = hashContent(content);
+    const signalCacheType = signal.source === "github" ? "issues" : "discord";
+    const cached = await getCachedEmbedding(signalCacheType, signal.sourceId, contentHash);
+    if (cached) {
+      sessionEmbeddingCache.set(sessionKey, cached);
+      signalEmbeddings.set(key, cached);
+      stats.cached++;
+      continue;
+    }
+    
+    // Need to compute
+    signalsToEmbed.push({ signal, key, content, contentHash, cacheType: signalCacheType });
+  }
+  
+  // Batch compute embeddings for signals that need them
+  // Signals can vary in length (Discord messages vs GitHub issues), use moderate batch size
+  // Target: ~50k tokens per batch (50 signals × 1000 avg tokens = 50k tokens)
+  if (signalsToEmbed.length > 0) {
+    const batchSize = 50;
+    for (let i = 0; i < signalsToEmbed.length; i += batchSize) {
+      const batch = signalsToEmbed.slice(i, i + batchSize);
+      
+      try {
+        const texts = batch.map(item => item.content);
+        const embeddings = await createEmbeddings(texts, apiKey);
+        
+        for (let j = 0; j < batch.length; j++) {
+          const item = batch[j];
+          const embedding = embeddings[j];
+          const sessionKey = `${item.signal.source}:${item.signal.sourceId}`;
+          
+          sessionEmbeddingCache.set(sessionKey, embedding);
+          signalEmbeddings.set(item.key, embedding);
+          await setCachedEmbedding(item.cacheType, item.signal.sourceId, item.contentHash, embedding);
+          stats.computed++;
+        }
+      } catch (error) {
+        // Fall back to individual processing
+        console.error(`[Grouping] Batch embedding failed, falling back to individual:`, error);
+        for (const item of batch) {
+          try {
+            const embedding = await getSignalEmbedding(item.signal, apiKey, stats);
+            signalEmbeddings.set(item.key, embedding);
+          } catch (individualError) {
+            console.error(`[Grouping] Failed to embed signal ${item.key}:`, individualError);
+          }
+        }
+      }
     }
   }
   
   console.error(`[Grouping] Embeddings: ${stats.cached} cached, ${stats.computed} computed`);
   
-  // Step 2: Compute embeddings for features
+  // Step 2: Compute embeddings for features (with batching)
   const featureEmbeddings = new Map<string, Embedding>();
+  
+  // Collect features that need embedding
+  const featuresToEmbed: Array<{ feature: Feature; content: string }> = [];
+  
   for (const feature of features) {
-    await getFeatureEmbedding(feature, apiKey, featureEmbeddings);
-    await new Promise(r => setTimeout(r, 100)); // Rate limit
+    if (featureEmbeddings.has(feature.id)) {
+      continue;
+    }
+    
+    // Try to get from database first
+    try {
+      const { getFeatureEmbedding: getStoredFeatureEmbedding } = await import("../../storage/db/embeddings.js");
+      const storedEmbedding = await getStoredFeatureEmbedding(feature.id);
+      if (storedEmbedding) {
+        featureEmbeddings.set(feature.id, storedEmbedding);
+        continue;
+      }
+    } catch (error) {
+      // Database not available or error, continue to compute
+    }
+    
+    // Need to compute
+    const content = `${feature.name}\n\n${feature.description}`;
+    featuresToEmbed.push({ feature, content });
+  }
+  
+  // Batch compute embeddings for features that need them
+  // Features are shorter than documentation (name + description), so can use larger batches
+  // Target: ~50k tokens per batch (50 features × 1000 avg tokens = 50k tokens)
+  if (featuresToEmbed.length > 0) {
+    const batchSize = 50;
+    for (let i = 0; i < featuresToEmbed.length; i += batchSize) {
+      const batch = featuresToEmbed.slice(i, i + batchSize);
+      
+      try {
+        const texts = batch.map(item => item.content);
+        const embeddings = await createEmbeddings(texts, apiKey);
+        
+        for (let j = 0; j < batch.length; j++) {
+          const item = batch[j];
+          const embedding = embeddings[j];
+          
+          featureEmbeddings.set(item.feature.id, embedding);
+          
+          // Try to save to database
+          try {
+            const { saveFeatureEmbedding } = await import("../../storage/db/embeddings.js");
+            const { createHash } = await import("crypto");
+            const contentHash = createHash("md5").update(item.content).digest("hex");
+            await saveFeatureEmbedding(item.feature.id, embedding, contentHash);
+          } catch (error) {
+            // Ignore errors when saving
+          }
+        }
+      } catch (error) {
+        // Fall back to individual processing
+        console.error(`[Grouping] Batch feature embedding failed, falling back to individual:`, error);
+        for (const item of batch) {
+          try {
+            await getFeatureEmbedding(item.feature, apiKey, featureEmbeddings);
+          } catch (individualError) {
+            console.error(`[Grouping] Failed to embed feature ${item.feature.id}:`, individualError);
+          }
+        }
+      }
+    }
   }
   
   console.error(`[Grouping] Feature embeddings computed: ${features.length}`);

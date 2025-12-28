@@ -4,8 +4,9 @@
  */
 
 import { log } from "../mcp/logger.js";
-import { createEmbedding } from "../core/classify/semantic.js";
+import { createEmbedding, createEmbeddings } from "../core/classify/semantic.js";
 import { getFeatureEmbedding, saveFeatureEmbedding } from "../storage/db/embeddings.js";
+import type { ProductFeature } from "./types.js";
 import { createHash } from "crypto";
 
 interface Feature {
@@ -120,34 +121,71 @@ export async function mapGroupsToFeatures(
     throw new Error("OPENAI_API_KEY environment variable is required for feature mapping");
   }
 
-  // Step 1: Get or compute embeddings for all features
+  // Step 1: Get or compute embeddings for all features (with batching)
   const featureEmbeddings = new Map<string, Embedding>();
+  
+  // Collect features that need embedding
+  const featuresToEmbed: Array<{ feature: Feature; featureText: string }> = [];
+  
   for (const feature of features) {
     // Try to get from database first
     let embedding = await getFeatureEmbedding(feature.id);
     
     if (!embedding) {
-      // Compute if not found
-    const name = feature.name.trim();
-    const separator = name.endsWith(":") ? " " : ": ";
+      // Need to compute
+      const name = feature.name.trim();
+      const separator = name.endsWith(":") ? " " : ": ";
       const keywords = (feature.related_keywords || []).length > 0 
         ? ` Keywords: ${(feature.related_keywords || []).join(", ")}` 
         : "";
       const featureText = `${name}${feature.description ? `${separator}${feature.description}` : ""}${keywords}`;
-    try {
-        embedding = await createEmbedding(featureText, apiKey);
-        
-        // Save to database
-        const contentHash = createHash("md5").update(featureText).digest("hex");
-        await saveFeatureEmbedding(feature.id, embedding, contentHash);
-      } catch (error) {
-        log(`Failed to create embedding for feature ${feature.name}: ${error instanceof Error ? error.message : String(error)}`);
-        continue;
-      }
-    }
-    
-    if (embedding) {
+      featuresToEmbed.push({ feature, featureText });
+    } else {
       featureEmbeddings.set(feature.id, embedding);
+    }
+  }
+  
+  // Batch compute embeddings for features that need them
+  // Features are shorter than documentation (name + description + keywords), so can use larger batches
+  // Target: ~50k tokens per batch (50 features × 1000 avg tokens = 50k tokens)
+  if (featuresToEmbed.length > 0) {
+    const batchSize = 50;
+    for (let i = 0; i < featuresToEmbed.length; i += batchSize) {
+      const batch = featuresToEmbed.slice(i, i + batchSize);
+      
+      try {
+        const texts = batch.map(item => item.featureText);
+        const embeddings = await createEmbeddings(texts, apiKey);
+        
+        for (let j = 0; j < batch.length; j++) {
+          const item = batch[j];
+          const embedding = embeddings[j];
+          
+          featureEmbeddings.set(item.feature.id, embedding);
+          
+          // Save to database
+          try {
+            const contentHash = createHash("md5").update(item.featureText).digest("hex");
+            await saveFeatureEmbedding(item.feature.id, embedding, contentHash);
+          } catch (error) {
+            log(`Failed to save embedding for feature ${item.feature.name}: ${error instanceof Error ? error.message : String(error)}`);
+          }
+        }
+      } catch (error) {
+        // Fall back to individual processing
+        log(`Batch embedding failed, falling back to individual: ${error instanceof Error ? error.message : String(error)}`);
+        for (const item of batch) {
+          try {
+            const embedding = await createEmbedding(item.featureText, apiKey);
+            featureEmbeddings.set(item.feature.id, embedding);
+            
+            const contentHash = createHash("md5").update(item.featureText).digest("hex");
+            await saveFeatureEmbedding(item.feature.id, embedding, contentHash);
+          } catch (individualError) {
+            log(`Failed to create embedding for feature ${item.feature.name}: ${individualError instanceof Error ? individualError.message : String(individualError)}`);
+          }
+        }
+      }
     }
   }
 

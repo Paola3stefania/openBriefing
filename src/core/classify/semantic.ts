@@ -210,12 +210,30 @@ export function isLLMClassificationAvailable(): boolean {
 }
 
 /**
- * Create embeddings for text using OpenAI API with retry logic
+ * Truncate text to OpenAI's token limit
  */
-export async function createEmbedding(text: string, apiKey: string, retries = 3): Promise<Embedding> {
-  // Truncate text to OpenAI's limit (8191 tokens, ~6000 words)
-  const maxLength = 6000;
-  const truncatedText = text.length > maxLength ? text.substring(0, maxLength) : text;
+function truncateText(text: string, maxLength = 6000): string {
+  return text.length > maxLength ? text.substring(0, maxLength) : text;
+}
+
+/**
+ * Create embeddings for multiple texts in a single API call (batch)
+ * OpenAI API supports up to 2048 inputs per request
+ * Each input has a token limit of 8191 tokens (text-embedding-ada-002) or 8192 tokens (text-embedding-3)
+ * Batch sizes should be chosen based on average content length to stay within token limits
+ * Returns embeddings in the same order as input texts
+ */
+export async function createEmbeddings(
+  texts: string[],
+  apiKey: string,
+  retries = 3
+): Promise<Embedding[]> {
+  if (texts.length === 0) {
+    return [];
+  }
+
+  // Truncate all texts
+  const truncatedTexts = texts.map(text => truncateText(text));
 
   for (let attempt = 0; attempt < retries; attempt++) {
     try {
@@ -227,7 +245,7 @@ export async function createEmbedding(text: string, apiKey: string, retries = 3)
         },
         body: JSON.stringify({
           model: getEmbeddingModel(),
-          input: truncatedText,
+          input: truncatedTexts,
         }),
       });
 
@@ -242,20 +260,16 @@ export async function createEmbedding(text: string, apiKey: string, retries = 3)
         
         // Handle rate limit errors with exponential backoff
         if (response.status === 429 && attempt < retries - 1) {
-          // Check if error message contains retry-after info
-          let delay = Math.pow(2, attempt) * 2000; // Exponential backoff: 2s, 4s, 8s
+          let delay = Math.pow(2, attempt) * 2000;
           
-          // Try to extract retry-after from response header
           const retryAfter = response.headers.get("retry-after");
           if (retryAfter) {
             delay = parseInt(retryAfter) * 1000;
           } else if (errorData?.error?.message) {
-            // Try to extract delay from error message (e.g., "Please try again in 13ms")
             const match = errorData.error.message.match(/try again in (\d+)(ms|s)/i);
             if (match) {
               const value = parseInt(match[1]);
               delay = match[2].toLowerCase() === 's' ? value * 1000 : value;
-              // Add a small buffer
               delay = Math.max(delay + 1000, 2000);
             }
           }
@@ -268,18 +282,27 @@ export async function createEmbedding(text: string, apiKey: string, retries = 3)
       }
 
       const data = await response.json();
-      return data.data[0].embedding;
+      // Return embeddings in the same order as input texts
+      return data.data.map((item: any) => item.embedding);
     } catch (error) {
       if (attempt === retries - 1) {
         throw error;
       }
-      // Retry with exponential backoff for other errors
       const delay = Math.pow(2, attempt) * 1000;
       await new Promise(resolve => setTimeout(resolve, delay));
     }
   }
   
-  throw new Error("Failed to create embedding after retries");
+  throw new Error("Failed to create embeddings after retries");
+}
+
+/**
+ * Create embeddings for text using OpenAI API with retry logic
+ * For multiple texts, use createEmbeddings() for better performance
+ */
+export async function createEmbedding(text: string, apiKey: string, retries = 3): Promise<Embedding> {
+  const embeddings = await createEmbeddings([text], apiKey, retries);
+  return embeddings[0];
 }
 
 /**
@@ -438,9 +461,11 @@ async function precomputeIssueEmbeddings(
     return;
   }
   
-  // Process issues in smaller batches to respect rate limits
-  const issueBatchSize = 10;
-  const delayMs = 1000;
+  // Process issues in batches using batch embedding API
+  // Issues (title + body) are typically shorter than documentation, so can use larger batches
+  // Target: ~50k tokens per batch (50 issues × 1000 avg tokens = 50k tokens)
+  const issueBatchSize = 50;
+  const delayMs = 500;
   let processedCount = 0;
   let cacheModified = false;
 
@@ -449,11 +474,18 @@ async function precomputeIssueEmbeddings(
   for (let i = 0; i < issuesToEmbed.length; i += issueBatchSize) {
     const batch = issuesToEmbed.slice(i, i + issueBatchSize);
     
-    for (const issue of batch) {
-      const issueCacheKey = `issue:${issue.number}`;
-      try {
-        const issueText = createIssueText(issue);
-        const embedding = await createEmbedding(issueText, apiKey);
+    try {
+      // Prepare texts for batch embedding
+      const issueTexts = batch.map(issue => createIssueText(issue));
+      
+      // Batch create embeddings
+      const embeddings = await createEmbeddings(issueTexts, apiKey);
+      
+      // Store all embeddings
+      for (let j = 0; j < batch.length; j++) {
+        const issue = batch[j];
+        const issueCacheKey = `issue:${issue.number}`;
+        const embedding = embeddings[j];
         
         // Store in memory cache
         embeddingCache[issueCacheKey] = embedding;
@@ -465,32 +497,52 @@ async function precomputeIssueEmbeddings(
           createdAt: new Date().toISOString(),
         };
         cacheModified = true;
-        
-        await new Promise(resolve => setTimeout(resolve, 100));
-      } catch (error) {
-        if (error instanceof Error && error.message.includes("429")) {
-          await new Promise(resolve => setTimeout(resolve, 5000));
-          try {
-            const issueText = createIssueText(issue);
-            const embedding = await createEmbedding(issueText, apiKey);
-            embeddingCache[issueCacheKey] = embedding;
-            persistentCache.entries[issue.number.toString()] = {
-              embedding,
-              contentHash: hashIssueContent(issue),
-              createdAt: new Date().toISOString(),
-            };
-            cacheModified = true;
-          } catch (retryError) {
+      }
+      
+      processedCount = Math.min(i + batch.length, issuesToEmbed.length);
+      logProgress(`Embedded ${processedCount}/${issuesToEmbed.length} new issues (${Math.round((processedCount / issuesToEmbed.length) * 100)}%)`);
+    } catch (error) {
+      // If batch fails, fall back to individual processing
+      logProgress(`Batch embedding failed, falling back to individual processing: ${error instanceof Error ? error.message : String(error)}`);
+      for (const issue of batch) {
+        const issueCacheKey = `issue:${issue.number}`;
+        try {
+          const issueText = createIssueText(issue);
+          const embedding = await createEmbedding(issueText, apiKey);
+          
+          embeddingCache[issueCacheKey] = embedding;
+          persistentCache.entries[issue.number.toString()] = {
+            embedding,
+            contentHash: hashIssueContent(issue),
+            createdAt: new Date().toISOString(),
+          };
+          cacheModified = true;
+          
+          await new Promise(resolve => setTimeout(resolve, 100));
+        } catch (individualError) {
+          if (individualError instanceof Error && individualError.message.includes("429")) {
+            await new Promise(resolve => setTimeout(resolve, 5000));
+            try {
+              const issueText = createIssueText(issue);
+              const embedding = await createEmbedding(issueText, apiKey);
+              embeddingCache[issueCacheKey] = embedding;
+              persistentCache.entries[issue.number.toString()] = {
+                embedding,
+                contentHash: hashIssueContent(issue),
+                createdAt: new Date().toISOString(),
+              };
+              cacheModified = true;
+            } catch (retryError) {
+              continue;
+            }
+          } else {
             continue;
           }
-        } else {
-          continue;
         }
       }
+      processedCount = Math.min(i + batch.length, issuesToEmbed.length);
+      logProgress(`Embedded ${processedCount}/${issuesToEmbed.length} new issues (${Math.round((processedCount / issuesToEmbed.length) * 100)}%)`);
     }
-
-    processedCount = Math.min(i + issueBatchSize, issuesToEmbed.length);
-    logProgress(`Embedded ${processedCount}/${issuesToEmbed.length} new issues (${Math.round((processedCount / issuesToEmbed.length) * 100)}%)`);
 
     // Save cache after each batch to avoid losing progress if process breaks
     if (cacheModified) {

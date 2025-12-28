@@ -4,11 +4,11 @@
  * Persists embeddings to database (if available) or disk to avoid redundant API calls
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, statSync } from "fs";
 import { join } from "path";
 import { createHash } from "crypto";
 import { getConfig } from "../../config/index.js";
-import { query, checkConnection } from "../db/client.js";
+import { prisma, checkPrismaConnection } from "../db/prisma.js";
 
 // Embedding vector type (OpenAI returns 1536-dimensional vectors)
 export type Embedding = number[];
@@ -40,6 +40,12 @@ function getEmbeddingModel(): string {
 // In-memory cache for fast access during runtime
 const memoryCache: Map<string, Embedding> = new Map();
 
+// Lazy-loaded cache files (loaded on first access, kept in memory)
+const loadedCacheFiles: Map<"issues" | "discord", {
+  cache: EmbeddingCacheFile;
+  lastModified: number;
+}> = new Map();
+
 // Cache whether database is available (lazy initialization)
 let dbAvailable: boolean | null = null;
 
@@ -52,7 +58,7 @@ async function isDatabaseAvailable(): Promise<boolean> {
   }
   
   try {
-    dbAvailable = await checkConnection();
+    dbAvailable = await checkPrismaConnection();
     return dbAvailable;
   } catch {
     dbAvailable = false;
@@ -86,14 +92,36 @@ export function hashContent(content: string): string {
 }
 
 /**
- * Load persistent cache from disk
+ * Load persistent cache from disk (with lazy loading - only loads when needed)
+ * Uses in-memory cache to avoid repeated disk reads
  */
 function loadCache(cacheType: "issues" | "discord"): EmbeddingCacheFile {
   const cachePath = getCachePath(cacheType);
   const currentModel = getEmbeddingModel();
   
+  // Check if we have a cached version in memory
+  const cached = loadedCacheFiles.get(cacheType);
+  if (cached) {
+    // Check if file has been modified since we loaded it
+    try {
+      if (existsSync(cachePath)) {
+        const stats = statSync(cachePath);
+        if (stats.mtimeMs === cached.lastModified) {
+          // File hasn't changed, return cached version
+          return cached.cache;
+        }
+      }
+    } catch {
+      // If we can't check mtime, use cached version anyway
+      return cached.cache;
+    }
+  }
+  
+  // File not in cache or was modified, load from disk
   if (!existsSync(cachePath)) {
-    return { version: CACHE_VERSION, model: currentModel, entries: {} };
+    const emptyCache = { version: CACHE_VERSION, model: currentModel, entries: {} };
+    loadedCacheFiles.set(cacheType, { cache: emptyCache, lastModified: Date.now() });
+    return emptyCache;
   }
   
   try {
@@ -103,24 +131,35 @@ function loadCache(cacheType: "issues" | "discord"): EmbeddingCacheFile {
     // Check version and model compatibility
     if (cache.version !== CACHE_VERSION || cache.model !== currentModel) {
       console.error(`[EmbeddingCache] Version/model mismatch for ${cacheType} (cached: ${cache.model}, current: ${currentModel}), starting fresh`);
-      return { version: CACHE_VERSION, model: currentModel, entries: {} };
+      const emptyCache = { version: CACHE_VERSION, model: currentModel, entries: {} };
+      loadedCacheFiles.set(cacheType, { cache: emptyCache, lastModified: Date.now() });
+      return emptyCache;
     }
     
+    // Cache in memory
+    const stats = statSync(cachePath);
+    loadedCacheFiles.set(cacheType, { cache, lastModified: stats.mtimeMs });
     return cache;
   } catch (error) {
     console.error(`[EmbeddingCache] Failed to load ${cacheType} cache, starting fresh`);
-    return { version: CACHE_VERSION, model: currentModel, entries: {} };
+    const emptyCache = { version: CACHE_VERSION, model: currentModel, entries: {} };
+    loadedCacheFiles.set(cacheType, { cache: emptyCache, lastModified: Date.now() });
+    return emptyCache;
   }
 }
 
 /**
- * Save cache to disk
+ * Save cache to disk (also updates in-memory cache)
  */
 function saveCache(cacheType: "issues" | "discord", cache: EmbeddingCacheFile): void {
   const cachePath = getCachePath(cacheType);
   
   try {
     writeFileSync(cachePath, JSON.stringify(cache, null, 2), "utf-8");
+    
+    // Update in-memory cache with new mtime
+    const stats = statSync(cachePath);
+    loadedCacheFiles.set(cacheType, { cache, lastModified: stats.mtimeMs });
   } catch (error) {
     console.error(`[EmbeddingCache] Failed to save ${cacheType} cache:`, error);
   }
@@ -147,23 +186,21 @@ export async function getCachedEmbedding(
       const issueNumber = parseInt(id, 10);
       if (!isNaN(issueNumber)) {
         const currentModel = getEmbeddingModel();
-        const result = await query<{
-          embedding: number[];
-          content_hash: string;
-          model: string;
-        }>(
-          `SELECT embedding, content_hash, model 
-           FROM issue_embeddings 
-           WHERE issue_number = $1 AND model = $2`,
-          [issueNumber, currentModel]
-        );
+        const result = await prisma.issueEmbedding.findUnique({
+          where: { issueNumber },
+          select: {
+            embedding: true,
+            contentHash: true,
+            model: true,
+          },
+        });
         
-        if (result.rows.length > 0) {
-          const row = result.rows[0];
-          if (row.content_hash === contentHash) {
+        if (result && result.model === currentModel) {
+          if (result.contentHash === contentHash) {
             // Content matches, use cached embedding
-            memoryCache.set(memKey, row.embedding);
-            return row.embedding;
+            const embedding = result.embedding as number[];
+            memoryCache.set(memKey, embedding);
+            return embedding;
           }
           // Content hash mismatch means issue changed, return undefined to re-embed
           return undefined;
@@ -207,17 +244,20 @@ export async function setCachedEmbedding(
       const issueNumber = parseInt(id, 10);
       if (!isNaN(issueNumber)) {
         const currentModel = getEmbeddingModel();
-        await query(
-          `INSERT INTO issue_embeddings (issue_number, embedding, content_hash, model, updated_at)
-           VALUES ($1, $2::jsonb, $3, $4, NOW())
-           ON CONFLICT (issue_number) 
-           DO UPDATE SET 
-             embedding = $2::jsonb,
-             content_hash = $3,
-             model = $4,
-             updated_at = NOW()`,
-          [issueNumber, JSON.stringify(embedding) as any, contentHash, currentModel]
-        );
+        await prisma.issueEmbedding.upsert({
+          where: { issueNumber },
+          update: {
+            embedding: embedding as any,
+            contentHash,
+            model: currentModel,
+          },
+          create: {
+            issueNumber,
+            embedding: embedding as any,
+            contentHash,
+            model: currentModel,
+          },
+        });
         return; // Successfully saved to database, skip JSON cache
       }
     } catch (error) {
@@ -247,34 +287,35 @@ export async function batchSetCachedEmbeddings(
   if (cacheType === "issues" && await isDatabaseAvailable()) {
     try {
       const currentModel = getEmbeddingModel();
-      // Use a transaction for batch insert
-      const values: Array<[number, string, string]> = [];
-      for (const item of items) {
-        const issueNumber = parseInt(item.id, 10);
-        if (!isNaN(issueNumber)) {
-          values.push([issueNumber, JSON.stringify(item.embedding), item.contentHash]);
-          // Save to memory cache
+      const itemsToSave = items.filter(item => !isNaN(parseInt(item.id, 10)));
+      
+      if (itemsToSave.length > 0) {
+        // Save to memory cache
+        for (const item of itemsToSave) {
           const memKey = `${cacheType}:${item.id}`;
           memoryCache.set(memKey, item.embedding);
         }
-      }
-      
-      if (values.length > 0) {
-        // Batch insert using individual INSERT statements
-        // We do them in a loop - could be optimized with a transaction wrapper, but this is simpler
-        for (const [issueNumber, embeddingJson, contentHash] of values) {
-          await query(
-            `INSERT INTO issue_embeddings (issue_number, embedding, content_hash, model, updated_at)
-             VALUES ($1, $2::jsonb, $3, $4, NOW())
-             ON CONFLICT (issue_number)
-             DO UPDATE SET
-               embedding = EXCLUDED.embedding,
-               content_hash = EXCLUDED.content_hash,
-               model = EXCLUDED.model,
-               updated_at = EXCLUDED.updated_at`,
-            [issueNumber, embeddingJson as any, contentHash, currentModel]
-          );
-        }
+        
+        // Batch save in a single transaction
+        await prisma.$transaction(async (tx) => {
+          await Promise.all(itemsToSave.map((item) => {
+            const issueNumber = parseInt(item.id, 10);
+            return tx.issueEmbedding.upsert({
+              where: { issueNumber },
+              update: {
+                embedding: item.embedding as any,
+                contentHash: item.contentHash,
+                model: currentModel,
+              },
+              create: {
+                issueNumber,
+                embedding: item.embedding as any,
+                contentHash: item.contentHash,
+                model: currentModel,
+              },
+            });
+          }));
+        });
         return; // Successfully saved to database, skip JSON cache
       }
     } catch (error) {
@@ -313,23 +354,22 @@ export async function getAllCachedEmbeddings(
   if (cacheType === "issues" && await isDatabaseAvailable()) {
     try {
       const currentModel = getEmbeddingModel();
-      const result = await query<{
-        issue_number: number;
-        embedding: number[];
-      }>(
-        `SELECT issue_number, embedding 
-         FROM issue_embeddings 
-         WHERE model = $1`,
-        [currentModel]
-      );
+      const embeddings = await prisma.issueEmbedding.findMany({
+        where: { model: currentModel },
+        select: {
+          issueNumber: true,
+          embedding: true,
+        },
+      });
       
       const embeddingsMap = new Map<string, Embedding>();
-      for (const row of result.rows) {
-        const id = row.issue_number.toString();
-        embeddingsMap.set(id, row.embedding);
+      for (const row of embeddings) {
+        const id = row.issueNumber.toString();
+        const embedding = row.embedding as number[];
+        embeddingsMap.set(id, embedding);
         // Also populate memory cache
         const memKey = `${cacheType}:${id}`;
-        memoryCache.set(memKey, row.embedding);
+        memoryCache.set(memKey, embedding);
       }
       
       return embeddingsMap;
@@ -375,10 +415,9 @@ export async function clearCache(cacheType: "issues" | "discord"): Promise<void>
   if (cacheType === "issues" && await isDatabaseAvailable()) {
     try {
       const currentModel = getEmbeddingModel();
-      await query(
-        `DELETE FROM issue_embeddings WHERE model = $1`,
-        [currentModel]
-      );
+      await prisma.issueEmbedding.deleteMany({
+        where: { model: currentModel },
+      });
     } catch (error) {
       console.error(`[EmbeddingCache] Database clear error:`, error);
     }

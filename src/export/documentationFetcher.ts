@@ -199,12 +199,12 @@ export async function fetchDocumentation(urlOrPath: string): Promise<Documentati
           }
         } else {
           // Fall back to regex parsing if no API key
-        const titleMatch = content.match(/<title>(.*?)<\/title>/i);
-        if (titleMatch) {
+          const titleMatch = content.match(/<title>(.*?)<\/title>/i);
+          if (titleMatch) {
             title = cleanText(titleMatch[1].trim());
-        }
-        sections = extractSectionsFromHTML(content, urlOrPath);
-        content = extractTextFromHTML(content);
+          }
+          sections = extractSectionsFromHTML(content, urlOrPath);
+          content = extractTextFromHTML(content);
         }
       }
     } else {
@@ -467,8 +467,8 @@ export async function crawlDocumentation(baseUrl: string, maxPages = 100, useCac
           }
         } else {
           // Fall back to regex parsing if no API key
-        const titleMatch = rawHtml.match(/<title>(.*?)<\/title>/i);
-        if (titleMatch) {
+          const titleMatch = rawHtml.match(/<title>(.*?)<\/title>/i);
+          if (titleMatch) {
             title = cleanText(titleMatch[1].trim());
           }
           sections = extractSectionsFromHTML(rawHtml, currentUrl);
