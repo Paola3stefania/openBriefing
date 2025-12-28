@@ -615,9 +615,8 @@ export async function exportGroupingToPMTool(
             // Save ungrouped issue to database
             try {
               // Try to use UngroupedIssue model (should exist in Prisma client if schema is up to date)
-              const ungroupedIssueModel = (prisma as any).ungroupedIssue;
-              if (ungroupedIssueModel) {
-                await ungroupedIssueModel.upsert({
+              if (prisma.ungroupedIssue) {
+                await prisma.ungroupedIssue.upsert({
                   where: { issueNumber: issue.number },
                   update: {
                     issueTitle: issue.title || `Issue #${issue.number}`,
