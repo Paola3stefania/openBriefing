@@ -323,7 +323,7 @@ const tools: Tool[] = [
         },
         classify_all: {
           type: "boolean",
-          description: "If true, classifies all messages in the channel (ignores limit). If false (default), uses limit parameter. On first-time classification, automatically processes in batches of 200 until all threads are covered.",
+          description: "If true, classifies all unclassified messages in the channel (ignores limit). If re_classify is also true, will re-classify all messages regardless of previous classification status. If false (default), uses limit parameter. On first-time classification, automatically processes in batches of 200 until all threads are covered.",
           default: false,
         },
       },
@@ -342,7 +342,7 @@ const tools: Tool[] = [
         },
         classify_all: {
           type: "boolean",
-          description: "If true, classifies all messages. If false (default), only classifies new/unclassified messages.",
+          description: "If true, classifies all unclassified messages (ignores limit). If false (default), only classifies new/unclassified messages up to the default limit (30).",
           default: false,
         },
         min_similarity: {
@@ -939,35 +939,34 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             // Check if database is actually available
             const dbAvailable = await storage.isAvailable();
             if (!dbAvailable) {
-              console.error(`[GitHub Issues] DATABASE_URL is set but database is not available. Falling back to JSON.`);
-            } else {
-              // Convert GitHub issues to database format
-              const issuesToSave = finalIssues.map((issue) => ({
-                number: issue.number,
-                title: issue.title,
-                url: issue.html_url,
-                state: issue.state,
-                body: issue.body || undefined,
-                labels: issue.labels.map((l) => l.name),
-                author: issue.user.login,
-                created_at: issue.created_at,
-                updated_at: issue.updated_at,
-              }));
-              
-              await storage.saveGitHubIssues(issuesToSave);
-              console.error(`[GitHub Issues] Saved ${issuesToSave.length} issues to database.`);
-              savedToDatabase = true;
+              throw new Error("DATABASE_URL is set but database is not available");
             }
+            
+            // Convert GitHub issues to database format
+            const issuesToSave = finalIssues.map((issue) => ({
+              number: issue.number,
+              title: issue.title,
+              url: issue.html_url,
+              state: issue.state,
+              body: issue.body || undefined,
+              labels: issue.labels.map((l) => l.name),
+              author: issue.user.login,
+              created_at: issue.created_at,
+              updated_at: issue.updated_at,
+            }));
+            
+            await storage.saveGitHubIssues(issuesToSave);
+            console.error(`[GitHub Issues] Saved ${issuesToSave.length} issues to database.`);
+            savedToDatabase = true;
           } catch (dbError) {
-            console.error(`[GitHub Issues] Database save error (falling back to JSON):`, dbError);
-            // Fall through to JSON save
+            const errorMessage = dbError instanceof Error ? dbError.message : String(dbError);
+            console.error(`[GitHub Issues] Database save error:`, errorMessage);
+            throw new Error(`Failed to save GitHub issues to database: ${errorMessage}`);
           }
         } else {
           console.error(`[GitHub Issues] DATABASE_URL not set. Using JSON storage.`);
-        }
-
-        // Save to JSON file only if database save failed or database is not configured
-        if (!savedToDatabase) {
+          
+          // Save to JSON file only if database is not configured
           const cacheDir = join(process.cwd(), githubConfig.paths.cacheDir);
           try {
             await mkdir(cacheDir, { recursive: true });
@@ -976,11 +975,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
 
           await writeFile(cachePath, JSON.stringify(cacheData, null, 2), "utf-8");
-          if (useDatabase) {
-            console.error(`[GitHub Issues] Database save failed, saved to JSON cache as fallback.`);
-          } else {
-            console.error(`[GitHub Issues] Saved to JSON cache (database not configured).`);
-          }
+          console.error(`[GitHub Issues] Saved to JSON cache (database not configured).`);
         }
 
         return {
@@ -1416,18 +1411,20 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         finalIssues = newIssues;
       }
 
-      // Save updated issues cache
-      const issuesCacheData: IssuesCache = {
-        fetched_at: new Date().toISOString(),
-        total_count: finalIssues.length,
-        open_count: finalIssues.filter((i) => i.state === "open").length,
-        closed_count: finalIssues.filter((i) => i.state === "closed").length,
-        issues: finalIssues,
-      };
+      // Save updated issues cache (only if database is not configured)
+      if (!useDatabase) {
+        const issuesCacheData: IssuesCache = {
+          fetched_at: new Date().toISOString(),
+          total_count: finalIssues.length,
+          open_count: finalIssues.filter((i) => i.state === "open").length,
+          closed_count: finalIssues.filter((i) => i.state === "closed").length,
+          issues: finalIssues,
+        };
 
-      const issuesCacheDir = join(process.cwd(), classifyConfig.paths.cacheDir);
-      await mkdir(issuesCacheDir, { recursive: true });
-      await writeFile(issuesCachePath, JSON.stringify(issuesCacheData, null, 2), "utf-8");
+        const issuesCacheDir = join(process.cwd(), classifyConfig.paths.cacheDir);
+        await mkdir(issuesCacheDir, { recursive: true });
+        await writeFile(issuesCachePath, JSON.stringify(issuesCacheData, null, 2), "utf-8");
+      }
 
       // Step 1.5: Compute missing issue embeddings before classification
       if (process.env.OPENAI_API_KEY && useDatabase) {
@@ -1466,37 +1463,63 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // Do this after we have the channel name and guild ID
       let sinceDiscordDate: string | undefined = undefined;
       
-      try {
-        await storage.upsertChannel(actualChannelId, channelName, guildId);
-        
-        // Check if database is available and get most recent message date from it
-        if (useDatabase) {
-          // Get most recent message date from database
-          const { prisma } = await import("../storage/db/prisma.js");
-          const mostRecent = await prisma.discordMessage.findFirst({
-            where: { channelId: actualChannelId },
-            orderBy: { createdAt: "desc" },
-            select: { createdAt: true },
-          });
-          if (mostRecent) {
-            sinceDiscordDate = mostRecent.createdAt.toISOString();
-            console.error(`[Classification] Using database for incremental check. Most recent message: ${sinceDiscordDate}`);
+      // If classify_all is true, don't use incremental fetch - we want ALL messages
+      // This ensures we can classify older messages that were previously skipped
+      if (!classify_all) {
+        try {
+          await storage.upsertChannel(actualChannelId, channelName, guildId);
+          
+          // Check if database is available and get most recent message date from it
+          if (useDatabase) {
+            // Get most recent message date from database
+            const { prisma } = await import("../storage/db/prisma.js");
+            const mostRecent = await prisma.discordMessage.findFirst({
+              where: { channelId: actualChannelId },
+              orderBy: { createdAt: "desc" },
+              select: { createdAt: true },
+            });
+            if (mostRecent) {
+              sinceDiscordDate = mostRecent.createdAt.toISOString();
+              console.error(`[Classification] Using database for incremental check. Most recent message: ${sinceDiscordDate}`);
+            }
+          }
+        } catch (error) {
+          console.error(`[Classification] Failed to upsert channel or check database (continuing):`, error);
+        }
+
+        // Fallback to JSON cache if database is not available
+        let existingDiscordCache: DiscordCache | null = null;
+        if (!useDatabase || !sinceDiscordDate) {
+          try {
+            const foundCachePath = await findDiscordCacheFile(actualChannelId);
+            if (foundCachePath) {
+              existingDiscordCache = await loadDiscordCache(foundCachePath);
+              if (!sinceDiscordDate) {
+                sinceDiscordDate = getMostRecentMessageDate(existingDiscordCache);
+              }
+            }
+          } catch (error) {
+            // Cache doesn't exist or invalid
           }
         }
-      } catch (error) {
-        console.error(`[Classification] Failed to upsert channel or check database (continuing):`, error);
+      } else {
+        // classify_all=true: Ensure channel exists but don't set sinceDiscordDate
+        // This will cause all messages to be fetched, not just new ones
+        try {
+          await storage.upsertChannel(actualChannelId, channelName, guildId);
+          console.error(`[Classification] classify_all=true: Fetching ALL messages (not using incremental fetch)`);
+        } catch (error) {
+          console.error(`[Classification] Failed to upsert channel (continuing):`, error);
+        }
       }
-
-      // Fallback to JSON cache if database is not available
+      
+      // Load existing cache if available (for merging, not for incremental date)
       let existingDiscordCache: DiscordCache | null = null;
-      if (!useDatabase || !sinceDiscordDate) {
+      if (!useDatabase) {
         try {
           const foundCachePath = await findDiscordCacheFile(actualChannelId);
           if (foundCachePath) {
             existingDiscordCache = await loadDiscordCache(foundCachePath);
-            if (!sinceDiscordDate) {
-              sinceDiscordDate = getMostRecentMessageDate(existingDiscordCache);
-            }
           }
         } catch (error) {
           // Cache doesn't exist or invalid
@@ -1628,9 +1651,11 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
-      // Save updated Discord cache
-      await mkdir(discordCacheDir, { recursive: true });
-      await writeFile(discordCachePath, JSON.stringify(finalDiscordCache, null, 2), "utf-8");
+      // Save updated Discord cache (only if database is not configured)
+      if (!useDatabase) {
+        await mkdir(discordCacheDir, { recursive: true });
+        await writeFile(discordCachePath, JSON.stringify(finalDiscordCache, null, 2), "utf-8");
+      }
 
       // Load classification history (from database if available, otherwise JSON)
       const resultsDir = join(process.cwd(), classifyConfig.paths.resultsDir || "results");
@@ -1644,6 +1669,8 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (useDatabase) {
         try {
           const dbClassifiedThreads = await storage.getClassifiedThreads(actualChannelId);
+          console.error(`[Classification Debug] Loaded ${dbClassifiedThreads.length} threads from database`);
+          
           for (const thread of dbClassifiedThreads) {
           dbClassifiedThreadIds.add(thread.thread_id);
           // Also mark all messages in the thread as classified
@@ -1669,11 +1696,14 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
           if (dbClassifiedThreads.length > 0) {
             console.error(`[Classification] Found ${dbClassifiedThreads.length} already-classified threads in database`);
+            console.error(`[Classification Debug] Sample thread IDs from database: ${Array.from(dbClassifiedThreadIds).slice(0, 5).map(id => id.substring(0, 20)).join(", ")}...`);
           }
         } catch (dbError) {
           // Database not available or error, continue with JSON history only
           console.error(`[Classification] Could not load from database (continuing with JSON history):`, dbError);
         }
+      } else {
+        console.error(`[Classification Debug] Database not available, using JSON history only`);
       }
 
       // Step 2.5: Compute missing thread embeddings before classification (if using semantic classification)
@@ -1694,10 +1724,27 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const isFirstTimeClassification = Object.keys(classificationHistory.messages).length === 0 && 
                                        (!classificationHistory.threads || Object.keys(classificationHistory.threads).length === 0);
 
+      // DEBUG: Log initial state
+      console.error(`[Classification Debug] Initial state:`);
+      console.error(`  - Total cached messages: ${allCachedMessages.length}`);
+      console.error(`  - Messages in classification history: ${Object.keys(classificationHistory.messages).length}`);
+      console.error(`  - Threads in classification history: ${classificationHistory.threads ? Object.keys(classificationHistory.threads).length : 0}`);
+      console.error(`  - Threads in database (dbClassifiedThreadIds): ${dbClassifiedThreadIds.size}`);
+      console.error(`  - re_classify: ${re_classify}`);
+      console.error(`  - classify_all: ${classify_all}`);
+      console.error(`  - isFirstTimeClassification: ${isFirstTimeClassification}`);
+
       // Filter out already-classified messages if re_classify is false
       let messagesToClassify = re_classify 
         ? allCachedMessages 
         : filterUnclassifiedMessages(allCachedMessages, classificationHistory);
+      
+      // DEBUG: Log filtering results
+      console.error(`[Classification Debug] After filtering:`);
+      console.error(`  - Messages to classify: ${messagesToClassify.length}`);
+      if (!re_classify && messagesToClassify.length < allCachedMessages.length) {
+        console.error(`  - Filtered out ${allCachedMessages.length - messagesToClassify.length} already-classified messages`);
+      }
 
       // Group messages by thread FIRST (before applying limits)
       // This allows us to count threads and process them in batches
@@ -1731,10 +1778,25 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
                   dbClassifiedThreadIds.has(threadId)
                 );
 
+                // DEBUG: Log thread-level decision
+                if (isThreadAlreadyClassified) {
+                  console.error(`[Classification Debug] Skipping thread ${threadId.substring(0, 20)}... (already classified)`);
+                  console.error(`  - threadStatus: ${threadStatus}`);
+                  console.error(`  - in dbClassifiedThreadIds: ${dbClassifiedThreadIds.has(threadId)}`);
+                }
+
                 if (!isThreadAlreadyClassified) {
                   const unclassifiedThreadMessages = re_classify
                     ? threadMessages
                     : threadMessages.filter(tmsg => !classificationHistory.messages[tmsg.id]);
+                  
+                  // DEBUG: Log thread inclusion
+                  if (unclassifiedThreadMessages.length > 0) {
+                    console.error(`[Classification Debug] Including thread ${threadId.substring(0, 20)}... with ${unclassifiedThreadMessages.length} unclassified messages`);
+                    if (!re_classify && unclassifiedThreadMessages.length < threadMessages.length) {
+                      console.error(`  - Filtered out ${threadMessages.length - unclassifiedThreadMessages.length} already-classified messages from thread`);
+                    }
+                  }
                   
                   if (unclassifiedThreadMessages.length > 0) {
                     threadGroupsMap.set(threadId, unclassifiedThreadMessages);
@@ -1750,7 +1812,16 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 dbClassifiedThreadIds.has(msg.id)
               );
               
+              // DEBUG: Log standalone message decision
+              if (isAlreadyClassified) {
+                console.error(`[Classification Debug] Skipping standalone message ${msg.id.substring(0, 20)}... (already classified)`);
+                console.error(`  - in classificationHistory.messages: ${!!classificationHistory.messages[msg.id]}`);
+                console.error(`  - thread status: ${getThreadStatus(msg.id, classificationHistory)}`);
+                console.error(`  - in dbClassifiedThreadIds: ${dbClassifiedThreadIds.has(msg.id)}`);
+              }
+              
               if (!standaloneMessagesMap.has(msg.id) && !isAlreadyClassified) {
+                console.error(`[Classification Debug] Including standalone message ${msg.id.substring(0, 20)}...`);
                 standaloneMessagesMap.set(msg.id, msg);
               }
             }
@@ -1760,14 +1831,24 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const totalThreads = threadGroupsMap.size + standaloneMessagesMap.size;
           let threadsToProcess = totalThreads;
 
+          // DEBUG: Log thread counts
+          console.error(`[Classification Debug] Thread grouping results:`);
+          console.error(`  - Thread groups: ${threadGroupsMap.size}`);
+          console.error(`  - Standalone messages: ${standaloneMessagesMap.size}`);
+          console.error(`  - Total threads to process: ${totalThreads}`);
+
           if (!classify_all) {
             if (isFirstTimeClassification) {
               // First time: process up to 200 threads
               threadsToProcess = Math.min(200, totalThreads);
+              console.error(`[Classification Debug] First-time classification: limiting to ${threadsToProcess} threads (max 200)`);
             } else {
               // Subsequent runs: use the provided limit (limit applies to threads/messages)
               threadsToProcess = Math.min(limit, totalThreads);
+              console.error(`[Classification Debug] Subsequent run: limiting to ${threadsToProcess} threads (limit: ${limit})`);
             }
+          } else {
+            console.error(`[Classification Debug] classify_all=true: processing all ${threadsToProcess} threads`);
           }
 
           // Select threads to process (oldest first for first-time, newest first for subsequent)
@@ -2086,6 +2167,19 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
               );
               if (!wasClassified) {
                 updateThreadStatus(updatedHistory, threadId, actualChannelId, "completed", []);
+                
+                // Mark all messages as classified (even with no matches)
+                // This ensures they are tracked in history.messages to prevent re-classification
+                const messageIds = threadMsg.messageIds || [msg.id];
+                messageIds.forEach(messageId => {
+                  addMessageClassification(
+                    messageId,
+                    actualChannelId,
+                    [], // Empty issues_matched since no matches were found
+                    updatedHistory
+                  );
+                });
+                
                 // Also add to thread map with empty issues
                 threadMap.set(threadId, {
                   thread: {
@@ -2383,26 +2477,62 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           finalIssues = newIssues;
         }
 
-        const issuesCacheData: IssuesCache = {
-          fetched_at: new Date().toISOString(),
+        // Save to database if configured, otherwise save to JSON cache
+        const { hasDatabaseConfig, getStorage } = await import("../storage/factory.js");
+        const useDatabase = hasDatabaseConfig();
+
+        // Create summary stats (used regardless of storage backend)
+        const issuesSummary = {
           total_count: finalIssues.length,
           open_count: finalIssues.filter((i) => i.state === "open").length,
           closed_count: finalIssues.filter((i) => i.state === "closed").length,
-          issues: finalIssues,
         };
 
-        const cacheDir = join(process.cwd(), config.paths.cacheDir);
-        await mkdir(cacheDir, { recursive: true });
-        await writeFile(issuesCachePath, JSON.stringify(issuesCacheData, null, 2), "utf-8");
+        if (useDatabase) {
+          try {
+            const storage = getStorage();
+            const dbAvailable = await storage.isAvailable();
+            if (!dbAvailable) {
+              throw new Error("DATABASE_URL is set but database is not available");
+            }
+
+            const issuesToSave = finalIssues.map((issue) => ({
+              number: issue.number,
+              title: issue.title,
+              url: issue.html_url,
+              state: issue.state,
+              body: issue.body || undefined,
+              labels: issue.labels.map((l) => l.name),
+              author: issue.user.login,
+              created_at: issue.created_at,
+              updated_at: issue.updated_at,
+            }));
+            await storage.saveGitHubIssues(issuesToSave);
+          } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            throw new Error(`Failed to save GitHub issues to database: ${errorMessage}`);
+          }
+        } else {
+          // Only save to JSON if database is not configured
+          const issuesCacheData: IssuesCache = {
+            fetched_at: new Date().toISOString(),
+            ...issuesSummary,
+            issues: finalIssues,
+          };
+
+          const cacheDir = join(process.cwd(), config.paths.cacheDir);
+          await mkdir(cacheDir, { recursive: true });
+          await writeFile(issuesCachePath, JSON.stringify(issuesCacheData, null, 2), "utf-8");
+        }
 
         results.steps.push({
           step: "sync_github",
           name: "sync_github",
           status: "success",
           result: {
-            total: issuesCacheData.total_count,
-            open: issuesCacheData.open_count,
-            closed: issuesCacheData.closed_count,
+            total: issuesSummary.total_count,
+            open: issuesSummary.open_count,
+            closed: issuesSummary.closed_count,
             new_updated: newIssues.length,
           },
         });
@@ -2410,7 +2540,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Step 3: Return summary with instruction to classify
         results.summary = {
           discord_messages: discordMessageCount,
-          github_issues: issuesCacheData.total_count,
+          github_issues: issuesSummary.total_count,
           message: "Sync complete. Run classify_discord_messages to classify messages.",
         };
 
@@ -2738,6 +2868,13 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           throw new Error("OPENAI_API_KEY is required for grouping.");
         }
 
+        // Initialize database connection early to ensure useDatabase is available
+        const { hasDatabaseConfig, getStorage } = await import("../storage/factory.js");
+        const storage = getStorage();
+        // Declare useDatabase as let and assign immediately to avoid TypeScript scope issues
+        let useDatabase: boolean;
+        useDatabase = hasDatabaseConfig() && await storage.isAvailable();
+
         const resultsDir = join(process.cwd(), config.paths.resultsDir || "results");
         const history = await loadClassificationHistory(resultsDir, actualChannelId);
         const existingGroupStats = getGroupingStats(history);
@@ -2747,9 +2884,6 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // ============================================================
         // STEP 0: Compute missing embeddings before grouping
         // ============================================================
-        const { hasDatabaseConfig, getStorage } = await import("../storage/factory.js");
-        const storage = getStorage();
-        const useDatabase = hasDatabaseConfig() && await storage.isAvailable();
         
         if (useDatabase) {
           try {
@@ -2773,44 +2907,89 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         // ============================================================
         // STEP 1: Check for existing classification results
+        // Priority: Database (if available) > JSON files (fallback)
         // ============================================================
         let classificationResults: ClassificationResults | null = null;
         
-        // Find classification file for this channel - use the one with the MOST threads
-        const classificationFiles = await readdir(resultsDir).catch(() => []);
-        const matchingFiles = classificationFiles
-          .filter(f => f.startsWith(`discord-classified-`) && f.includes(actualChannelId) && f.endsWith('.json'));
-        
-        // Find file with most threads
-        let bestFile: string | null = null;
-        let maxThreads = 0;
-        
-        for (const file of matchingFiles) {
+        // First, try loading from database if available
+        if (!semantic_only && useDatabase) {
           try {
-            const filePath = join(resultsDir, file);
-            const content = await readFile(filePath, "utf-8");
-            const parsed = safeJsonParse<ClassificationResults>(content, filePath);
-            const threadCount = parsed.classified_threads?.length || 0;
+            console.error(`[Grouping] Loading classification results from database...`);
+            const dbThreads = await storage.getClassifiedThreads(actualChannelId);
             
-            if (threadCount > maxThreads) {
-              maxThreads = threadCount;
-              bestFile = file;
+            if (dbThreads && dbThreads.length > 0) {
+              // Convert database format to ClassificationResults format
+              const convertedThreads = dbThreads.map((thread) => ({
+                thread: {
+                  thread_id: thread.thread_id,
+                  thread_name: thread.thread_name,
+                  message_count: thread.message_count || 1,
+                  first_message_url: thread.first_message_url,
+                  first_message_author: thread.first_message_author,
+                  first_message_timestamp: thread.first_message_timestamp,
+                  classified_status: thread.status,
+                },
+                issues: thread.issues.map((issue) => ({
+                  number: issue.number,
+                  title: issue.title,
+                  state: issue.state,
+                  url: issue.url,
+                  similarity_score: issue.similarity_score,
+                  labels: issue.labels || [],
+                  author: issue.author,
+                })),
+              }));
+              
+              classificationResults = {
+                channel_id: actualChannelId,
+                classified_threads: convertedThreads,
+              };
+              
+              console.error(`[Grouping] Loaded ${convertedThreads.length} classified threads from database`);
             }
-          } catch {
-            // Skip files that can't be read
-            continue;
+          } catch (dbError) {
+            console.error(`[Grouping] Failed to load from database:`, dbError);
           }
         }
         
-        if (bestFile && !semantic_only) {
-          const classificationPath = join(resultsDir, bestFile);
-          const classificationContent = await readFile(classificationPath, "utf-8");
-          const parsed = safeJsonParse<ClassificationResults>(classificationContent, classificationPath);
+        // Fallback: Load from JSON files if database not available or empty
+        if (!classificationResults && !semantic_only) {
+          // Find classification file for this channel - use the one with the MOST threads
+          const classificationFiles = await readdir(resultsDir).catch(() => []);
+          const matchingFiles = classificationFiles
+            .filter(f => f.startsWith(`discord-classified-`) && f.includes(actualChannelId) && f.endsWith('.json'));
           
-          // Only use if it has actual data
-          if (parsed.classified_threads && parsed.classified_threads.length > 0) {
-            classificationResults = parsed;
-            console.error(`[Grouping] Found classification results: ${parsed.classified_threads.length} threads in ${bestFile}`);
+          // Find file with most threads
+          let bestFile: string | null = null;
+          let maxThreads = 0;
+          
+          for (const file of matchingFiles) {
+            try {
+              const filePath = join(resultsDir, file);
+              const content = await readFile(filePath, "utf-8");
+              const parsed = safeJsonParse<ClassificationResults>(content, filePath);
+              const threadCount = parsed.classified_threads?.length || 0;
+              
+              if (threadCount > maxThreads) {
+                maxThreads = threadCount;
+                bestFile = file;
+              }
+            } catch {
+              // Skip files that can't be read
+              continue;
+            }
+          }
+          
+          if (bestFile) {
+            const classificationPath = join(resultsDir, bestFile);
+            const classificationContent = await readFile(classificationPath, "utf-8");
+            const parsed = safeJsonParse<ClassificationResults>(classificationContent, classificationPath);
+            
+            // Only use if it has actual data
+            if (parsed.classified_threads && parsed.classified_threads.length > 0) {
+              classificationResults = parsed;
+              console.error(`[Grouping] Found classification results: ${parsed.classified_threads.length} threads in ${bestFile}`);
+            }
           }
         }
 
@@ -2823,19 +3002,292 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           } else {
             console.error(`[Grouping] ${re_classify ? 'Re-classifying' : 'No classification found'}. Running 1-to-1 classification first...`);
             
-            // Load caches
-            const discordCachePath = await findDiscordCacheFile(actualChannelId);
-            if (!discordCachePath) {
-              throw new Error(`No Discord cache found for channel ${actualChannelId}. Run fetch_discord_messages first.`);
+            // If database is empty and using database, fetch messages and issues first
+            // @ts-ignore - TypeScript incorrectly flags this as used before declaration
+            if (useDatabase && !classificationResults) {
+              console.error(`[Grouping] Database is empty. Fetching Discord messages and GitHub issues...`);
+              
+              // Fetch Discord messages
+              try {
+                const { Client, GatewayIntentBits } = await import("discord.js");
+                const discordClient = new Client({
+                  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
+                });
+                await discordClient.login(DISCORD_TOKEN);
+                
+                const channel = await discordClient.channels.fetch(actualChannelId);
+                if (!channel ||
+                    (!(channel instanceof TextChannel) &&
+                     !(channel instanceof DMChannel) &&
+                     !(channel instanceof NewsChannel))) {
+                  throw new Error("Channel does not support messages");
+                }
+                
+                console.error(`[Grouping] Fetching Discord messages from channel ${actualChannelId}...`);
+                const messages = await channel.messages.fetch({ limit: 100 });
+                
+                // Save messages to database
+                const messagesArray = Array.from(messages.values());
+                const guildId = channel instanceof TextChannel || channel instanceof NewsChannel ? channel.guild.id : undefined;
+                await storage.saveDiscordMessages(messagesArray.map(msg => ({
+                  id: msg.id,
+                  channelId: actualChannelId,
+                  authorId: msg.author.id,
+                  authorUsername: msg.author.username,
+                  authorDiscriminator: msg.author.discriminator,
+                  authorBot: msg.author.bot,
+                  authorAvatar: msg.author.avatar || undefined,
+                  content: msg.content,
+                  createdAt: msg.createdAt.toISOString(),
+                  timestamp: msg.createdTimestamp.toString(),
+                  guildId: guildId,
+                  threadId: msg.thread?.id,
+                  threadName: msg.thread?.name,
+                  url: msg.url,
+                })));
+                
+                console.error(`[Grouping] Fetched and saved ${messagesArray.length} Discord messages to database`);
+                await discordClient.destroy();
+              } catch (discordError) {
+                console.error(`[Grouping] Failed to fetch Discord messages:`, discordError);
+                throw new Error(`Failed to fetch Discord messages: ${discordError instanceof Error ? discordError.message : String(discordError)}`);
+              }
+              
+              // Fetch GitHub issues
+              try {
+                const githubToken = process.env.GITHUB_TOKEN;
+                if (!githubToken) {
+                  throw new Error("GITHUB_TOKEN environment variable is required for fetching issues");
+                }
+                
+                console.error(`[Grouping] Fetching GitHub issues...`);
+                const newIssues = await fetchAllGitHubIssues(githubToken, true);
+                
+                // Save issues to database
+                await storage.saveGitHubIssues(newIssues.map(issue => ({
+                  number: issue.number,
+                  title: issue.title,
+                  url: issue.html_url,
+                  state: issue.state,
+                  body: issue.body || undefined,
+                  labels: issue.labels.map(l => l.name),
+                  author: issue.user.login,
+                  created_at: issue.created_at,
+                  updated_at: issue.updated_at,
+                })));
+                
+                console.error(`[Grouping] Fetched and saved ${newIssues.length} GitHub issues to database`);
+              } catch (issuesError) {
+                console.error(`[Grouping] Failed to fetch GitHub issues:`, issuesError);
+                throw new Error(`Failed to fetch GitHub issues: ${issuesError instanceof Error ? issuesError.message : String(issuesError)}`);
+              }
+              
+              // Compute embeddings for issues and threads
+              if (process.env.OPENAI_API_KEY) {
+                try {
+                  console.error(`[Grouping] Computing embeddings...`);
+                  const { computeAndSaveIssueEmbeddings, computeAndSaveThreadEmbeddings } = await import("../storage/db/embeddings.js");
+                  
+                  const issueEmbeddingResult = await computeAndSaveIssueEmbeddings(process.env.OPENAI_API_KEY);
+                  console.error(`[Grouping] Issue embeddings: ${issueEmbeddingResult.computed} computed, ${issueEmbeddingResult.cached} cached`);
+                  
+                  const threadEmbeddingResult = await computeAndSaveThreadEmbeddings(process.env.OPENAI_API_KEY, {
+                    channelId: actualChannelId,
+                  });
+                  console.error(`[Grouping] Thread embeddings: ${threadEmbeddingResult.computed} computed, ${threadEmbeddingResult.cached} cached`);
+                } catch (embeddingError) {
+                  console.error(`[Grouping] Warning: Failed to compute embeddings (continuing anyway):`, embeddingError);
+                }
+              }
+              
+              // After fetching and embeddings, reload classification results from database
+              try {
+                const dbThreads = await storage.getClassifiedThreads(actualChannelId);
+                if (dbThreads && dbThreads.length > 0) {
+                  const convertedThreads = dbThreads.map((thread) => ({
+                    thread: {
+                      thread_id: thread.thread_id,
+                      thread_name: thread.thread_name,
+                      message_count: thread.message_count || 1,
+                      first_message_url: thread.first_message_url,
+                      first_message_author: thread.first_message_author,
+                      first_message_timestamp: thread.first_message_timestamp,
+                      classified_status: thread.status,
+                    },
+                    issues: thread.issues.map((issue) => ({
+                      number: issue.number,
+                      title: issue.title,
+                      state: issue.state,
+                      url: issue.url,
+                      similarity_score: issue.similarity_score,
+                      labels: issue.labels || [],
+                      author: issue.author,
+                    })),
+                  }));
+                  
+                  classificationResults = {
+                    channel_id: actualChannelId,
+                    classified_threads: convertedThreads,
+                  };
+                  console.error(`[Grouping] Loaded ${convertedThreads.length} classified threads from database after classification`);
+                }
+              } catch (reloadError) {
+                console.error(`[Grouping] Failed to reload classification results:`, reloadError);
+              }
             }
-            const discordCache = await loadDiscordCache(discordCachePath);
             
-            const issuesCachePath = join(process.cwd(), config.paths.cacheDir, config.paths.issuesCacheFile);
-            if (!existsSync(issuesCachePath)) {
-              throw new Error("No GitHub issues cache found. Run fetch_github_issues first.");
+            // Load data for classification if still needed
+            let discordCache: DiscordCache | null = null;
+            let issuesCache: IssuesCache | null = null;
+            
+            // @ts-ignore - TypeScript incorrectly flags this as used before declaration  
+            if (!classificationResults && useDatabase) {
+              // Load from database
+              try {
+                const { prisma } = await import("../storage/db/prisma.js");
+                const dbMessages = await prisma.discordMessage.findMany({
+                  where: { channelId: actualChannelId },
+                  orderBy: { createdAt: "desc" },
+                });
+                
+                // Group messages by thread
+                const threadMap = new Map<string, Array<typeof dbMessages[0]>>();
+                const mainMessages: Array<typeof dbMessages[0]> = [];
+                
+                for (const msg of dbMessages) {
+                  if (msg.threadId) {
+                    if (!threadMap.has(msg.threadId)) {
+                      threadMap.set(msg.threadId, []);
+                    }
+                    threadMap.get(msg.threadId)!.push(msg);
+                  } else {
+                    mainMessages.push(msg);
+                  }
+                }
+                
+                // Build DiscordCache structure
+                const allTimestamps = dbMessages.map(m => new Date(m.createdAt).getTime());
+                const oldestTimestamp = allTimestamps.length > 0 ? Math.min(...allTimestamps) : null;
+                const newestTimestamp = allTimestamps.length > 0 ? Math.max(...allTimestamps) : null;
+                
+                discordCache = {
+                  fetched_at: new Date().toISOString(),
+                  channel_id: actualChannelId,
+                  total_count: dbMessages.length,
+                  oldest_message_date: oldestTimestamp ? new Date(oldestTimestamp).toISOString() : null,
+                  newest_message_date: newestTimestamp ? new Date(newestTimestamp).toISOString() : null,
+                  threads: {},
+                  main_messages: mainMessages.map(m => ({
+                    id: m.id,
+                    author: {
+                      id: m.authorId,
+                      username: m.authorUsername || "",
+                      discriminator: m.authorDiscriminator || "",
+                      bot: m.authorBot || false,
+                      avatar: m.authorAvatar,
+                    },
+                    content: m.content,
+                    created_at: m.createdAt.toISOString(),
+                    edited_at: null,
+                    timestamp: m.timestamp || m.createdAt.toISOString(),
+                    channel_id: actualChannelId,
+                    guild_id: m.guildId || undefined,
+                    attachments: [],
+                    embeds: 0,
+                    mentions: [],
+                    reactions: [],
+                    url: m.url || undefined,
+                  })),
+                };
+                
+                // Add threads
+                for (const [threadId, messages] of threadMap.entries()) {
+                  const threadTimestamps = messages.map(m => new Date(m.createdAt).getTime());
+                  const oldestThreadTime = threadTimestamps.length > 0 ? Math.min(...threadTimestamps) : null;
+                  const newestThreadTime = threadTimestamps.length > 0 ? Math.max(...threadTimestamps) : null;
+                  
+                  discordCache.threads[threadId] = {
+                    thread_id: threadId,
+                    thread_name: messages[0]?.threadName || "",
+                    message_count: messages.length,
+                    oldest_message_date: oldestThreadTime ? new Date(oldestThreadTime).toISOString() : null,
+                    newest_message_date: newestThreadTime ? new Date(newestThreadTime).toISOString() : null,
+                    messages: messages.map(m => ({
+                      id: m.id,
+                      author: {
+                        id: m.authorId,
+                        username: m.authorUsername || "",
+                        discriminator: m.authorDiscriminator || "",
+                        bot: m.authorBot || false,
+                        avatar: m.authorAvatar,
+                      },
+                      content: m.content,
+                      created_at: m.createdAt.toISOString(),
+                      edited_at: null,
+                      timestamp: m.timestamp || m.createdAt.toISOString(),
+                      channel_id: actualChannelId,
+                      guild_id: m.guildId || undefined,
+                      attachments: [],
+                      embeds: 0,
+                      mentions: [],
+                      reactions: [],
+                      url: m.url || undefined,
+                    })),
+                  };
+                }
+                
+                // Load issues
+                const dbIssues = await prisma.gitHubIssue.findMany({
+                  orderBy: { issueNumber: "desc" },
+                });
+                
+                const openCount = dbIssues.filter(i => i.issueState === "open").length;
+                const closedCount = dbIssues.filter(i => i.issueState === "closed").length;
+                
+                issuesCache = {
+                  fetched_at: new Date().toISOString(),
+                  total_count: dbIssues.length,
+                  open_count: openCount,
+                  closed_count: closedCount,
+                  issues: dbIssues.map(issue => ({
+                    id: issue.issueNumber,
+                    number: issue.issueNumber,
+                    title: issue.issueTitle,
+                    html_url: issue.issueUrl,
+                    state: (issue.issueState || "open") as "open" | "closed",
+                    body: issue.issueBody || "",
+                    labels: issue.issueLabels.map((name: string) => ({ name, color: "" })),
+                    user: { 
+                      login: issue.issueAuthor || "",
+                      avatar_url: "",
+                    },
+                    created_at: issue.issueCreatedAt?.toISOString() || new Date().toISOString(),
+                    updated_at: issue.issueUpdatedAt?.toISOString() || new Date().toISOString(),
+                  })),
+                };
+                
+                console.error(`[Grouping] Loaded ${dbMessages.length} messages and ${dbIssues.length} issues from database`);
+              } catch (dbLoadError) {
+                console.error(`[Grouping] Failed to load from database, falling back to JSON cache:`, dbLoadError);
+                // Fall through to JSON cache loading
+              }
             }
-            const issuesCacheContent = await readFile(issuesCachePath, "utf-8");
-            const issuesCache = safeJsonParse<IssuesCache>(issuesCacheContent, issuesCachePath);
+            
+            // Fallback to JSON cache if database loading failed or not using database
+            if (!discordCache || !issuesCache) {
+              const discordCachePath = await findDiscordCacheFile(actualChannelId);
+              if (!discordCachePath) {
+                throw new Error(`No Discord cache found for channel ${actualChannelId}. Run fetch_discord_messages first.`);
+              }
+              discordCache = await loadDiscordCache(discordCachePath);
+              
+              const issuesCachePath = join(process.cwd(), config.paths.cacheDir, config.paths.issuesCacheFile);
+              if (!existsSync(issuesCachePath)) {
+                throw new Error("No GitHub issues cache found. Run fetch_github_issues first.");
+              }
+              const issuesCacheContent = await readFile(issuesCachePath, "utf-8");
+              issuesCache = safeJsonParse<IssuesCache>(issuesCacheContent, issuesCachePath);
+            }
             
             // Organize Discord messages by thread
             const allMessages = getAllMessagesFromCache(discordCache);
@@ -3166,8 +3618,13 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const allUngroupedMap = new Map<string, UngroupedThread>(); // thread_id -> ungrouped thread
           let totalProcessed = 0;
           
-          // Function to save progress incrementally
+          // Function to save progress incrementally (only to JSON if database not configured)
           const saveProgressToFile = async (pretty = false) => {
+            // Only save to JSON file if database is NOT configured
+            if (useDatabase) {
+              return; // Data will be saved to database at the end, skip intermediate JSON saves
+            }
+            
             const mergedGroups = Array.from(allGroupsMap.values());
             const mergedUngrouped = Array.from(allUngroupedMap.values());
             
@@ -3408,7 +3865,16 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             ungrouped_threads: mergedUngrouped,
           };
           
-          await writeFile(outputPath, JSON.stringify(outputData, null, 2), "utf-8");
+          // Save to database if DATABASE_URL is set, otherwise save to JSON file
+          if (useDatabase) {
+            const storage = getStorage();
+            console.error(`[Grouping] Saving ${mergedGroups.length} groups and ${mergedUngrouped.length} ungrouped threads to database...`);
+            await storage.saveGroups(mergedGroups);
+            await storage.saveUngroupedThreads(mergedUngrouped);
+            console.error(`[Grouping] Successfully saved to database.`);
+          } else {
+            await writeFile(outputPath, JSON.stringify(outputData, null, 2), "utf-8");
+          }
           
           const updatedGroupStats = getGroupingStats(history);
           
@@ -3690,7 +4156,15 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             ungrouped_count: result.ungroupedSignals.length,
           };
           
-          await writeFile(semanticOutputPath, JSON.stringify(outputData, null, 2), "utf-8");
+          // Save to database if DATABASE_URL is set, otherwise save to JSON file
+          if (useDatabase) {
+            const storage = getStorage();
+            console.error(`[Grouping] Saving ${mergedSemanticGroups.length} semantic groups to database...`);
+            await storage.saveGroups(mergedSemanticGroups);
+            console.error(`[Grouping] Successfully saved semantic groups to database.`);
+          } else {
+            await writeFile(semanticOutputPath, JSON.stringify(outputData, null, 2), "utf-8");
+          }
           
           const updatedGroupStats = getGroupingStats(history);
           

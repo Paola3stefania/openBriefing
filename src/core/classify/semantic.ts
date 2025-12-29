@@ -157,8 +157,15 @@ async function savePersistentCache(cache: PersistentEmbeddingCache): Promise<voi
   const currentModel = cache.model;
   const entries = cache.entries;
   
-  // Try database first if available
-  if (await isDatabaseAvailable()) {
+  // Check if database is configured
+  const hasDatabase = !!(process.env.DATABASE_URL || (process.env.DB_HOST && process.env.DB_NAME));
+  
+  if (hasDatabase) {
+    // Database is configured - use it and fail loudly if it doesn't work
+    if (!(await isDatabaseAvailable())) {
+      throw new Error("DATABASE_URL is set but database is not available for embedding cache");
+    }
+    
     try {
       // Save all entries to database in a batch
       const operations = Object.entries(entries)
@@ -187,11 +194,12 @@ async function savePersistentCache(cache: PersistentEmbeddingCache): Promise<voi
       logProgress(`Saved ${Object.keys(entries).length} issue embeddings to database`);
       return;
     } catch (error) {
-      logProgress(`Failed to save to database, falling back to JSON: ${error instanceof Error ? error.message : String(error)}`);
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      throw new Error(`Failed to save embedding cache to database: ${errorMessage}`);
     }
   }
   
-  // Fall back to JSON file
+  // No database configured - save to JSON file
   const cachePath = getEmbeddingsCachePath();
   
   try {

@@ -356,60 +356,74 @@ export class DatabaseStorage implements IStorage {
   async saveGroups(groups: Group[]): Promise<void> {
     if (groups.length === 0) return;
 
-    await prisma.$transaction(async (tx) => {
-      for (const group of groups) {
-        // Upsert group
-        await tx.group.upsert({
-          where: { id: group.id },
-          update: {
-            suggestedTitle: group.suggested_title,
-            avgSimilarity: group.avg_similarity ? new Decimal(group.avg_similarity) : null,
-            threadCount: group.thread_count,
-            isCrossCutting: group.is_cross_cutting,
-            status: group.status,
-            exportedAt: group.exported_at ? new Date(group.exported_at) : null,
-            linearIssueId: group.linear_issue_id ?? null,
-            linearIssueUrl: group.linear_issue_url ?? null,
-            linearIssueIdentifier: group.linear_issue_identifier ?? null,
-            linearProjectIds: group.linear_project_ids ?? [],
-            affectsFeatures: group.affects_features ? JSON.parse(JSON.stringify(group.affects_features)) : [],
-          },
-          create: {
-            id: group.id,
-            channelId: group.channel_id,
-            githubIssueNumber: group.github_issue_number ?? null,
-            suggestedTitle: group.suggested_title,
-            avgSimilarity: group.avg_similarity ? new Decimal(group.avg_similarity) : null,
-            threadCount: group.thread_count,
-            isCrossCutting: group.is_cross_cutting,
-            status: group.status,
-            exportedAt: group.exported_at ? new Date(group.exported_at) : null,
-            linearIssueId: group.linear_issue_id ?? null,
-            linearIssueUrl: group.linear_issue_url ?? null,
-            linearIssueIdentifier: group.linear_issue_identifier ?? null,
-            linearProjectIds: group.linear_project_ids ?? [],
-            affectsFeatures: group.affects_features ? JSON.parse(JSON.stringify(group.affects_features)) : [],
-          },
-        });
+    // Process groups in batches to avoid transaction timeout
+    // Batch size of 20 groups should keep each transaction under 30 seconds
+    const BATCH_SIZE = 20;
+    const batches: Group[][] = [];
+    
+    for (let i = 0; i < groups.length; i += BATCH_SIZE) {
+      batches.push(groups.slice(i, i + BATCH_SIZE));
+    }
 
-        // Delete existing group-thread relationships
-        await tx.groupThread.deleteMany({
-          where: { groupId: group.id },
-        });
-
-        // Insert group-thread relationships
-        if (group.threads.length > 0) {
-          await tx.groupThread.createMany({
-            data: group.threads.map((thread) => ({
-              groupId: group.id,
-              threadId: thread.thread_id,
-              similarityScore: thread.similarity_score ? new Decimal(thread.similarity_score) : null,
-            })),
-            skipDuplicates: true,
+    // Process each batch in a separate transaction with increased timeout
+    for (const batch of batches) {
+      await prisma.$transaction(async (tx) => {
+        for (const group of batch) {
+          // Upsert group
+          await tx.group.upsert({
+            where: { id: group.id },
+            update: {
+              suggestedTitle: group.suggested_title,
+              avgSimilarity: group.avg_similarity ? new Decimal(group.avg_similarity) : null,
+              threadCount: group.thread_count,
+              isCrossCutting: group.is_cross_cutting,
+              status: group.status,
+              exportedAt: group.exported_at ? new Date(group.exported_at) : null,
+              linearIssueId: group.linear_issue_id ?? null,
+              linearIssueUrl: group.linear_issue_url ?? null,
+              linearIssueIdentifier: group.linear_issue_identifier ?? null,
+              linearProjectIds: group.linear_project_ids ?? [],
+              affectsFeatures: group.affects_features ? JSON.parse(JSON.stringify(group.affects_features)) : [],
+            },
+            create: {
+              id: group.id,
+              channelId: group.channel_id,
+              githubIssueNumber: group.github_issue_number ?? null,
+              suggestedTitle: group.suggested_title,
+              avgSimilarity: group.avg_similarity ? new Decimal(group.avg_similarity) : null,
+              threadCount: group.thread_count,
+              isCrossCutting: group.is_cross_cutting,
+              status: group.status,
+              exportedAt: group.exported_at ? new Date(group.exported_at) : null,
+              linearIssueId: group.linear_issue_id ?? null,
+              linearIssueUrl: group.linear_issue_url ?? null,
+              linearIssueIdentifier: group.linear_issue_identifier ?? null,
+              linearProjectIds: group.linear_project_ids ?? [],
+              affectsFeatures: group.affects_features ? JSON.parse(JSON.stringify(group.affects_features)) : [],
+            },
           });
+
+          // Delete existing group-thread relationships
+          await tx.groupThread.deleteMany({
+            where: { groupId: group.id },
+          });
+
+          // Insert group-thread relationships
+          if (group.threads.length > 0) {
+            await tx.groupThread.createMany({
+              data: group.threads.map((thread) => ({
+                groupId: group.id,
+                threadId: thread.thread_id,
+                similarityScore: thread.similarity_score ? new Decimal(thread.similarity_score) : null,
+              })),
+              skipDuplicates: true,
+            });
+          }
         }
-      }
-    });
+      }, {
+        timeout: 30000, // 30 seconds timeout per batch
+      });
+    }
   }
 
   async getGroups(channelId: string, options?: { status?: "pending" | "exported" }): Promise<Group[]> {
@@ -527,43 +541,57 @@ export class DatabaseStorage implements IStorage {
   async saveUngroupedThreads(threads: UngroupedThread[]): Promise<void> {
     if (threads.length === 0) return;
 
-    await prisma.$transaction(async (tx) => {
-      for (const thread of threads) {
-        // Ensure thread exists in classified_threads and update match_status
-        await tx.classifiedThread.upsert({
-          where: { threadId: thread.thread_id },
-          update: {
-            matchStatus: thread.reason, // 'no_matches' or 'below_threshold'
-          },
-          create: {
-            threadId: thread.thread_id,
-            channelId: thread.channel_id,
-            threadName: thread.thread_name ?? null,
-            status: "completed",
-            matchStatus: thread.reason, // 'no_matches' or 'below_threshold'
-          },
-        });
+    // Process threads in batches to avoid transaction timeout
+    // Batch size of 500 should keep each transaction under 30 seconds
+    const BATCH_SIZE = 500;
+    const batches: UngroupedThread[][] = [];
+    
+    for (let i = 0; i < threads.length; i += BATCH_SIZE) {
+      batches.push(threads.slice(i, i + BATCH_SIZE));
+    }
 
-        // Upsert ungrouped thread
-        await tx.ungroupedThread.upsert({
-          where: { threadId: thread.thread_id },
-          update: {
-            reason: thread.reason,
-            topIssueNumber: thread.top_issue?.number ?? null,
-            topIssueTitle: thread.top_issue?.title ?? null,
-            topIssueSimilarity: thread.top_issue?.similarity_score ? new Decimal(thread.top_issue.similarity_score) : null,
-          },
-          create: {
-            threadId: thread.thread_id,
-            channelId: thread.channel_id,
-            reason: thread.reason,
-            topIssueNumber: thread.top_issue?.number ?? null,
-            topIssueTitle: thread.top_issue?.title ?? null,
-            topIssueSimilarity: thread.top_issue?.similarity_score ? new Decimal(thread.top_issue.similarity_score) : null,
-          },
-        });
-      }
-    });
+    // Process each batch in a separate transaction with increased timeout
+    for (const batch of batches) {
+      await prisma.$transaction(async (tx) => {
+        for (const thread of batch) {
+          // Ensure thread exists in classified_threads and update match_status
+          await tx.classifiedThread.upsert({
+            where: { threadId: thread.thread_id },
+            update: {
+              matchStatus: thread.reason, // 'no_matches' or 'below_threshold'
+            },
+            create: {
+              threadId: thread.thread_id,
+              channelId: thread.channel_id,
+              threadName: thread.thread_name ?? null,
+              status: "completed",
+              matchStatus: thread.reason, // 'no_matches' or 'below_threshold'
+            },
+          });
+
+          // Upsert ungrouped thread
+          await tx.ungroupedThread.upsert({
+            where: { threadId: thread.thread_id },
+            update: {
+              reason: thread.reason,
+              topIssueNumber: thread.top_issue?.number ?? null,
+              topIssueTitle: thread.top_issue?.title ?? null,
+              topIssueSimilarity: thread.top_issue?.similarity_score ? new Decimal(thread.top_issue.similarity_score) : null,
+            },
+            create: {
+              threadId: thread.thread_id,
+              channelId: thread.channel_id,
+              reason: thread.reason,
+              topIssueNumber: thread.top_issue?.number ?? null,
+              topIssueTitle: thread.top_issue?.title ?? null,
+              topIssueSimilarity: thread.top_issue?.similarity_score ? new Decimal(thread.top_issue.similarity_score) : null,
+            },
+          });
+        }
+      }, {
+        timeout: 30000, // 30 seconds timeout per batch
+      });
+    }
   }
 
   async getUngroupedThreads(channelId: string): Promise<UngroupedThread[]> {

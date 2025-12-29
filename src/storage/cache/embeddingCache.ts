@@ -268,8 +268,15 @@ export async function setCachedEmbedding(
   const memKey = `${cacheType}:${id}`;
   memoryCache.set(memKey, embedding);
   
-  // For issue embeddings, save to database first if available
-  if (cacheType === "issues" && await isDatabaseAvailable()) {
+  // Check if database is configured
+  const hasDatabase = !!(process.env.DATABASE_URL || (process.env.DB_HOST && process.env.DB_NAME));
+  
+  // For issue embeddings, save to database if configured
+  if (cacheType === "issues" && hasDatabase) {
+    if (!(await isDatabaseAvailable())) {
+      throw new Error("DATABASE_URL is set but database is not available for issue embedding cache");
+    }
+    
     try {
       const issueNumber = parseInt(id, 10);
       if (!isNaN(issueNumber)) {
@@ -291,13 +298,17 @@ export async function setCachedEmbedding(
         return; // Successfully saved to database, skip JSON cache
       }
     } catch (error) {
-      // Database error, fall back to JSON cache
-      console.error(`[EmbeddingCache] Database save error, falling back to JSON:`, error);
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      throw new Error(`Failed to save issue embedding to database: ${errorMessage}`);
     }
   }
   
-  // For thread embeddings, save to database first if available
-  if (cacheType === "discord" && await isDatabaseAvailable()) {
+  // For thread embeddings, save to database if configured
+  if (cacheType === "discord" && hasDatabase) {
+    if (!(await isDatabaseAvailable())) {
+      throw new Error("DATABASE_URL is set but database is not available for thread embedding cache");
+    }
+    
     try {
       const currentModel = getEmbeddingModel();
       await prisma.threadEmbedding.upsert({
@@ -316,8 +327,8 @@ export async function setCachedEmbedding(
       });
       return; // Successfully saved to database, skip JSON cache
     } catch (error) {
-      // Database error, fall back to JSON cache
-      console.error(`[EmbeddingCache] Database save error, falling back to JSON:`, error);
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      throw new Error(`Failed to save thread embedding to database: ${errorMessage}`);
     }
   }
   
@@ -338,8 +349,15 @@ export async function batchSetCachedEmbeddings(
   cacheType: "issues" | "discord",
   items: Array<{ id: string; contentHash: string; embedding: Embedding }>
 ): Promise<void> {
-  // For issue embeddings, save to database first if available
-  if (cacheType === "issues" && await isDatabaseAvailable()) {
+  // Check if database is configured
+  const hasDatabase = !!(process.env.DATABASE_URL || (process.env.DB_HOST && process.env.DB_NAME));
+  
+  // For issue embeddings, save to database if configured
+  if (cacheType === "issues" && hasDatabase) {
+    if (!(await isDatabaseAvailable())) {
+      throw new Error("DATABASE_URL is set but database is not available for issue embedding batch save");
+    }
+    
     try {
       const currentModel = getEmbeddingModel();
       const itemsToSave = items.filter(item => !isNaN(parseInt(item.id, 10)));
@@ -374,13 +392,17 @@ export async function batchSetCachedEmbeddings(
         return; // Successfully saved to database, skip JSON cache
       }
     } catch (error) {
-      // Database error, fall back to JSON cache
-      console.error(`[EmbeddingCache] Database batch save error, falling back to JSON:`, error);
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      throw new Error(`Failed to batch save issue embeddings to database: ${errorMessage}`);
     }
   }
   
-  // For thread embeddings, save to database first if available
-  if (cacheType === "discord" && await isDatabaseAvailable()) {
+  // For thread embeddings, save to database if configured
+  if (cacheType === "discord" && hasDatabase) {
+    if (!(await isDatabaseAvailable())) {
+      throw new Error("DATABASE_URL is set but database is not available for thread embedding batch save");
+    }
+    
     try {
       const currentModel = getEmbeddingModel();
       
@@ -413,8 +435,8 @@ export async function batchSetCachedEmbeddings(
         return; // Successfully saved to database, skip JSON cache
       }
     } catch (error) {
-      // Database error, fall back to JSON cache
-      console.error(`[EmbeddingCache] Database batch save error, falling back to JSON:`, error);
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      throw new Error(`Failed to batch save thread embeddings to database: ${errorMessage}`);
     }
   }
   
@@ -561,4 +583,6 @@ export async function clearCache(cacheType: "issues" | "discord"): Promise<void>
     }
   }
 }
+
+
 

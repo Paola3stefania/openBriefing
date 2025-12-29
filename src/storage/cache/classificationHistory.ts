@@ -192,9 +192,7 @@ export async function saveClassificationHistory(
       const dbAvailable = await storage.isAvailable();
       
       if (!dbAvailable) {
-        console.error("[ClassificationHistory] Database is configured but not available, falling back to JSON");
-        await saveClassificationHistoryToFile(history, resultsDir);
-        return;
+        throw new Error("Database is configured but not available");
       }
 
       // Database is available, save using Prisma
@@ -214,50 +212,85 @@ export async function saveClassificationHistory(
         await storage.upsertChannel(channelId);
       }
 
-      // Save all message classifications in a transaction
-      await prisma.$transaction(async (tx) => {
-        for (const [messageId, msg] of Object.entries(history.messages)) {
-          // Find thread_id for this message by checking threads
-          let threadId: string | undefined;
-          for (const [tid, thread] of Object.entries(history.threads || {})) {
-            if (thread.channel_id === msg.channel_id) {
-              // Check if this message is in the channel's classified messages
-              const channelMsgs = history.channel_classifications[msg.channel_id] || [];
-              if (channelMsgs.includes(messageId)) {
-                threadId = tid;
-                break;
-              }
-            }
+      // Pre-compute thread_id mapping to avoid nested loops in transaction
+      const messageToThreadId = new Map<string, string>();
+      for (const [threadId, thread] of Object.entries(history.threads || {})) {
+        const channelMsgs = history.channel_classifications[thread.channel_id] || [];
+        for (const messageId of channelMsgs) {
+          if (history.messages[messageId]?.channel_id === thread.channel_id) {
+            messageToThreadId.set(messageId, threadId);
           }
+        }
+      }
 
-          await tx.classificationHistory.upsert({
-            where: {
-              channelId_messageId: {
+      // Check which threads actually exist in the database
+      const threadIdsToCheck = new Set<string>();
+      for (const threadId of messageToThreadId.values()) {
+        if (threadId) {
+          threadIdsToCheck.add(threadId);
+        }
+      }
+      
+      // Get all existing thread IDs from database
+      const existingThreads = threadIdsToCheck.size > 0
+        ? await prisma.classifiedThread.findMany({
+            where: { threadId: { in: Array.from(threadIdsToCheck) } },
+            select: { threadId: true },
+          })
+        : [];
+      
+      const existingThreadIds = new Set(existingThreads.map(t => t.threadId));
+
+      // Save all message classifications in batches to avoid transaction timeout
+      const BATCH_SIZE = 100;
+      const messageEntries = Object.entries(history.messages);
+      const totalBatches = Math.ceil(messageEntries.length / BATCH_SIZE);
+      
+      for (let i = 0; i < messageEntries.length; i += BATCH_SIZE) {
+        const batch = messageEntries.slice(i, i + BATCH_SIZE);
+        const batchNum = Math.floor(i / BATCH_SIZE) + 1;
+        
+        await prisma.$transaction(async (tx) => {
+          await Promise.all(batch.map(([messageId, msg]) => {
+            const threadId = messageToThreadId.get(messageId);
+            // Only set threadId if the thread actually exists in the database
+            const validThreadId = threadId && existingThreadIds.has(threadId) ? threadId : null;
+
+            return tx.classificationHistory.upsert({
+              where: {
+                channelId_messageId: {
+                  channelId: msg.channel_id,
+                  messageId: messageId,
+                },
+              },
+              update: {
+                threadId: validThreadId,
+                classifiedAt: new Date(msg.classified_at),
+              },
+              create: {
                 channelId: msg.channel_id,
                 messageId: messageId,
+                threadId: validThreadId,
+                classifiedAt: new Date(msg.classified_at),
               },
-            },
-            update: {
-              threadId: threadId || null,
-              classifiedAt: new Date(msg.classified_at),
-            },
-            create: {
-              channelId: msg.channel_id,
-              messageId: messageId,
-              threadId: threadId || null,
-              classifiedAt: new Date(msg.classified_at),
-            },
-          });
+            });
+          }));
+        }, {
+          timeout: 10000, // 10 second timeout per batch
+        });
+        
+        if (totalBatches > 1) {
+          console.error(`[ClassificationHistory] Saved batch ${batchNum}/${totalBatches} (${batch.length} entries)`);
         }
-      });
+      }
       
       console.error("[ClassificationHistory] Successfully saved to database");
       return;
     } catch (error) {
-      // If database save fails, fall back to JSON
-      console.error("[ClassificationHistory] Database save failed, falling back to JSON:", error instanceof Error ? error.message : String(error));
-      await saveClassificationHistoryToFile(history, resultsDir);
-      return;
+      // When database is configured, don't fall back to JSON - fail loudly instead
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.error("[ClassificationHistory] Database save failed:", errorMessage);
+      throw new Error(`Failed to save classification history to database: ${errorMessage}`);
     }
   }
   
@@ -337,7 +370,22 @@ export function filterUnclassifiedMessages<T extends { id: string }>(
   messages: T[],
   history: ClassificationHistory
 ): T[] {
-  return messages.filter((msg) => !isMessageClassified(msg.id, history));
+  const filtered = messages.filter((msg) => !isMessageClassified(msg.id, history));
+  
+  // DEBUG: Log filtering details (only log first few to avoid spam)
+  if (filtered.length !== messages.length) {
+    const skipped = messages.length - filtered.length;
+    const sampleSkipped = messages
+      .filter((msg) => isMessageClassified(msg.id, history))
+      .slice(0, 3)
+      .map((msg) => msg.id.substring(0, 20));
+    console.error(`[ClassificationHistory Debug] filterUnclassifiedMessages: ${skipped} skipped, ${filtered.length} remaining`);
+    if (sampleSkipped.length > 0) {
+      console.error(`  - Sample skipped message IDs: ${sampleSkipped.join(", ")}...`);
+    }
+  }
+  
+  return filtered;
 }
 
 /**
