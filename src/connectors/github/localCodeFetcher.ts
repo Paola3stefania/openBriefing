@@ -29,10 +29,24 @@ export async function fetchLocalCodeContext(
     }
 
     log(`[LocalCodeFetcher] Using semantic search to find code matching "${searchQuery}"...`);
+    log(`[LocalCodeFetcher] Scanning repository at: ${resolvedPath}`);
 
     // Collect all code files from source directories (no keyword filtering)
-    const allCodeFiles = await findAllCodeFiles(resolvedPath);
+    const scannedDirs = new Set<string>();
+    const allCodeFiles = await findAllCodeFiles(resolvedPath, "", [], 200, scannedDirs);
     log(`[LocalCodeFetcher] Found ${allCodeFiles.length} code files in repository`);
+    
+    // Log scanned directories summary
+    if (scannedDirs.size > 0) {
+      const dirList = Array.from(scannedDirs).slice(0, 30).join(", ");
+      log(`[LocalCodeFetcher] Scanned ${scannedDirs.size} directories: ${dirList}${scannedDirs.size > 30 ? "..." : ""}`);
+    }
+    
+    // Log sample of file paths to verify scanning
+    if (allCodeFiles.length > 0) {
+      const samplePaths = allCodeFiles.slice(0, 10).map(f => relative(resolvedPath, f));
+      log(`[LocalCodeFetcher] Sample file paths found: ${samplePaths.join(", ")}${allCodeFiles.length > 10 ? "..." : ""}`);
+    }
 
     if (allCodeFiles.length === 0) {
       log(`[LocalCodeFetcher] No code files found in repository`);
@@ -163,7 +177,8 @@ async function findAllCodeFiles(
   repoPath: string,
   currentPath: string = "",
   foundFiles: string[] = [],
-  maxFiles: number = 200 // Limit to prevent excessive processing
+  maxFiles: number = 200, // Limit to prevent excessive processing
+  scannedDirs: Set<string> = new Set()
 ): Promise<string[]> {
   if (foundFiles.length >= maxFiles) {
     return foundFiles;
@@ -172,6 +187,9 @@ async function findAllCodeFiles(
   try {
     const fullPath = currentPath ? join(repoPath, currentPath) : repoPath;
     const entries = await readdir(fullPath, { withFileTypes: true });
+    
+    // Track scanned directories for logging
+    scannedDirs.add(currentPath || ".");
     
     for (const entry of entries) {
       if (foundFiles.length >= maxFiles) break;
@@ -192,25 +210,27 @@ async function findAllCodeFiles(
           dirName === ".nuxt" ||
           dirName === "vendor" ||
           dirName === ".cache" ||
-          dirName === ".turbo"
+          dirName === ".turbo" ||
+          dirName === "demo" || // Exclude demo directories
+          entryPath.toLowerCase().startsWith("demo/") // Exclude anything under demo/
         ) {
           continue;
         }
 
-        // Only recurse into source directories to limit scope
+        // Only recurse into source directories at root level, not in demo/
         const pathLower = entryPath.toLowerCase();
-        const isSourceDir = pathLower.includes("/src/") || 
-                          pathLower.includes("/lib/") || 
-                          pathLower.includes("/app/") ||
-                          pathLower.includes("/packages/") ||
-                          entryPath === "src" ||
-                          entryPath === "lib" ||
-                          entryPath === "app" ||
-                          entryPath.startsWith("packages/");
+        const isRootSourceDir = entryPath === "src" ||
+                                entryPath === "lib" ||
+                                entryPath === "app" ||
+                                entryPath.startsWith("packages/");
+        const isNestedSourceDir = (pathLower.includes("/src/") || 
+                                   pathLower.includes("/lib/") || 
+                                   pathLower.includes("/packages/")) &&
+                                   !pathLower.startsWith("demo/"); // Exclude demo/src, demo/lib, etc.
 
-        if (isSourceDir || currentPath === "") {
+        if (isRootSourceDir || isNestedSourceDir || currentPath === "") {
           // Recursively search subdirectories
-          const subFiles = await findAllCodeFiles(repoPath, entryPath, foundFiles, maxFiles);
+          const subFiles = await findAllCodeFiles(repoPath, entryPath, foundFiles, maxFiles, scannedDirs);
           foundFiles.push(...subFiles);
         }
       } else if (entry.isFile()) {
@@ -219,14 +239,19 @@ async function findAllCodeFiles(
         const codeExtensions = [".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".rs", ".java", ".kt"];
         
         if (codeExtensions.includes(ext)) {
-          // Include all code files in source directories
+          // Include all code files in source directories, but exclude demo/
           const pathLower = entryPath.toLowerCase();
-          const isInSourceDir = pathLower.includes("/src/") || 
-                                pathLower.includes("/lib/") || 
-                                pathLower.includes("/app/") ||
-                                pathLower.includes("/packages/");
+          const isInSourceDir = (pathLower.includes("/src/") || 
+                                 pathLower.includes("/lib/") || 
+                                 pathLower.includes("/packages/")) &&
+                                 !pathLower.startsWith("demo/"); // Exclude demo files
           
-          if (isInSourceDir) {
+          // Also include root-level source directories
+          const isRootSourceFile = entryPath.startsWith("src/") ||
+                                    entryPath.startsWith("lib/") ||
+                                    entryPath.startsWith("packages/");
+          
+          if (isInSourceDir || isRootSourceFile) {
             foundFiles.push(fullEntryPath);
           }
         }
@@ -236,6 +261,7 @@ async function findAllCodeFiles(
     return foundFiles;
   } catch (error) {
     // Skip directories we can't read
+    log(`[LocalCodeFetcher] Error reading directory ${currentPath || repoPath}: ${error instanceof Error ? error.message : String(error)}`);
     return foundFiles;
   }
 }
