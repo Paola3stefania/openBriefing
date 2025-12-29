@@ -32,13 +32,11 @@ export async function fetchLocalCodeContext(
     log(`[LocalCodeFetcher] Scanning repository at: ${resolvedPath}`);
 
     // Collect all code files from source directories (no keyword filtering)
-    // Find all files first, then limit processing to maxFiles
+    // Find all files first, then process in chunks/batches
     const scannedDirs = new Set<string>();
-    // Use a high limit for discovery (10000) to find all files, but we'll limit processing later
-    // If maxFiles is null, discover all files (up to 10000 safety limit)
-    const discoveryLimit = maxFiles === null ? 10000 : Math.max(maxFiles * 10, 10000);
-    const allCodeFiles = await findAllCodeFiles(resolvedPath, "", [], discoveryLimit, scannedDirs);
-    log(`[LocalCodeFetcher] Found ${allCodeFiles.length} code files in repository`);
+    // Discover all files without limit - we'll process them in chunks/batches
+    const allCodeFiles = await findAllCodeFiles(resolvedPath, "", [], null, scannedDirs);
+    log(`[LocalCodeFetcher] Found ${allCodeFiles.length} total code files in repository`);
     
     // Log scanned directories summary
     if (scannedDirs.size > 0) {
