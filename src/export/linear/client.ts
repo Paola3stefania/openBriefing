@@ -482,7 +482,7 @@ export class LinearIntegration extends BasePMTool {
    */
   async getTeam(teamIdOrKey: string): Promise<{ id: string; name: string; key: string } | null> {
     const query = `
-      query GetTeam($id: String) {
+      query GetTeam($id: String!) {
         team(id: $id) {
           id
           name
