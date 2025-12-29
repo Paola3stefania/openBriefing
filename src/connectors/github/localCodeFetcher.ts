@@ -75,104 +75,112 @@ export async function fetchLocalCodeContext(
     const { getCodeFileEmbedding } = await import("../../storage/db/embeddings.js");
     const { createHash } = await import("crypto");
     
-    // Limit embedding computation for ranking
-    // If maxFiles is null, rank up to 5000 files (process entire repo in chunks)
-    // Otherwise, rank maxFiles * 5 or 500, whichever is larger
+    // Process all files in batches for ranking
+    // If maxFiles is set, we'll rank more files than needed to ensure good results
+    // If maxFiles is null, we'll process all files in batches
+    const BATCH_SIZE = 100; // Process 100 files at a time for embeddings
     const maxFilesForRanking = maxFiles === null 
-      ? Math.min(5000, allCodeFiles.length) // Rank up to 5000 files for full repo processing
-      : Math.max(maxFiles * 5, 500);
+      ? allCodeFiles.length // Process all files for full repo processing
+      : Math.max(maxFiles * 5, 500); // Rank more files than needed for better results
     const filesToRank = allCodeFiles.slice(0, Math.min(allCodeFiles.length, maxFilesForRanking));
     
     if (maxFiles === null) {
-      log(`[LocalCodeFetcher] Found ${allCodeFiles.length} total files, will compute embeddings for ${filesToRank.length} files for ranking (processing entire repository in chunks)...`);
+      log(`[LocalCodeFetcher] Found ${allCodeFiles.length} total files, will compute embeddings for all ${filesToRank.length} files in batches of ${BATCH_SIZE} (processing entire repository in chunks)...`);
     } else {
-      log(`[LocalCodeFetcher] Found ${allCodeFiles.length} total files, will compute embeddings for ${filesToRank.length} files for ranking (then select top ${maxFiles})...`);
+      log(`[LocalCodeFetcher] Found ${allCodeFiles.length} total files, will compute embeddings for ${filesToRank.length} files in batches of ${BATCH_SIZE} for ranking (then select top ${maxFiles})...`);
     }
     log(`[LocalCodeFetcher] Checking database for existing file embeddings to reuse...`);
     
     // Read files and compute similarities
-    // Process limited set of files for similarity ranking, then limit to top maxFiles
+    // Process files in batches for better performance and memory management
     const fileSimilarities: Array<{ filePath: string; relativePath: string; similarity: number; content: string }> = [];
     
     let reusedEmbeddings = 0;
     let computedEmbeddings = 0;
     
-    for (let i = 0; i < filesToRank.length; i++) {
-      const filePath = filesToRank[i];
-      try {
-        const content = await readFile(filePath, "utf-8");
-        const relativePath = relative(resolvedPath, filePath);
-        const keyInfo = extractKeyCodeInfo(content, relativePath);
-        
-        if (keyInfo) {
-          // Try to find existing file embedding in database
-          // Look for any code file with this path and matching content hash (from any search)
-          const contentHash = createHash("md5").update(content).digest("hex");
-          const existingCodeFile = await prisma.codeFile.findFirst({
-            where: {
-              filePath: relativePath,
-              contentHash: contentHash,
-            },
-            include: {
-              embeddings: true,
-            },
-          });
+    // Process files in batches
+    const totalBatches = Math.ceil(filesToRank.length / BATCH_SIZE);
+    for (let batchNum = 0; batchNum < totalBatches; batchNum++) {
+      const batchStart = batchNum * BATCH_SIZE;
+      const batchEnd = Math.min(batchStart + BATCH_SIZE, filesToRank.length);
+      const batch = filesToRank.slice(batchStart, batchEnd);
+      
+      log(`[LocalCodeFetcher] Processing batch ${batchNum + 1}/${totalBatches} (files ${batchStart + 1}-${batchEnd} of ${filesToRank.length})...`);
+      
+      for (let i = 0; i < batch.length; i++) {
+        const filePath = batch[i];
+        try {
+          const content = await readFile(filePath, "utf-8");
+          const relativePath = relative(resolvedPath, filePath);
+          const keyInfo = extractKeyCodeInfo(content, relativePath);
           
-          let fileEmbedding: number[] | null = null;
-          
-          if (existingCodeFile?.embeddings) {
-            // Reuse existing embedding from database
-            // The embedding is stored as JSON in the database, convert it
-            const savedEmbedding = existingCodeFile.embeddings.embedding;
-            if (savedEmbedding && Array.isArray(savedEmbedding)) {
-              fileEmbedding = savedEmbedding as number[];
-              reusedEmbeddings++;
+          if (keyInfo) {
+            // Try to find existing file embedding in database
+            // Look for any code file with this path and matching content hash (from any search)
+            const contentHash = createHash("md5").update(content).digest("hex");
+            const existingCodeFile = await prisma.codeFile.findFirst({
+              where: {
+                filePath: relativePath,
+                contentHash: contentHash,
+              },
+              include: {
+                embeddings: true,
+              },
+            });
+            
+            let fileEmbedding: number[] | null = null;
+            
+            if (existingCodeFile?.embeddings) {
+              // Reuse existing embedding from database
+              // The embedding is stored as JSON in the database, convert it
+              const savedEmbedding = existingCodeFile.embeddings.embedding;
+              if (savedEmbedding && Array.isArray(savedEmbedding)) {
+                fileEmbedding = savedEmbedding as number[];
+                reusedEmbeddings++;
+              }
             }
+            
+            if (!fileEmbedding) {
+              // Need to compute new embedding
+              // Use full file content for consistency with database embeddings
+              // This ensures embeddings are comparable across searches
+              const fileText = `File: ${relativePath}\n${content}`;
+              fileEmbedding = await createEmbedding(fileText, apiKey);
+              computedEmbeddings++;
+            }
+            
+            // Compute cosine similarity (semantic similarity from LLM embeddings)
+            const semanticSimilarity = computeCosineSimilarity(queryEmbedding, fileEmbedding);
+            
+            // Compute keyword-based similarity (exact/partial matches)
+            const keywordSimilarity = computeKeywordSimilarity(searchQuery, relativePath, keyInfo);
+            
+            // Compute folder-based similarity boost
+            // Files in folders that match the search query get a boost
+            const folderSimilarity = computeFolderSimilarity(relativePath, searchQuery);
+            
+            // Combine semantic, keyword, and folder similarity
+            // Weight: 60% semantic (LLM), 30% keywords, 10% folder
+            // This gives us both semantic understanding and exact matches
+            const combinedSimilarity = Math.min(1.0, 
+              (semanticSimilarity * 0.6) + 
+              (keywordSimilarity * 0.3) + 
+              (folderSimilarity * 0.1)
+            );
+            
+            fileSimilarities.push({
+              filePath,
+              relativePath,
+              similarity: combinedSimilarity,
+              content: keyInfo
+            });
           }
-          
-          if (!fileEmbedding) {
-            // Need to compute new embedding
-            // Use full file content for consistency with database embeddings
-            // This ensures embeddings are comparable across searches
-            const fileText = `File: ${relativePath}\n${content}`;
-            fileEmbedding = await createEmbedding(fileText, apiKey);
-            computedEmbeddings++;
-          }
-          
-          // Compute cosine similarity (semantic similarity from LLM embeddings)
-          const semanticSimilarity = computeCosineSimilarity(queryEmbedding, fileEmbedding);
-          
-          // Compute keyword-based similarity (exact/partial matches)
-          const keywordSimilarity = computeKeywordSimilarity(searchQuery, relativePath, keyInfo);
-          
-          // Compute folder-based similarity boost
-          // Files in folders that match the search query get a boost
-          const folderSimilarity = computeFolderSimilarity(relativePath, searchQuery);
-          
-          // Combine semantic, keyword, and folder similarity
-          // Weight: 60% semantic (LLM), 30% keywords, 10% folder
-          // This gives us both semantic understanding and exact matches
-          const combinedSimilarity = Math.min(1.0, 
-            (semanticSimilarity * 0.6) + 
-            (keywordSimilarity * 0.3) + 
-            (folderSimilarity * 0.1)
-          );
-          
-          fileSimilarities.push({
-            filePath,
-            relativePath,
-            similarity: combinedSimilarity,
-            content: keyInfo
-          });
+        } catch (error) {
+          log(`[LocalCodeFetcher] Failed to process file ${filePath}: ${error instanceof Error ? error.message : String(error)}`);
         }
-        
-        // Log progress every 10 files
-        if ((i + 1) % 10 === 0) {
-          log(`[LocalCodeFetcher] Processed ${i + 1}/${filesToRank.length} files for ranking... (reused: ${reusedEmbeddings}, computed: ${computedEmbeddings})`);
-        }
-      } catch (error) {
-        log(`[LocalCodeFetcher] Failed to process file ${filePath}: ${error instanceof Error ? error.message : String(error)}`);
       }
+      
+      log(`[LocalCodeFetcher] Batch ${batchNum + 1}/${totalBatches} complete. Progress: ${batchEnd}/${filesToRank.length} files processed (reused: ${reusedEmbeddings}, computed: ${computedEmbeddings})`);
     }
     
     await prisma.$disconnect();
@@ -334,113 +342,145 @@ async function readAndFormatFiles(
 /**
  * Find all code files in source directories (for semantic search)
  * No keyword filtering - we'll use embeddings to rank relevance
+ * No file limit - discovers all files, processing happens in chunks downstream
+ * Uses iterative approach with queue to avoid stack overflow
  */
 async function findAllCodeFiles(
   repoPath: string,
   currentPath: string = "",
   foundFiles: string[] = [],
-  maxFiles: number = 10000, // High limit for discovery - we want to find all files
+  maxFiles: number | null = null, // null = no limit, discover all files
   scannedDirs: Set<string> = new Set()
 ): Promise<string[]> {
-  // Check limit before processing (safety limit to prevent infinite loops)
-  if (foundFiles.length >= maxFiles) {
-    return foundFiles;
-  }
-
-  try {
-    const fullPath = currentPath ? join(repoPath, currentPath) : repoPath;
-    const entries = await readdir(fullPath, { withFileTypes: true });
+  // Use iterative approach with queue to avoid stack overflow
+  const dirQueue: string[] = [currentPath || ""];
+  const resolvedPath = resolve(repoPath);
+  
+  while (dirQueue.length > 0) {
+    // Check limit before processing next directory (only if maxFiles is set)
+    if (maxFiles !== null && foundFiles.length >= maxFiles) {
+      break;
+    }
     
-    // Track scanned directories for logging
-    scannedDirs.add(currentPath || ".");
+    const currentDir = dirQueue.shift()!;
     
-    for (const entry of entries) {
-      // Check limit at start of each iteration (safety check)
-      if (foundFiles.length >= maxFiles) {
-        break;
-      }
-
-      const entryPath = currentPath ? join(currentPath, entry.name) : entry.name;
-      const fullEntryPath = join(repoPath, entryPath);
-
-      // Skip common directories
-      if (entry.isDirectory()) {
-        const dirName = entry.name.toLowerCase();
-        if (
-          dirName === "node_modules" ||
-          dirName === "dist" ||
-          dirName === "build" ||
-          dirName === ".git" ||
-          dirName === "coverage" ||
-          dirName === ".next" ||
-          dirName === ".nuxt" ||
-          dirName === "vendor" ||
-          dirName === ".cache" ||
-          dirName === ".turbo" ||
-          dirName === "demo" || // Exclude demo directories
-          entryPath.toLowerCase().startsWith("demo/") // Exclude anything under demo/
-        ) {
-          continue;
+    try {
+      const fullPath = currentDir ? join(resolvedPath, currentDir) : resolvedPath;
+      const entries = await readdir(fullPath, { withFileTypes: true });
+      
+      // Track scanned directories for logging
+      scannedDirs.add(currentDir || ".");
+      
+      for (const entry of entries) {
+        // Check limit at start of each iteration (only if maxFiles is set)
+        if (maxFiles !== null && foundFiles.length >= maxFiles) {
+          break;
         }
 
-        // Only recurse into source directories at root level, not in demo/
-        const pathLower = entryPath.toLowerCase();
-        const isRootSourceDir = entryPath === "src" ||
-                                entryPath === "lib" ||
-                                entryPath === "app" ||
-                                entryPath.startsWith("packages/");
-        const isNestedSourceDir = (pathLower.includes("/src/") || 
+        const entryPath = currentDir ? join(currentDir, entry.name) : entry.name;
+        const fullEntryPath = join(resolvedPath, entryPath);
+
+        // Skip common directories
+        if (entry.isDirectory()) {
+          const dirName = entry.name.toLowerCase();
+          if (
+            dirName === "node_modules" ||
+            dirName === "dist" ||
+            dirName === "build" ||
+            dirName === ".git" ||
+            dirName === "coverage" ||
+            dirName === ".next" ||
+            dirName === ".nuxt" ||
+            dirName === "vendor" ||
+            dirName === ".cache" ||
+            dirName === ".turbo" ||
+            dirName === ".pnpm-store" ||
+            dirName === "demo" || // Exclude demo directories
+            entryPath.toLowerCase().startsWith("demo/") // Exclude anything under demo/
+          ) {
+            continue;
+          }
+
+          // Recurse into source directories and any directory under packages/
+          const pathLower = entryPath.toLowerCase();
+          const isRootSourceDir = entryPath === "src" ||
+                                  entryPath === "lib" ||
+                                  entryPath === "app" ||
+                                  entryPath.startsWith("packages/");
+          const isNestedSourceDir = (pathLower.includes("/src/") || 
+                                     pathLower.includes("/lib/") || 
+                                     pathLower.includes("/packages/")) &&
+                                     !pathLower.startsWith("demo/") && // Exclude demo/src, demo/lib, etc.
+                                     !pathLower.includes("/test/") && // Exclude test directories
+                                     !pathLower.includes("/tests/") && // Exclude tests directories
+                                     !pathLower.includes("/e2e/") && // Exclude e2e test directories
+                                     !pathLower.includes("/__tests__/"); // Exclude __tests__ directories
+
+          // Also include root level (for config files, etc.)
+          if (isRootSourceDir || isNestedSourceDir || currentDir === "") {
+            // Add to queue for iterative processing (avoids stack overflow)
+            dirQueue.push(entryPath);
+          }
+        } else if (entry.isFile()) {
+          // Check limit before adding file (only if maxFiles is set)
+          if (maxFiles !== null && foundFiles.length >= maxFiles) {
+            break;
+          }
+          
+          // Check if it's a code file
+          const ext = extname(entry.name).toLowerCase();
+          const codeExtensions = [".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".rs", ".java", ".kt"];
+          
+          if (codeExtensions.includes(ext)) {
+            // Exclude test files by name pattern
+            const fileName = entry.name.toLowerCase();
+            const isTestFile = fileName.includes(".test.") ||
+                              fileName.includes(".spec.") ||
+                              fileName.includes(".e2e.") ||
+                              fileName.endsWith(".test.ts") ||
+                              fileName.endsWith(".test.tsx") ||
+                              fileName.endsWith(".test.js") ||
+                              fileName.endsWith(".test.jsx") ||
+                              fileName.endsWith(".spec.ts") ||
+                              fileName.endsWith(".spec.tsx") ||
+                              fileName.endsWith(".spec.js") ||
+                              fileName.endsWith(".spec.jsx");
+            
+            if (isTestFile) {
+              continue; // Skip test files
+            }
+            
+            // Include all code files in source directories and packages (excluding test directories)
+            const pathLower = entryPath.toLowerCase();
+            const isInSourceDir = (pathLower.includes("/src/") || 
                                    pathLower.includes("/lib/") || 
                                    pathLower.includes("/packages/")) &&
-                                   !pathLower.startsWith("demo/"); // Exclude demo/src, demo/lib, etc.
-
-        if (isRootSourceDir || isNestedSourceDir || currentPath === "") {
-          // Recursively search subdirectories - find all files
-          if (foundFiles.length < maxFiles) {
-            const subFiles = await findAllCodeFiles(repoPath, entryPath, foundFiles, maxFiles, scannedDirs);
-            // Add all found files (up to limit)
-            if (foundFiles.length < maxFiles) {
-              const remaining = maxFiles - foundFiles.length;
-              foundFiles.push(...subFiles.slice(0, remaining));
+                                   !pathLower.startsWith("demo/") && // Exclude demo files
+                                   !pathLower.includes("/test/") && // Exclude test directories
+                                   !pathLower.includes("/tests/") && // Exclude tests directories
+                                   !pathLower.includes("/e2e/") && // Exclude e2e test directories
+                                   !pathLower.includes("/__tests__/"); // Exclude __tests__ directories
+            
+            // Also include root-level source directories and config files
+            const isRootSourceFile = entryPath.startsWith("src/") ||
+                                      entryPath.startsWith("lib/") ||
+                                      entryPath.startsWith("packages/") ||
+                                      // Include config files at root or in packages (vitest.config.ts, tsconfig.json, etc.)
+                                      (currentDir === "" && (entry.name.includes("config") || entry.name.includes("setup")));
+            
+            if (isInSourceDir || isRootSourceFile) {
+              foundFiles.push(fullEntryPath);
             }
           }
         }
-      } else if (entry.isFile()) {
-        // Check limit before adding file (safety check)
-        if (foundFiles.length >= maxFiles) {
-          break;
-        }
-        
-        // Check if it's a code file
-        const ext = extname(entry.name).toLowerCase();
-        const codeExtensions = [".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".rs", ".java", ".kt"];
-        
-        if (codeExtensions.includes(ext)) {
-          // Include all code files in source directories, but exclude demo/
-          const pathLower = entryPath.toLowerCase();
-          const isInSourceDir = (pathLower.includes("/src/") || 
-                                 pathLower.includes("/lib/") || 
-                                 pathLower.includes("/packages/")) &&
-                                 !pathLower.startsWith("demo/"); // Exclude demo files
-          
-          // Also include root-level source directories
-          const isRootSourceFile = entryPath.startsWith("src/") ||
-                                    entryPath.startsWith("lib/") ||
-                                    entryPath.startsWith("packages/");
-          
-          if (isInSourceDir || isRootSourceFile) {
-            foundFiles.push(fullEntryPath);
-          }
-        }
       }
+    } catch (error) {
+      // Skip directories we can't read
+      log(`[LocalCodeFetcher] Error reading directory ${currentDir || repoPath}: ${error instanceof Error ? error.message : String(error)}`);
     }
-
-    return foundFiles;
-  } catch (error) {
-    // Skip directories we can't read
-    log(`[LocalCodeFetcher] Error reading directory ${currentPath || repoPath}: ${error instanceof Error ? error.message : String(error)}`);
-    return foundFiles;
   }
+
+  return foundFiles;
 }
 
 /**

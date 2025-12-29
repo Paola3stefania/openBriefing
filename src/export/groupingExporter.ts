@@ -237,7 +237,16 @@ export async function exportGroupingToPMTool(
     const features = groupingData.features || [{ id: "general", name: "General" }];
     
     // Use groups from grouping data (already matched to features)
-    const groupsWithFeatures = groupingData.groups;
+    // Filter: Only export groups with open GitHub issues or unresolved messages (no GitHub issue)
+    // This ensures we don't export groups for closed/resolved issues
+    const groupsWithFeatures = groupingData.groups.filter(group => {
+      // If group has a GitHub issue, only export if it's open
+      if (group.github_issue) {
+        return group.github_issue.state === "open";
+      }
+      // If no GitHub issue, it's an unresolved Discord thread - export it
+      return true;
+    });
 
     // Create projects for features (Linear only)
     const projectMappings = new Map<string, string>(); // feature_id -> project_id
@@ -559,8 +568,9 @@ export async function exportGroupingToPMTool(
         
         // Find issues in cache that are NOT matched to any thread
         // These are our ungrouped issues
+        // Only export open issues (unresolved)
         for (const issue of allCachedIssues) {
-          if (!matchedIssueNumbers.has(issue.number)) {
+          if (!matchedIssueNumbers.has(issue.number) && issue.state === "open") {
             // This issue doesn't have any thread matches - it's ungrouped
             const issueTitle = issue.title || `GitHub Issue #${issue.number}`;
             const title = `[Ungrouped Issue] ${issueTitle}`;

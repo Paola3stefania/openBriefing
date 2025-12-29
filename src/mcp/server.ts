@@ -4461,6 +4461,9 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
                   thread_count: allThreads.length,
                   avg_similarity: Math.round(avgSimilarity * 10) / 10,
                   updated_at: new Date().toISOString(),
+                  // Clear affects_features when new threads are added so it gets re-matched to features
+                  affects_features: [],
+                  is_cross_cutting: false,
                 });
               } else {
                 // New group - generate title from thread titles
@@ -4482,6 +4485,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
                   avg_similarity: Math.round(group.avgSimilarity * 10) / 10,
                   thread_count: group.threads.length,
                   is_cross_cutting: false,
+                  affects_features: [], // Will be populated when matched to features
                   status: "pending" as const,
                   created_at: new Date().toISOString(),
                   updated_at: new Date().toISOString(),

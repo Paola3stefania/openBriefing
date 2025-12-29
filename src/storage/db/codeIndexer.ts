@@ -233,7 +233,7 @@ export async function searchAndIndexCode(
       searchId,
       searchQuery,
       repositoryUrl,
-      100 // Default chunk size
+      chunkSize // Use the chunkSize parameter
     );
 
     // Map to feature (if featureId provided)
@@ -772,6 +772,12 @@ async function parseAndIndexCode(
         log(`[CodeIndexer] WARNING: Could not reload file ${fileData.filePath} (id: ${fileData.fileId}) from database`);
       }
     }
+    
+    // Update codeSearch.updatedAt to track progress after each batch
+    await prisma.codeSearch.update({
+      where: { id: searchId },
+      data: { updatedAt: new Date() },
+    });
     
     log(`[CodeIndexer] Chunk ${chunkNum}/${totalChunks} complete. Progress: ${chunkEnd}/${totalFiles} files processed.`);
   }

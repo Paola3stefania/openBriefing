@@ -461,8 +461,13 @@ export class DatabaseStorage implements IStorage {
             
             if (!savedGroup) {
               console.error(`[DEBUG saveGroups] ERROR: Sample group ${sampleGroupId} not found in database after save!`);
-            } else if (JSON.stringify(savedGroup.affectsFeatures) !== JSON.stringify(batch[0].affects_features)) {
-              console.error(`[DEBUG saveGroups] WARNING: Sample group ${sampleGroupId} affectsFeatures mismatch! Expected: ${JSON.stringify(batch[0].affects_features)}, Got: ${JSON.stringify(savedGroup.affectsFeatures)}`);
+            } else {
+              // Normalize undefined/null to empty array for comparison
+              const expectedFeatures = batch[0].affects_features || [];
+              const actualFeatures = savedGroup.affectsFeatures || [];
+              if (JSON.stringify(actualFeatures) !== JSON.stringify(expectedFeatures)) {
+                console.error(`[DEBUG saveGroups] WARNING: Sample group ${sampleGroupId} affectsFeatures mismatch! Expected: ${JSON.stringify(expectedFeatures)}, Got: ${JSON.stringify(actualFeatures)}`);
+              }
             }
           } catch (verifyError) {
             console.error(`[DEBUG saveGroups] Could not verify sample group: ${verifyError instanceof Error ? verifyError.message : String(verifyError)}`);
