@@ -176,11 +176,26 @@ export async function searchAndIndexCode(
     
     let rawCodeContext = "";
     
-    // First, try local repository if configured
+    // Determine if repositoryUrl is a local path or GitHub URL
+    const { existsSync, statSync } = await import("fs");
+    const { parseGitHubRepoUrl } = await import("../../connectors/github/codeFetcher.js");
+    const isGitHubUrl = parseGitHubRepoUrl(repositoryUrl) !== null;
+    const isLocalPath = !isGitHubUrl && repositoryUrl && (existsSync(repositoryUrl) || repositoryUrl.startsWith("/") || repositoryUrl.startsWith("./") || repositoryUrl.startsWith("../"));
+    
+    // ALWAYS prefer local repository from config first, then check if repositoryUrl is a local path
     const { getConfig } = await import("../../config/index.js");
     const config = getConfig();
-    const localRepoPath = config.pmIntegration?.local_repo_path;
+    let localRepoPath: string | undefined = config.pmIntegration?.local_repo_path;
     
+    // If repositoryUrl is a local path, use it (overrides config if provided as parameter)
+    if (isLocalPath) {
+      localRepoPath = repositoryUrl;
+      log(`[CodeIndexer] repositoryUrl is a local path, using it directly: ${localRepoPath}`);
+    } else if (localRepoPath) {
+      log(`[CodeIndexer] Using local repository path from config: ${localRepoPath}`);
+    }
+    
+    // First, try local repository if available (ALWAYS prefer local over GitHub)
     if (localRepoPath) {
       log(`[CodeIndexer] Attempting to fetch code from local repository: ${localRepoPath}`);
       const { fetchLocalCodeContext } = await import("../../connectors/github/localCodeFetcher.js");
@@ -193,10 +208,10 @@ export async function searchAndIndexCode(
       }
     }
     
-    // Fallback to GitHub API if local didn't work
-    if (!rawCodeContext && repositoryUrl) {
+    // Fallback to GitHub API if local didn't work and repositoryUrl is a GitHub URL
+    if (!rawCodeContext && isGitHubUrl) {
       log(`[CodeIndexer] Fetching code from GitHub API...`);
-      const { parseGitHubRepoUrl, fetchRepositoryCodeContext } = await import("../../connectors/github/codeFetcher.js");
+      const { fetchRepositoryCodeContext } = await import("../../connectors/github/codeFetcher.js");
       const repoInfo = parseGitHubRepoUrl(repositoryUrl);
       
       if (repoInfo) {
@@ -811,45 +826,54 @@ async function mapCodeToFeature(
       });
 
       if (!existing) {
-        let similarity = 0;
+        // Use BOTH semantic (LLM) and keyword matching for better results
+        let semanticSimilarity = 0;
+        let keywordSimilarity = 0;
         let matchType = "keyword";
         
-        // Use semantic similarity if both embeddings are available
+        // Compute semantic similarity using LLM embeddings
         if (featureEmbedding) {
           const { getCodeSectionEmbedding } = await import("./embeddings.js");
           const sectionContentHash = createHash("md5").update(section.sectionContent).digest("hex");
           const sectionEmbedding = await getCodeSectionEmbedding(section.id, sectionContentHash);
           
           if (sectionEmbedding) {
-            // Compute cosine similarity
-            similarity = computeCosineSimilarity(featureEmbedding, sectionEmbedding);
-            matchType = similarity > 0.7 ? "exact" : similarity > 0.5 ? "semantic" : "keyword";
-          } else {
-            // Fallback to keyword-based similarity if section embedding not available
-            similarity = computeSimpleSimilarity(featureName, section.sectionName, section.sectionContent);
-            matchType = similarity > 0.7 ? "exact" : similarity > 0.5 ? "keyword" : "semantic";
+            // Compute cosine similarity from LLM embeddings
+            semanticSimilarity = computeCosineSimilarity(featureEmbedding, sectionEmbedding);
           }
+        }
+        
+        // Always compute keyword similarity (complements semantic search)
+        keywordSimilarity = computeSimpleSimilarity(featureName, section.sectionName, section.sectionContent);
+        
+        // Combine semantic and keyword similarity
+        // Weight: 70% semantic (LLM understanding), 30% keywords (exact matches)
+        const combinedSimilarity = (semanticSimilarity * 0.7) + (keywordSimilarity * 0.3);
+        
+        // Determine match type based on combined score
+        if (combinedSimilarity > 0.7 || (semanticSimilarity > 0.6 && keywordSimilarity > 0.5)) {
+          matchType = "exact";
+        } else if (semanticSimilarity > 0.5 || keywordSimilarity > 0.5) {
+          matchType = "semantic";
         } else {
-          // Fallback to keyword-based similarity if feature embedding not available
-          similarity = computeSimpleSimilarity(featureName, section.sectionName, section.sectionContent);
-          matchType = similarity > 0.7 ? "exact" : similarity > 0.5 ? "keyword" : "semantic";
+          matchType = "keyword";
         }
         
         // Lower threshold to 0.2 to catch more matches (was 0.3)
         // This matches the threshold in matchTextToFeaturesUsingCode
-        if (similarity > 0.2) {
+        if (combinedSimilarity > 0.2) {
           try {
             await prisma.featureCodeMapping.create({
               data: {
                 id: createHash("md5").update(`${featureId}:${section.id}`).digest("hex"),
                 featureId,
                 codeSectionId: section.id,
-                similarity,
+                similarity: combinedSimilarity,
                 matchType,
                 searchQuery: featureName,
               },
             });
-            log(`[CodeIndexer] Saved feature-code mapping to database: ${section.sectionName} -> ${featureName} (similarity: ${similarity.toFixed(3)}, type: ${matchType})`);
+            log(`[CodeIndexer] Saved feature-code mapping: ${section.sectionName} -> ${featureName} (semantic: ${semanticSimilarity.toFixed(3)}, keyword: ${keywordSimilarity.toFixed(3)}, combined: ${combinedSimilarity.toFixed(3)}, type: ${matchType})`);
           } catch (error) {
             // Mapping might already exist, ignore
             log(`[CodeIndexer] Mapping already exists or error: ${error instanceof Error ? error.message : String(error)}`);
@@ -1082,37 +1106,44 @@ export async function matchTextToFeaturesUsingCode(
           const sectionContentHash = createHash("md5").update(section.sectionContent).digest("hex");
           const sectionEmbedding = await getCodeSectionEmbedding(section.id, sectionContentHash);
           
-          // Match to all features
+          // Match to all features using BOTH semantic and keyword matching
           for (const feature of features) {
-            let similarity = 0;
+            let semanticSimilarity = 0;
+            let keywordSimilarity = 0;
             let matchType = "keyword";
             
+            // Compute semantic similarity using LLM embeddings
             if (sectionEmbedding) {
-              // Use semantic similarity if section embedding exists
               const featureEmbedding = featureEmbeddings.get(feature.id);
               
               if (featureEmbedding) {
-                // Compute cosine similarity using saved embeddings
-                similarity = computeCosineSimilarity(featureEmbedding, sectionEmbedding);
-                matchType = similarity > 0.7 ? "exact" : similarity > 0.5 ? "semantic" : "keyword";
-                log(`[CodeIndexer] Semantic similarity for ${section.sectionName} -> ${feature.name}: ${similarity.toFixed(3)}`);
-              } else {
-                // Feature embedding not available, fall back to keyword matching
-                similarity = computeSimpleSimilarity(feature.name, section.sectionName, section.sectionContent);
-                matchType = similarity > 0.7 ? "exact" : similarity > 0.5 ? "keyword" : "semantic";
-                log(`[CodeIndexer] Keyword similarity (no feature embedding) for ${section.sectionName} -> ${feature.name}: ${similarity.toFixed(3)}`);
+                // Compute cosine similarity using saved embeddings (LLM-based)
+                semanticSimilarity = computeCosineSimilarity(featureEmbedding, sectionEmbedding);
               }
-            } else {
-              // No section embedding - fall back to keyword matching
-              similarity = computeSimpleSimilarity(feature.name, section.sectionName, section.sectionContent);
-              matchType = similarity > 0.7 ? "exact" : similarity > 0.5 ? "keyword" : "semantic";
-              log(`[CodeIndexer] Keyword similarity (no section embedding) for ${section.sectionName} -> ${feature.name}: ${similarity.toFixed(3)}`);
             }
             
+            // Always compute keyword similarity (complements semantic search)
+            keywordSimilarity = computeSimpleSimilarity(feature.name, section.sectionName, section.sectionContent);
+            
+            // Combine semantic and keyword similarity
+            // Weight: 70% semantic (LLM understanding), 30% keywords (exact matches)
+            const combinedSimilarity = (semanticSimilarity * 0.7) + (keywordSimilarity * 0.3);
+            
+            // Determine match type based on combined score
+            if (combinedSimilarity > 0.7 || (semanticSimilarity > 0.6 && keywordSimilarity > 0.5)) {
+              matchType = "exact";
+            } else if (semanticSimilarity > 0.5 || keywordSimilarity > 0.5) {
+              matchType = "semantic";
+            } else {
+              matchType = "keyword";
+            }
+            
+            log(`[CodeIndexer] Combined similarity for ${section.sectionName} -> ${feature.name}: semantic=${semanticSimilarity.toFixed(3)}, keyword=${keywordSimilarity.toFixed(3)}, combined=${combinedSimilarity.toFixed(3)}`);
+            
             // Lower threshold to 0.2 to catch more matches (was 0.3)
-            if (similarity > 0.2) {
+            if (combinedSimilarity > 0.2) {
               const currentSim = featureSimilarities.get(feature.id) || 0;
-              featureSimilarities.set(feature.id, Math.max(currentSim, similarity));
+              featureSimilarities.set(feature.id, Math.max(currentSim, combinedSimilarity));
               
               // Save mapping to database for future reuse (if code unchanged)
               try {
@@ -1127,17 +1158,17 @@ export async function matchTextToFeaturesUsingCode(
                     id: createHash("md5").update(`${feature.id}:${section.id}`).digest("hex"),
                     featureId: feature.id,
                     codeSectionId: section.id,
-                    similarity,
+                    similarity: combinedSimilarity,
                     matchType,
                     searchQuery: text,
                   },
                   update: {
-                    similarity,
+                    similarity: combinedSimilarity,
                     matchType,
                     searchQuery: text,
                   },
                 });
-                log(`[CodeIndexer] Saved feature-code mapping to database: ${section.sectionName} -> ${feature.name} (similarity: ${similarity.toFixed(3)}, type: ${matchType})`);
+                log(`[CodeIndexer] Saved feature-code mapping: ${section.sectionName} -> ${feature.name} (semantic: ${semanticSimilarity.toFixed(3)}, keyword: ${keywordSimilarity.toFixed(3)}, combined: ${combinedSimilarity.toFixed(3)}, type: ${matchType})`);
               } catch (error) {
                 // Mapping might already exist, ignore
                 log(`[CodeIndexer] Mapping already exists or error: ${error instanceof Error ? error.message : String(error)}`);
@@ -1237,12 +1268,13 @@ export async function indexCodeForAllFeatures(
     return { indexed: 0, matched: 0, total: 0 };
   }
 
-  // Get all features
+  // Get all features with descriptions for better semantic search
   const allFeatures = await prisma.feature.findMany({
     orderBy: { id: "asc" },
     select: {
       id: true,
       name: true,
+      description: true,
       relatedKeywords: true,
     },
   });
@@ -1252,30 +1284,43 @@ export async function indexCodeForAllFeatures(
     return { indexed: 0, matched: 0, total: 0 };
   }
 
-  log(`[CodeIndexer] Starting optimized code indexing for ${allFeatures.length} features...`);
+  log(`[CodeIndexer] Starting optimized code indexing for ${allFeatures.length} features using LLM-based semantic search...`);
 
-  // OPTIMIZATION: Index codebase once with a broad query that covers all features
-  // Collect all unique keywords from all features
-  const allKeywords = new Set<string>();
+  // OPTIMIZATION: Index codebase once with a broad semantic query that covers all features
+  // Build a comprehensive search query using feature names, descriptions, and keywords
+  // This will be used with LLM embeddings for semantic code search
+  const queryParts: string[] = [];
   for (const feature of allFeatures) {
-    allKeywords.add(feature.name.toLowerCase());
+    // Add feature name (most important)
+    queryParts.push(feature.name);
+    
+    // Add description if available (provides semantic context for LLM)
+    if (feature.description && feature.description.length > 10) {
+      // Extract key phrases from description (first 50 words)
+      const descWords = feature.description.split(/\s+/).slice(0, 50).join(" ");
+      queryParts.push(descWords);
+    }
+    
+    // Add related keywords
     const keywords = Array.isArray(feature.relatedKeywords) ? feature.relatedKeywords : [];
     for (const keyword of keywords) {
-      if (keyword.length > 2) {
-        allKeywords.add(keyword.toLowerCase());
+      if (keyword.length > 2 && !queryParts.includes(keyword)) {
+        queryParts.push(keyword);
       }
     }
   }
 
-  // Create a broad search query (limit to reasonable size to avoid issues)
-  const broadQuery = Array.from(allKeywords).slice(0, 50).join(" ");
-  log(`[CodeIndexer] Indexing codebase with broad query covering all features (${allKeywords.size} unique keywords)...`);
-  log(`[CodeIndexer] Search query: "${broadQuery.substring(0, 200)}${broadQuery.length > 200 ? '...' : ''}"`);
+  // Create a broad semantic search query (LLM will use embeddings to find relevant code)
+  // Limit to reasonable size but include semantic context from descriptions
+  const broadQuery = queryParts.slice(0, 100).join(" ");
+  log(`[CodeIndexer] Indexing codebase with LLM-based semantic search covering all ${allFeatures.length} features...`);
+  log(`[CodeIndexer] Semantic search query (${queryParts.length} parts): "${broadQuery.substring(0, 200)}${broadQuery.length > 200 ? '...' : ''}"`);
+  log(`[CodeIndexer] This query will be converted to embeddings and used to find semantically relevant code files`);
 
   // Index code once with the broad query (no specific feature - just index the code)
-  // Use localRepoPath if available, otherwise repoUrl
+  // ALWAYS prefer localRepoPath over repoUrl (local > GitHub)
   const repoIdentifier = localRepoPath || repoUrl || "";
-  log(`[CodeIndexer] Using repository identifier: ${repoIdentifier}`);
+  log(`[CodeIndexer] Using repository identifier: ${repoIdentifier} (preferring local over GitHub)`);
   
   const codeContext = await searchAndIndexCode(
     broadQuery,

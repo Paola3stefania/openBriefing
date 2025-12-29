@@ -133,17 +133,24 @@ export async function fetchLocalCodeContext(
             computedEmbeddings++;
           }
           
-          // Compute cosine similarity (semantic similarity)
+          // Compute cosine similarity (semantic similarity from LLM embeddings)
           const semanticSimilarity = computeCosineSimilarity(queryEmbedding, fileEmbedding);
+          
+          // Compute keyword-based similarity (exact/partial matches)
+          const keywordSimilarity = computeKeywordSimilarity(searchQuery, relativePath, keyInfo);
           
           // Compute folder-based similarity boost
           // Files in folders that match the search query get a boost
           const folderSimilarity = computeFolderSimilarity(relativePath, searchQuery);
           
-          // Combine semantic and folder similarity
-          // Folder similarity adds up to 0.2 boost (20% of max score)
-          // This ensures files in relevant folders rank higher
-          const combinedSimilarity = Math.min(1.0, semanticSimilarity + (folderSimilarity * 0.2));
+          // Combine semantic, keyword, and folder similarity
+          // Weight: 60% semantic (LLM), 30% keywords, 10% folder
+          // This gives us both semantic understanding and exact matches
+          const combinedSimilarity = Math.min(1.0, 
+            (semanticSimilarity * 0.6) + 
+            (keywordSimilarity * 0.3) + 
+            (folderSimilarity * 0.1)
+          );
           
           fileSimilarities.push({
             filePath,
@@ -202,6 +209,52 @@ function computeCosineSimilarity(a: number[], b: number[]): number {
   
   const denominator = Math.sqrt(normA) * Math.sqrt(normB);
   return denominator === 0 ? 0 : dotProduct / denominator;
+}
+
+/**
+ * Compute keyword-based similarity
+ * Checks for exact and partial keyword matches in file path and content
+ * Returns a value between 0 and 1
+ */
+function computeKeywordSimilarity(searchQuery: string, filePath: string, content: string): number {
+  const searchLower = searchQuery.toLowerCase();
+  const pathLower = filePath.toLowerCase();
+  const contentLower = content.toLowerCase();
+  
+  // Extract keywords from search query (words longer than 2 chars)
+  const searchKeywords = searchLower
+    .split(/\s+/)
+    .filter(word => word.length > 2)
+    .map(word => word.replace(/[^a-z0-9]/g, "")); // Remove punctuation
+  
+  if (searchKeywords.length === 0) {
+    return 0;
+  }
+  
+  let matches = 0;
+  let exactMatches = 0;
+  
+  for (const keyword of searchKeywords) {
+    if (keyword.length > 2) {
+      // Check for exact matches (higher weight)
+      if (pathLower.includes(keyword) || contentLower.includes(keyword)) {
+        exactMatches++;
+        matches++;
+      } else {
+        // Check for partial matches (lower weight)
+        const partialMatch = searchKeywords.some(k => 
+          k.includes(keyword) || keyword.includes(k)
+        );
+        if (partialMatch) {
+          matches += 0.5;
+        }
+      }
+    }
+  }
+  
+  // Weight exact matches more heavily
+  const score = (exactMatches * 1.0 + (matches - exactMatches) * 0.5) / searchKeywords.length;
+  return Math.min(1.0, score);
 }
 
 /**

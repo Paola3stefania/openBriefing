@@ -1765,50 +1765,16 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         max_files?: number;
       };
 
-      // Helper function to find git repository root
-      const findGitRoot = async (startPath: string): Promise<string | null> => {
-        const { existsSync } = await import("fs");
-        const { resolve, dirname, join } = await import("path");
-        
-        let currentPath = resolve(startPath);
-        const root = resolve("/");
-        
-        while (currentPath !== root) {
-          const gitPath = join(currentPath, ".git");
-          if (existsSync(gitPath)) {
-            return currentPath;
-          }
-          currentPath = dirname(currentPath);
-        }
-        
-        return null;
-      };
-
       const { getConfig } = await import("../config/index.js");
       const config = getConfig();
       
-      // Auto-detect git repo root if no path provided
-      let detectedRepoPath: string | null = null;
-      if (!local_repo_path) {
-        try {
-          const process = await import("process");
-          detectedRepoPath = await findGitRoot(process.cwd());
-          if (detectedRepoPath) {
-            console.error(`[CodeIndexing] Auto-detected git repository: ${detectedRepoPath}`);
-          } else {
-            console.error(`[CodeIndexing] No git repository found in current directory or parent directories`);
-          }
-        } catch (error) {
-          console.error(`[CodeIndexing] Failed to auto-detect git repository: ${error instanceof Error ? error.message : String(error)}`);
-        }
-      }
-      
-      // Use provided parameters, then auto-detected, then fall back to config
+      // Get configured values (parameter > config)
+      // No auto-detection - must be explicitly configured
       const repositoryUrl = github_repo_url || config.pmIntegration?.github_repo_url;
-      const localRepoPath = local_repo_path || detectedRepoPath || config.pmIntegration?.local_repo_path;
+      const localRepoPath = local_repo_path || config.pmIntegration?.local_repo_path;
 
       if (!repositoryUrl && !localRepoPath) {
-        throw new Error("Either GITHUB_REPO_URL or LOCAL_REPO_PATH must be configured to index code for features. You can provide them as parameters, or the tool will auto-detect the current git repository, or set them in the MCP config.");
+        throw new Error("Either GITHUB_REPO_URL or LOCAL_REPO_PATH must be configured to index code for features. You can provide them as parameters or set them in the MCP config (.env file).");
       }
 
       const { indexCodeForAllFeatures } = await import("../storage/db/codeIndexer.js");
@@ -1819,8 +1785,8 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       let repoPathSource = "config";
       if (local_repo_path) {
         repoPathSource = "parameter";
-      } else if (detectedRepoPath) {
-        repoPathSource = "auto-detected";
+      } else if (config.pmIntegration?.local_repo_path) {
+        repoPathSource = "config";
       }
       
       if (localRepoPath) {
@@ -1856,7 +1822,6 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
                   github_repo_url: githubRepoUrl || "not configured",
                   local_repo_exists: localRepoPath ? (await import("fs")).existsSync(localRepoPath) : false,
                   repo_path_source: repoPathSource,
-                  auto_detected: detectedRepoPath ? true : false,
                 },
               }, null, 2),
             },
