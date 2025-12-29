@@ -1612,24 +1612,60 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             where: { channelId: actualChannelId },
           });
           
-          // Count unique threads (messages with threadId or standalone messages)
-          const threadCountResult = await prisma.discordMessage.groupBy({
-            by: ["threadId"],
-            where: { channelId: actualChannelId },
-            _count: { id: true },
-          });
+          // Early return if no messages
+          if (totalMessages === 0) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify({
+                    channelId: actualChannelId,
+                    messages: { total: 0, classified: 0, unclassified: 0, completeness: "100.0%" },
+                    threads: { total: 0, classified: 0, unclassified: 0, completeness: "100.0%" },
+                    overallCompleteness: "100.0%",
+                    status: "complete",
+                    dataSource: "database",
+                  }, null, 2),
+                },
+              ],
+            };
+          }
           
           // Count threads: messages with threadId count as 1 thread each, standalone messages (null threadId) count as individual threads
-          const threadsWithId = new Set(threadCountResult.filter(t => t.threadId).map(t => t.threadId!));
-          const standaloneMessages = threadCountResult.filter(t => !t.threadId).length;
-          totalThreads = threadsWithId.size + standaloneMessages;
+          // Run queries in parallel for better performance
+          const [distinctThreadIds, standaloneMessagesCount, allMessagesWithThreads] = await Promise.all([
+            // Get distinct non-null threadIds
+            prisma.discordMessage.findMany({
+              where: { 
+                channelId: actualChannelId,
+                threadId: { not: null }
+              },
+              select: { threadId: true },
+              distinct: ['threadId'],
+            }),
+            // Count standalone messages
+            prisma.discordMessage.count({
+              where: { 
+                channelId: actualChannelId,
+                threadId: null
+              }
+            }),
+            // Get all messages with thread info to map message IDs to threads
+            prisma.discordMessage.findMany({
+              where: { channelId: actualChannelId },
+              select: { id: true, threadId: true },
+            })
+          ]);
           
-          // Get all messages with thread info to map message IDs to threads
-          const allMessagesWithThreads = await prisma.discordMessage.findMany({
-            where: { channelId: actualChannelId },
-            select: { id: true, threadId: true },
-          });
+          totalThreads = distinctThreadIds.length + standaloneMessagesCount;
           const messageIdSet = new Set(allMessagesWithThreads.map(m => m.id));
+          
+          // Create a Map for efficient message ID to thread ID lookups
+          const messageToThreadMap = new Map<string, string>();
+          allMessagesWithThreads.forEach(msg => {
+            // Use threadId if exists, otherwise use message ID (standalone message)
+            messageToThreadMap.set(msg.id, msg.threadId || msg.id);
+          });
           
           // Get classification history and verify messages exist in database
           const classificationHistory = await storage.getClassificationHistory(actualChannelId);
@@ -1644,13 +1680,9 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             if (messageIdSet.has(messageId)) {
               classifiedMessageIds.add(messageId);
               
-              // Find the message to get its thread ID
-              const message = allMessagesWithThreads.find(m => m.id === messageId);
-              if (message) {
-                // Use threadId if exists, otherwise use message ID (standalone message)
-                const threadId = message.threadId || message.id;
-                classifiedThreadIds.add(threadId);
-              }
+              // Use thread_id from classification history if available, otherwise look it up
+              const threadId = entry.thread_id || messageToThreadMap.get(messageId) || messageId;
+              classifiedThreadIds.add(threadId);
             }
           });
           
@@ -5578,7 +5610,49 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
               const ungroupedThreads = await storage.getUngroupedThreads(actualChannelId);
               
               if (groups.length > 0 || ungroupedThreads.length > 0) {
-                // Convert database format to grouping file format
+                // Look up GitHub issue details (including state) for groups that have issue numbers
+                const issueNumbers = groups.map(g => g.github_issue_number).filter((num): num is number => !!num);
+                const issuesMap = new Map<number, { number: number; title: string; url: string; state: string; labels?: string[] }>();
+                
+                if (issueNumbers.length > 0) {
+                  const { prisma } = await import("../storage/db/prisma.js");
+                  const issues = await prisma.gitHubIssue.findMany({
+                    where: {
+                      issueNumber: { in: issueNumbers },
+                    },
+                    select: {
+                      issueNumber: true,
+                      issueTitle: true,
+                      issueUrl: true,
+                      issueState: true,
+                      issueLabels: true,
+                    },
+                  });
+                  
+                  for (const issue of issues) {
+                    issuesMap.set(issue.issueNumber, {
+                      number: issue.issueNumber,
+                      title: issue.issueTitle,
+                      url: issue.issueUrl,
+                      state: issue.issueState || "open", // Default to "open" if state is null
+                      labels: issue.issueLabels,
+                    });
+                  }
+                }
+                
+                // Convert database format to grouping file format (with github_issue object including state)
+                const groupsWithIssueDetails = groups.map(group => {
+                  const groupWithIssue: any = {
+                    ...group,
+                    github_issue: group.github_issue_number && issuesMap.has(group.github_issue_number)
+                      ? issuesMap.get(group.github_issue_number)
+                      : undefined,
+                  };
+                  // Remove github_issue_number as it's replaced by github_issue object
+                  delete groupWithIssue.github_issue_number;
+                  return groupWithIssue;
+                });
+                
                 groupingData = {
                   timestamp: new Date().toISOString(),
                   updated_at: new Date().toISOString(),
@@ -5594,7 +5668,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
                     total_groups_in_file: groups.length,
                     total_ungrouped_in_file: ungroupedThreads.length,
                   },
-                  groups: groups,
+                  groups: groupsWithIssueDetails,
                   ungrouped_threads: ungroupedThreads,
                 };
                 useDatabaseForStorage = true;
@@ -5700,8 +5774,62 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
               console.error(`[Feature Matching] Computing feature embeddings if needed...`);
               const embeddingResult = await computeAndSaveFeatureEmbeddings(process.env.OPENAI_API_KEY);
               console.error(`[Feature Matching] Feature embeddings ready: ${embeddingResult.computed} computed, ${embeddingResult.cached} cached, ${embeddingResult.total} total`);
+              
+              // Ensure code is indexed for features (checks hashes and skips if unchanged)
+              // This ensures code embeddings are available for matching groups to features
+              const repositoryUrl = config.pmIntegration?.github_repo_url;
+              const localRepoPath = config.pmIntegration?.local_repo_path;
+              
+              if (repositoryUrl || localRepoPath) {
+                try {
+                  // First check if code is already indexed for this repository
+                  const { prisma } = await import("../storage/db/prisma.js");
+                  const repoIdentifier = localRepoPath || repositoryUrl || "";
+                  const existingCodeSearch = await prisma.codeSearch.findFirst({
+                    where: {
+                      repositoryUrl: repoIdentifier,
+                    },
+                    include: {
+                      codeFiles: {
+                        include: {
+                          codeSections: {
+                            include: {
+                              featureMappings: true,
+                            },
+                          },
+                        },
+                      },
+                    },
+                    orderBy: {
+                      updatedAt: "desc",
+                    },
+                  });
+                  
+                  if (existingCodeSearch && existingCodeSearch.codeFiles.length > 0) {
+                    console.error(`[Feature Matching] Code already indexed for repository (${existingCodeSearch.codeFiles.length} files, ${existingCodeSearch.codeFiles.reduce((sum, f) => sum + f.codeSections.length, 0)} sections) - skipping indexing`);
+                  } else {
+                    // Code not indexed yet - index it
+                    const { indexCodeForAllFeatures } = await import("../storage/db/codeIndexer.js");
+                    console.error(`[Feature Matching] Code not yet indexed - indexing code for features (will check hashes and skip unchanged files)...`);
+                    const codeIndexResult = await indexCodeForAllFeatures(
+                      repositoryUrl || undefined,
+                      false, // force=false: only index if needed, check hashes to skip unchanged code
+                      undefined, // no progress callback
+                      localRepoPath,
+                      100, // chunk size
+                      null // maxFiles: process all files
+                    );
+                    console.error(`[Feature Matching] Code indexing: ${codeIndexResult.indexed} indexed, ${codeIndexResult.matched} matched, ${codeIndexResult.total} total features`);
+                  }
+                } catch (codeIndexError) {
+                  // If code indexing fails, continue anyway - matchTextToFeaturesUsingCode will index on-demand
+                  console.error(`[Feature Matching] Warning: Failed to check/index code for features (will index on-demand):`, codeIndexError);
+                }
+              } else {
+                console.error(`[Feature Matching] No repository configured - code indexing will be skipped (code matching will be limited)`);
+              }
             } else {
-              console.error(`[Feature Matching] Database not available - feature embeddings will be computed on-demand`);
+              console.error(`[Feature Matching] Database not available - feature embeddings and code indexing will be computed on-demand`);
             }
           } catch (embeddingError) {
             // If embedding computation fails, continue anyway - featureMapper will compute on-demand

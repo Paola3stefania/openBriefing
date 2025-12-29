@@ -242,7 +242,9 @@ export async function exportGroupingToPMTool(
     const groupsWithFeatures = groupingData.groups.filter(group => {
       // If group has a GitHub issue, only export if it's open
       if (group.github_issue) {
-        return group.github_issue.state === "open";
+        // State should be "open" or "closed" - default to "open" if missing (conservative approach)
+        const state = group.github_issue.state?.toLowerCase() || "open";
+        return state === "open";
       }
       // If no GitHub issue, it's an unresolved Discord thread - export it
       return true;

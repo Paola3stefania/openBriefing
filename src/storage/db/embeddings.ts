@@ -1249,6 +1249,32 @@ export async function getCodeSectionEmbedding(
 }
 
 /**
+ * Batch get code section embeddings (avoids N+1 queries)
+ * @param sectionIds Array of section IDs to fetch
+ * @returns Map of sectionId -> embedding (only includes valid embeddings)
+ */
+export async function getCodeSectionEmbeddingsBatch(
+  sectionIds: string[]
+): Promise<Map<string, Embedding>> {
+  if (sectionIds.length === 0) return new Map();
+
+  const model = getEmbeddingModel();
+  const results = await prisma.codeSectionEmbedding.findMany({
+    where: {
+      codeSectionId: { in: sectionIds },
+      model: model, // Only get embeddings with correct model
+    },
+    select: { codeSectionId: true, embedding: true, contentHash: true },
+  });
+
+  const embeddings = new Map<string, Embedding>();
+  for (const result of results) {
+    embeddings.set(result.codeSectionId, result.embedding as Embedding);
+  }
+  return embeddings;
+}
+
+/**
  * Save code file embedding
  */
 export async function saveCodeFileEmbedding(

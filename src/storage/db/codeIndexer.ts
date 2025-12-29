@@ -1059,12 +1059,21 @@ export async function matchTextToFeaturesUsingCode(
   let codeContext = "";
   
   try {
-    // Search for code related to this text
+    // OPTIMIZATION: First check if code is already indexed for features
+    // This avoids re-indexing code multiple times when matching groups to features
+    // Look for any existing code search for this repository that has indexed code
+    const { getConfig } = await import("../../config/index.js");
+    const config = getConfig();
+    const repoIdentifier = config.pmIntegration?.local_repo_path || repositoryUrl || "";
+    
+    // Define searchId and searchQuery for use when indexing new code
+    // Use repoIdentifier consistently (local path preferred over GitHub URL)
     const searchQuery = text;
     const searchId = createHash("md5")
-      .update(`${searchQuery}:${repositoryUrl}`)
+      .update(`${searchQuery}:${repoIdentifier}`)
       .digest("hex");
-
+    
+    // First, check if code is already indexed for this specific text query
     let codeSearch = await prisma.codeSearch.findUnique({
       where: { id: searchId },
       include: {
@@ -1083,16 +1092,50 @@ export async function matchTextToFeaturesUsingCode(
         },
       },
     });
+    
+    // If not found, look for ANY existing code search for this repository
+    // This would be from indexCodeForAllFeatures - reuse it to avoid re-indexing
+    if (!codeSearch || codeSearch.codeFiles.length === 0) {
+      const existingSearches = await prisma.codeSearch.findMany({
+        where: {
+          repositoryUrl: repoIdentifier,
+        },
+        include: {
+          codeFiles: {
+            include: {
+              codeSections: {
+                include: {
+                  featureMappings: {
+                    include: {
+                      feature: true,
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+        orderBy: {
+          updatedAt: "desc",
+        },
+        take: 1, // Get the most recent one
+      });
+      
+      if (existingSearches.length > 0 && existingSearches[0].codeFiles.length > 0) {
+        codeSearch = existingSearches[0];
+        log(`[CodeIndexer] Reusing existing code indexed for repository (${codeSearch.codeFiles.length} files from search "${codeSearch.searchQuery?.substring(0, 50)}...")`);
+      }
+    } else {
+      log(`[CodeIndexer] Found existing code search for this query (${codeSearch.codeFiles.length} files)`);
+    }
 
     // If search doesn't exist, search and index
     if (!codeSearch || codeSearch.codeFiles.length === 0) {
-      log(`[CodeIndexer] Searching code for: "${text.substring(0, 100)}..."...`);
+      log(`[CodeIndexer] Code not yet indexed - searching code for: "${text.substring(0, 100)}..."...`);
       
       let rawCodeContext = "";
       
       // First, try local repository if configured
-      const { getConfig } = await import("../../config/index.js");
-      const config = getConfig();
       const localRepoPath = config.pmIntegration?.local_repo_path;
       
       if (localRepoPath) {
@@ -1124,7 +1167,7 @@ export async function matchTextToFeaturesUsingCode(
           rawCodeContext,
           searchId,
           searchQuery,
-          repositoryUrl,
+          repoIdentifier, // Use repoIdentifier consistently (local path preferred)
           100 // Default chunk size
         );
         
@@ -1160,8 +1203,8 @@ export async function matchTextToFeaturesUsingCode(
     // Match code sections (functions) to features using saved embeddings
     // First, check database for existing mappings (if code unchanged, reuse them)
     // Then, use embeddings for semantic similarity matching
-    const { getCodeSectionEmbedding, getFeatureEmbedding } = await import("./embeddings.js");
-    
+    const { getCodeSectionEmbeddingsBatch, getFeatureEmbedding } = await import("./embeddings.js");
+
     // Pre-load all feature embeddings for efficiency
     const featureEmbeddings = new Map<string, number[]>();
     for (const feature of features) {
@@ -1171,18 +1214,36 @@ export async function matchTextToFeaturesUsingCode(
       }
     }
     log(`[CodeIndexer] Loaded ${featureEmbeddings.size} feature embeddings from database`);
-    
-    // Match each code section (function) to features
+
+    // Pre-load all code section embeddings in a single batch query (avoids N+1)
+    const allSectionIds: string[] = [];
     for (const file of codeSearch.codeFiles) {
       for (const section of file.codeSections) {
+        if (section.sectionType === "function" || section.sectionType === "class" || section.sectionType === "interface") {
+          allSectionIds.push(section.id);
+        }
+      }
+    }
+    const sectionEmbeddingsMap = await getCodeSectionEmbeddingsBatch(allSectionIds);
+    log(`[CodeIndexer] Loaded ${sectionEmbeddingsMap.size} code section embeddings from database`);
+
+    // Match each code section (function) to features
+    let totalSections = 0;
+    let processedSections = 0;
+    let skippedSections = 0;
+
+    for (const file of codeSearch.codeFiles) {
+      for (const section of file.codeSections) {
+        totalSections++;
         // Focus on function-level sections (most relevant for feature matching)
         if (section.sectionType !== "function" && section.sectionType !== "class" && section.sectionType !== "interface") {
+          skippedSections++;
           continue; // Skip non-function sections for now
         }
-        
+        processedSections++;
+
         // Check existing mappings first (if code unchanged, reuse saved mappings)
         if (section.featureMappings && section.featureMappings.length > 0) {
-          log(`[CodeIndexer] Using ${section.featureMappings.length} existing mappings for ${section.sectionType} ${section.sectionName}`);
           for (const mapping of section.featureMappings) {
             const currentSim = featureSimilarities.get(mapping.featureId) || 0;
             // Take max similarity (best match)
@@ -1192,11 +1253,12 @@ export async function matchTextToFeaturesUsingCode(
             );
           }
         } else {
-          // No existing mappings - compute similarity using embeddings from database
-          // Only reuse if content hasn't changed (check contentHash)
-          log(`[CodeIndexer] Computing new mappings for ${section.sectionType} ${section.sectionName} using embeddings`);
-          const sectionContentHash = createHash("md5").update(section.sectionContent).digest("hex");
-          const sectionEmbedding = await getCodeSectionEmbedding(section.id, sectionContentHash);
+          // No existing mappings - compute similarity using pre-loaded embeddings
+          const sectionEmbedding = sectionEmbeddingsMap.get(section.id) || null;
+          
+          if (!sectionEmbedding) {
+            log(`[CodeIndexer] WARNING: No embedding found for ${section.sectionType} ${section.sectionName} (id: ${section.id}). Will rely on keyword matching only.`);
+          }
           
           // Match to all features using BOTH semantic and keyword matching
           for (const feature of features) {
@@ -1271,7 +1333,16 @@ export async function matchTextToFeaturesUsingCode(
       }
     }
 
+    log(`[CodeIndexer] Processed ${processedSections} code sections (${skippedSections} skipped, ${totalSections} total)`);
     log(`[CodeIndexer] Code maps to ${featureSimilarities.size} features`);
+    
+    if (featureSimilarities.size === 0 && processedSections > 0) {
+      log(`[CodeIndexer] WARNING: Processed ${processedSections} sections but found 0 feature matches. This may indicate:`);
+      log(`[CodeIndexer]   - Code section embeddings not computed yet`);
+      log(`[CodeIndexer]   - All similarity scores below 0.2 threshold`);
+      log(`[CodeIndexer]   - Feature embeddings missing`);
+    }
+    
     return { codeContext, featureSimilarities };
   } catch (error) {
     log(`[CodeIndexer] Error matching text to features using code: ${error instanceof Error ? error.message : String(error)}`);

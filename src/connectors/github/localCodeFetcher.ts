@@ -70,8 +70,8 @@ export async function fetchLocalCodeContext(
     const queryEmbedding = await createEmbedding(searchQuery, apiKey);
     
     // Check database for existing file embeddings to reuse
-    const { PrismaClient } = await import("@prisma/client");
-    const prisma = new PrismaClient();
+    // Use shared Prisma instance to avoid connection pool leaks
+    const { prisma } = await import("../../storage/db/prisma.js");
     const { getCodeFileEmbedding } = await import("../../storage/db/embeddings.js");
     const { createHash } = await import("crypto");
     

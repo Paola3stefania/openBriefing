@@ -233,13 +233,36 @@ export async function mapGroupsToFeatures(
     log(`[FeatureMapper] All ${features.length} features have embeddings - semantic similarity matching available`);
   }
 
-  // Step 2: Map each group to features
-  const mappedGroups: GroupingGroup[] = [];
-  
-  // Get repository URL for code indexing
+  // Step 2: Pre-load code search and feature mappings ONCE (not per group)
+  // This avoids reloading the same code search for every group
+  let sharedCodeToFeatureMappings: Map<string, number> = new Map();
   const { getConfig } = await import("../config/index.js");
   const config = getConfig();
   const repositoryUrl = config.pmIntegration?.github_repo_url;
+  
+  // Load code search once if repository is configured
+  if (repositoryUrl && groups.length > 0) {
+    try {
+      const { matchTextToFeaturesUsingCode } = await import("../storage/db/codeIndexer.js");
+      // Use a generic query to load the code search once
+      // Since code is already indexed, this will reuse existing indexed code
+      const firstGroupText = groups[0].suggested_title || groups[0].github_issue?.title || "";
+      if (firstGroupText) {
+        const codeResult = await matchTextToFeaturesUsingCode(
+          firstGroupText, // Just to trigger loading - will reuse existing code
+          repositoryUrl,
+          features
+        );
+        sharedCodeToFeatureMappings = codeResult.featureSimilarities;
+        log(`[FeatureMapper] Pre-loaded code search: ${sharedCodeToFeatureMappings.size} feature mappings available for reuse`);
+      }
+    } catch (error) {
+      log(`[FeatureMapper] Failed to pre-load code search (will load per-group): ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  
+  // Step 3: Map each group to features
+  const mappedGroups: GroupingGroup[] = [];
   
   for (const group of groups) {
     // Build group text from title, GitHub issue, and thread titles
@@ -279,35 +302,12 @@ export async function mapGroupsToFeatures(
       continue;
     }
     
-    // NEW: Search and index code related to this group's topic
-    // This helps us understand which features the code relates to
-    let groupCodeContext = "";
-    let codeToFeatureMappings: Map<string, number> = new Map(); // featureId -> similarity
+    // Reuse pre-loaded code-to-feature mappings (loaded once before the loop)
+    // This avoids calling matchTextToFeaturesUsingCode for every group
+    const codeToFeatureMappings = sharedCodeToFeatureMappings;
     
-    if (repositoryUrl) {
-      try {
-        const { matchTextToFeaturesUsingCode } = await import("../storage/db/codeIndexer.js");
-        const result = await matchTextToFeaturesUsingCode(
-          groupText,
-          repositoryUrl,
-          features
-        );
-        groupCodeContext = result.codeContext;
-        codeToFeatureMappings = result.featureSimilarities;
-        
-        if (groupCodeContext) {
-          log(`[FeatureMapper] Found code context for group "${group.id}" (${groupCodeContext.length} characters)`);
-          log(`[FeatureMapper] Code maps to ${codeToFeatureMappings.size} features using function-level embeddings`);
-        }
-      } catch (error) {
-        log(`[FeatureMapper] Failed to index code for group ${group.id}: ${error instanceof Error ? error.message : String(error)}`);
-      }
-    }
-    
-    // Compute group embedding (include code context if available)
-    const groupTextWithCode = groupCodeContext 
-      ? `${groupText} ${groupCodeContext.substring(0, 1000)}` // Include code context in embedding
-      : groupText;
+    // Compute group embedding (code context is handled via feature mappings, not included in text)
+    const groupTextWithCode = groupText;
     
     // Try to get group embedding from database first (lazy loading)
     // Only reuse if content hasn't changed (check contentHash)
@@ -655,6 +655,32 @@ export async function mapUngroupedThreadsToFeatures(
   const { hasDatabaseConfig, getStorage } = await import("../storage/factory.js");
   const useDatabase = hasDatabaseConfig() && await getStorage().isAvailable();
 
+  // Step 2.5: Pre-load code-to-feature mappings ONCE (not per thread)
+  // This avoids calling matchTextToFeaturesUsingCode for every thread (causing excessive logging)
+  let sharedCodeToFeatureMappings: Map<string, number> = new Map();
+  const { getConfig } = await import("../config/index.js");
+  const config = getConfig();
+  const repositoryUrl = config.pmIntegration?.github_repo_url;
+
+  if (repositoryUrl && ungroupedThreads.length > 0) {
+    try {
+      const { matchTextToFeaturesUsingCode } = await import("../storage/db/codeIndexer.js");
+      // Use a broad query to load the code search once
+      const firstThreadText = ungroupedThreads[0]?.thread_name || "";
+      if (firstThreadText) {
+        const codeResult = await matchTextToFeaturesUsingCode(
+          firstThreadText,
+          repositoryUrl,
+          features
+        );
+        sharedCodeToFeatureMappings = codeResult.featureSimilarities;
+        log(`[FeatureMapper] Pre-loaded code mappings for ungrouped threads: ${sharedCodeToFeatureMappings.size} features`);
+      }
+    } catch (error) {
+      log(`[FeatureMapper] Failed to pre-load code mappings for threads: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   // Step 3: Map ungrouped threads to features in batches of 100
   const mappedThreads: Array<{
     thread_id: string;
@@ -801,41 +827,19 @@ export async function mapUngroupedThreadsToFeatures(
       // Find matching features using thread embedding + code matching
       // Even if embedding failed, we can still try code-based matching
       const affectedFeatures: Array<{ id: string; similarity: number; codeBased?: boolean }> = [];
-      
-      // Try code-based matching if repository URL is available
-      // This works even if embedding computation failed
-      let codeToFeatureMappings = new Map<string, number>();
-      const { getConfig } = await import("../config/index.js");
-      const config = getConfig();
-      const repositoryUrl = config.pmIntegration?.github_repo_url;
-      
-      if (repositoryUrl && data.threadText) {
-        try {
-          const { matchTextToFeaturesUsingCode } = await import("../storage/db/codeIndexer.js");
-          const codeResult = await matchTextToFeaturesUsingCode(
-            data.threadText,
-            repositoryUrl,
-            features
-          );
-          codeToFeatureMappings = codeResult.featureSimilarities;
-          if (codeToFeatureMappings.size > 0) {
-            log(`[FeatureMapper] Thread ${data.thread.thread_id} code maps to ${codeToFeatureMappings.size} features`);
-          }
-        } catch (error) {
-          log(`[FeatureMapper] Failed to match code for thread ${data.thread.thread_id}: ${error instanceof Error ? error.message : String(error)}`);
-        }
-      }
-      
+
+      // Reuse pre-loaded code-to-feature mappings (loaded once before the loop)
+      // This avoids calling matchTextToFeaturesUsingCode for every thread
+      const codeToFeatureMappings = sharedCodeToFeatureMappings;
+
       for (const feature of features) {
         const featureEmb = featureEmbeddings.get(feature.id);
         let similarity = 0;
         let codeBased = false;
-        
+
         // Try semantic similarity if embeddings are available
         if (data.embedding && featureEmb) {
           similarity = cosineSimilarity(data.embedding, featureEmb);
-        } else if (!data.embedding) {
-          log(`[FeatureMapper] Thread ${data.thread.thread_id}: No embedding available, will try code-based matching only`);
         }
         
         // Use code-based matching (works even without embeddings)
@@ -938,6 +942,32 @@ export async function mapUngroupedIssuesToFeatures(
   const { getIssueEmbedding, saveIssueEmbedding } = await import("../storage/db/embeddings.js");
   const { hasDatabaseConfig, getStorage } = await import("../storage/factory.js");
   const useDatabase = hasDatabaseConfig() && await getStorage().isAvailable();
+
+  // Step 2.5: Pre-load code-to-feature mappings ONCE (not per issue)
+  // This avoids calling matchTextToFeaturesUsingCode for every issue (causing excessive logging)
+  let sharedCodeToFeatureMappings: Map<string, number> = new Map();
+  const { getConfig } = await import("../config/index.js");
+  const config = getConfig();
+  const repositoryUrl = config.pmIntegration?.github_repo_url;
+
+  if (repositoryUrl && ungroupedIssues.length > 0) {
+    try {
+      const { matchTextToFeaturesUsingCode } = await import("../storage/db/codeIndexer.js");
+      // Use a broad query to load the code search once
+      const firstIssueText = ungroupedIssues[0]?.issue_title || "";
+      if (firstIssueText) {
+        const codeResult = await matchTextToFeaturesUsingCode(
+          firstIssueText,
+          repositoryUrl,
+          features
+        );
+        sharedCodeToFeatureMappings = codeResult.featureSimilarities;
+        log(`[FeatureMapper] Pre-loaded code mappings for ungrouped issues: ${sharedCodeToFeatureMappings.size} features`);
+      }
+    } catch (error) {
+      log(`[FeatureMapper] Failed to pre-load code mappings for issues: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
 
   // Step 3: Map ungrouped issues to features in batches of 100
   const mappedIssues: Array<{
@@ -1086,31 +1116,11 @@ export async function mapUngroupedIssuesToFeatures(
       // Find matching features using issue embedding + code matching
       // Even if embedding failed, we can still try code-based matching
       const affectedFeatures: Array<{ id: string; similarity: number; codeBased?: boolean }> = [];
-      
-      // Try code-based matching if repository URL is available
-      // This works even if embedding computation failed
-      let codeToFeatureMappings = new Map<string, number>();
-      const { getConfig } = await import("../config/index.js");
-      const config = getConfig();
-      const repositoryUrl = config.pmIntegration?.github_repo_url;
-      
-      if (repositoryUrl && data.issueText) {
-        try {
-          const { matchTextToFeaturesUsingCode } = await import("../storage/db/codeIndexer.js");
-          const codeResult = await matchTextToFeaturesUsingCode(
-            data.issueText,
-            repositoryUrl,
-            features
-          );
-          codeToFeatureMappings = codeResult.featureSimilarities;
-          if (codeToFeatureMappings.size > 0) {
-            log(`[FeatureMapper] Issue ${data.issue.issue_number} code maps to ${codeToFeatureMappings.size} features`);
-          }
-        } catch (error) {
-          log(`[FeatureMapper] Failed to match code for issue ${data.issue.issue_number}: ${error instanceof Error ? error.message : String(error)}`);
-        }
-      }
-      
+
+      // Reuse pre-loaded code-to-feature mappings (loaded once before the loop)
+      // This avoids calling matchTextToFeaturesUsingCode for every issue
+      const codeToFeatureMappings = sharedCodeToFeatureMappings;
+
       for (const feature of features) {
         const featureEmb = featureEmbeddings.get(feature.id);
         let similarity = 0;

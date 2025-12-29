@@ -72,21 +72,32 @@ function hashIssueContent(issue: GitHubIssue): string {
   return createHash("md5").update(content).digest("hex");
 }
 
-// Cache whether database is available
+// Cache whether database is available (with expiration to allow retries)
 let dbAvailable: boolean | null = null;
+let dbAvailableCheckTime = 0;
+const DB_CHECK_INTERVAL_MS = 30000; // Re-check every 30 seconds if failed
 
 /**
  * Check if database is available for storing embeddings
+ * Retries periodically if previously failed (database might become available later)
  */
 async function isDatabaseAvailable(): Promise<boolean> {
+  const now = Date.now();
+  // If we have a cached result and it's still fresh, return it
+  // Always cache positive results, but expire negative results to allow retry
   if (dbAvailable !== null) {
-    return dbAvailable;
+    if (dbAvailable === true || (now - dbAvailableCheckTime) < DB_CHECK_INTERVAL_MS) {
+      return dbAvailable;
+    }
   }
-  
+
   try {
     dbAvailable = await checkPrismaConnection();
+    dbAvailableCheckTime = now;
     return dbAvailable;
   } catch {
+    // Don't permanently cache failure - allow retries
+    dbAvailableCheckTime = now;
     dbAvailable = false;
     return false;
   }
