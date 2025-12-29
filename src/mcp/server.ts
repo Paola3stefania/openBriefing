@@ -1669,9 +1669,10 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     case "index_codebase": {
-      const { search_query, force = false } = args as {
+      const { search_query, force = false, chunk_size } = args as {
         search_query: string;
         force?: boolean;
+        chunk_size?: number;
       };
 
       if (!search_query || search_query.trim().length === 0) {
@@ -1698,12 +1699,14 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Search and index code (this will use cache if not forcing)
         // Use repositoryUrl if available, otherwise use localRepoPath as fallback identifier
         const repoIdentifier = repositoryUrl || localRepoPath || "";
+        const chunkSize = chunk_size ?? 100;
         const codeContext = await searchAndIndexCode(
           search_query,
           repoIdentifier,
           "", // No specific feature ID for manual indexing
           search_query,
-          force
+          force,
+          chunkSize
         );
 
         if (codeContext) {
@@ -1740,10 +1743,11 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     case "index_code_for_features": {
-      const { force = false, local_repo_path, github_repo_url } = args as {
+      const { force = false, local_repo_path, github_repo_url, chunk_size } = args as {
         force?: boolean;
         local_repo_path?: string;
         github_repo_url?: string;
+        chunk_size?: number;
       };
 
       // Helper function to find git repository root
@@ -1815,7 +1819,8 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
       
       try {
-        const result = await indexCodeForAllFeatures(repositoryUrl || undefined, force, undefined, localRepoPath);
+        const chunkSize = chunk_size ?? 100;
+        const result = await indexCodeForAllFeatures(repositoryUrl || undefined, force, undefined, localRepoPath, chunkSize);
         
         // Get diagnostic info (use the same variables we already have)
         const githubRepoUrl = repositoryUrl;

@@ -125,13 +125,15 @@ function buildSearchQuery(featureName: string, keywords: string[]): string {
 /**
  * Search for code and index it
  * This is called when we don't have code indexed for a feature yet
+ * @param chunkSize Number of files to process per chunk (default: 100)
  */
 export async function searchAndIndexCode(
   searchQuery: string,
   repositoryUrl: string,
   featureId: string,
   featureName: string,
-  force: boolean = false
+  force: boolean = false,
+  chunkSize: number = 100
 ): Promise<string> {
   try {
     // Check if we've searched for this query before
@@ -213,7 +215,8 @@ export async function searchAndIndexCode(
       rawCodeContext,
       searchId,
       searchQuery,
-      repositoryUrl
+      repositoryUrl,
+      100 // Default chunk size
     );
 
     // Map to feature (if featureId provided)
@@ -231,27 +234,30 @@ export async function searchAndIndexCode(
 
 /**
  * Parse code context and store in database
+ * OPTIMIZED: Uses batch processing for embeddings and is resumable
+ * @param chunkSize Number of files to process per chunk (default: 100)
  */
 async function parseAndIndexCode(
   codeContext: string,
   searchId: string,
   searchQuery: string,
-  repositoryUrl: string
+  repositoryUrl: string,
+  chunkSize: number = 100
 ): Promise<Array<{ id: string; codeSections: any[] }>> {
-    // Create or get code search
-    const codeSearch = await prisma.codeSearch.upsert({
-      where: { id: searchId },
-      create: {
-        id: searchId,
-        searchQuery,
-        repositoryUrl,
-        searchType: "semantic",
-      },
-      update: {
-        updatedAt: new Date(),
-      },
-    });
-    log(`[CodeIndexer] Saved code search to database: "${searchQuery}" (id: ${searchId})`);
+  // Create or get code search
+  const codeSearch = await prisma.codeSearch.upsert({
+    where: { id: searchId },
+    create: {
+      id: searchId,
+      searchQuery,
+      repositoryUrl,
+      searchType: "semantic",
+    },
+    update: {
+      updatedAt: new Date(),
+    },
+  });
+  log(`[CodeIndexer] Saved code search to database: "${searchQuery}" (id: ${searchId})`);
 
   // Parse code context (format: "File: path\ncontent...")
   const fileBlocks = codeContext.split(/\n\n(?=File:)/);
@@ -262,299 +268,409 @@ async function parseAndIndexCode(
   let skippedSections = 0;
   let processedSections = 0;
 
-  for (const block of fileBlocks) {
-    const lines = block.split("\n");
-    if (lines.length < 2 || !lines[0].startsWith("File: ")) continue;
+  // Collect all files and sections that need embeddings for batch processing
+  interface FileEmbeddingTask {
+    fileId: string;
+    filePath: string;
+    fileText: string;
+    contentHash: string;
+  }
 
-    let filePath = lines[0].replace("File: ", "").trim();
-    
-    // Normalize path: remove leading slashes, normalize separators, ensure it's relative
-    filePath = filePath.replace(/^\/+/, ""); // Remove leading slashes
-    filePath = filePath.replace(/\\/g, "/"); // Normalize Windows separators to forward slashes
-    filePath = filePath.replace(/\/+/g, "/"); // Remove duplicate slashes
-    
-    const fileName = filePath.split("/").pop() || filePath;
-    const fileContent = lines.slice(1).join("\n");
-    const contentHash = createHash("md5").update(fileContent).digest("hex");
-    const language = getLanguageFromPath(filePath);
-    
-    log(`[CodeIndexer] Processing file path: "${filePath}" (normalized relative path, will be stored in database)`);
+  interface SectionEmbeddingTask {
+    sectionId: string;
+    sectionText: string;
+    contentHash: string;
+    fileId: string;
+  }
 
-    // Check if file already indexed with embedding
-    const existingFile = await prisma.codeFile.findFirst({
-      where: {
-        codeSearchId: searchId,
-        filePath,
-      },
-      include: { 
-        embeddings: true,
-        codeSections: {
-          include: { embedding: true },
-        },
-      },
-    });
+  const fileEmbeddingTasks: FileEmbeddingTask[] = [];
+  const sectionEmbeddingTasks: SectionEmbeddingTask[] = [];
+  const fileDataMap = new Map<string, {
+    fileId: string;
+    filePath: string;
+    fileName: string;
+    fileContent: string;
+    contentHash: string;
+    language: string | null;
+    sections: Array<{
+      type: string;
+      name: string;
+      content: string;
+      startLine: number;
+      endLine: number;
+    }>;
+  }>();
 
-    let codeFile;
-    if (existingFile && existingFile.contentHash === contentHash) {
-      // File unchanged - check if fully processed (has embedding and all sections have embeddings)
-      const hasFileEmbedding = !!existingFile.embeddings;
-      const sectionsNeedingEmbeddings = existingFile.codeSections.filter(s => !s.embedding);
+  // PHASE 1: Parse all files, save to DB, and collect embedding tasks
+  // Process in chunks for resumability
+  const totalFiles = fileBlocks.length;
+  log(`[CodeIndexer] Phase 1: Parsing ${totalFiles} files in chunks of ${chunkSize}...`);
+  
+  // Process files in chunks
+  for (let chunkStart = 0; chunkStart < fileBlocks.length; chunkStart += chunkSize) {
+    const chunkEnd = Math.min(chunkStart + chunkSize, fileBlocks.length);
+    const chunk = fileBlocks.slice(chunkStart, chunkEnd);
+    const chunkNum = Math.floor(chunkStart / chunkSize) + 1;
+    const totalChunks = Math.ceil(fileBlocks.length / chunkSize);
+    
+    log(`[CodeIndexer] Processing chunk ${chunkNum}/${totalChunks} (files ${chunkStart + 1}-${chunkEnd} of ${totalFiles})...`);
+    
+    // Clear tasks for this chunk
+    const chunkFileTasks: FileEmbeddingTask[] = [];
+    const chunkSectionTasks: SectionEmbeddingTask[] = [];
+    const chunkFileData: Array<{
+      fileId: string;
+      filePath: string;
+      fileName: string;
+      fileContent: string;
+      contentHash: string;
+      language: string | null;
+      existingFile?: any;
+      sections: Array<{
+        type: string;
+        name: string;
+        content: string;
+        startLine: number;
+        endLine: number;
+      }>;
+    }> = [];
+    
+    // PHASE 1.1: Parse files in this chunk and collect embedding tasks
+    for (const block of chunk) {
+      const lines = block.split("\n");
+      if (lines.length < 2 || !lines[0].startsWith("File: ")) continue;
+
+      let filePath = lines[0].replace("File: ", "").trim();
       
-      if (hasFileEmbedding && sectionsNeedingEmbeddings.length === 0) {
-        // File fully processed - skip it
-        log(`[CodeIndexer] Skipping ${filePath} - already indexed and embedded (${existingFile.codeSections.length} sections)`);
-        skippedFiles++;
-        skippedSections += existingFile.codeSections.length;
-        codeFile = existingFile;
-        codeFiles.push(codeFile as any);
-        continue;
-      }
+      // Normalize path: remove leading slashes, normalize separators, ensure it's relative
+      filePath = filePath.replace(/^\/+/, ""); // Remove leading slashes
+      filePath = filePath.replace(/\\/g, "/"); // Normalize Windows separators to forward slashes
+      filePath = filePath.replace(/\/+/g, "/"); // Remove duplicate slashes
       
-      // File exists but missing file embedding or some sections missing embeddings
-      if (!hasFileEmbedding) {
-        log(`[CodeIndexer] File ${filePath} exists but missing file embedding, computing now...`);
-        try {
-          const apiKey = process.env.OPENAI_API_KEY;
-          if (apiKey) {
-            const { createEmbedding } = await import("../../core/classify/semantic.js");
-            const { saveCodeFileEmbedding } = await import("./embeddings.js");
-            
-            // Build text for embedding: file path and content
-            const fileText = `File: ${filePath}\n${fileContent}`;
-            const embedding = await createEmbedding(fileText, apiKey);
-            
-            await saveCodeFileEmbedding(existingFile.id, embedding, contentHash);
-            log(`[CodeIndexer] Saved file embedding to database for ${filePath} (id: ${existingFile.id})`);
-          }
-        } catch (embeddingError) {
-          log(`[CodeIndexer] Failed to compute file embedding for ${filePath}: ${embeddingError instanceof Error ? embeddingError.message : String(embeddingError)}`);
-        }
-      }
+      const fileName = filePath.split("/").pop() || filePath;
+      const fileContent = lines.slice(1).join("\n");
+      const contentHash = createHash("md5").update(fileContent).digest("hex");
+      const language = getLanguageFromPath(filePath);
       
-      // Process sections that are missing embeddings
-      if (sectionsNeedingEmbeddings.length > 0) {
-        log(`[CodeIndexer] File ${filePath} has ${sectionsNeedingEmbeddings.length} sections missing embeddings, processing them...`);
-        for (const section of sectionsNeedingEmbeddings) {
-          try {
-            const apiKey = process.env.OPENAI_API_KEY;
-            if (apiKey) {
-              const { createEmbedding } = await import("../../core/classify/semantic.js");
-              const { saveCodeSectionEmbedding } = await import("./embeddings.js");
-              
-              // Build text for embedding: section type, name, and content
-              const sectionText = `${section.sectionType}: ${section.sectionName}\n${section.sectionContent}`;
-              const embedding = await createEmbedding(sectionText, apiKey);
-              
-              await saveCodeSectionEmbedding(section.id, embedding, section.contentHash);
-              processedSections++;
-              log(`[CodeIndexer] Saved section embedding to database for ${section.sectionName} (id: ${section.id})`);
-            }
-          } catch (embeddingError) {
-            log(`[CodeIndexer] Failed to compute embedding for section ${section.sectionName}: ${embeddingError instanceof Error ? embeddingError.message : String(embeddingError)}`);
-          }
-        }
-      }
-      
-      // Reload file with all sections
-      codeFile = await prisma.codeFile.findUnique({
-        where: { id: existingFile.id },
-        include: { codeSections: true },
-      });
-      processedFiles++;
-    } else {
-      // File new or changed, index it
-      const fileId = createHash("md5").update(`${searchId}:${filePath}`).digest("hex");
-      
-      codeFile = await prisma.codeFile.upsert({
-        where: { id: fileId },
-        create: {
-          id: fileId,
+      log(`[CodeIndexer] Processing file path: "${filePath}" (normalized relative path, will be stored in database)`);
+
+      // Check if file already indexed with embedding
+      const existingFile = await prisma.codeFile.findFirst({
+        where: {
           codeSearchId: searchId,
+          filePath,
+        },
+        include: { 
+          embeddings: true,
+          codeSections: {
+            include: { embedding: true },
+          },
+        },
+      });
+
+      const fileId = existingFile?.id || createHash("md5").update(`${searchId}:${filePath}`).digest("hex");
+      
+      if (existingFile && existingFile.contentHash === contentHash) {
+        // File unchanged - check if fully processed
+        const hasFileEmbedding = !!existingFile.embeddings;
+        const sectionsNeedingEmbeddings = existingFile.codeSections.filter(s => !s.embedding);
+        
+        if (hasFileEmbedding && sectionsNeedingEmbeddings.length === 0) {
+          // File fully processed - skip it
+          log(`[CodeIndexer] Skipping ${filePath} - already indexed and embedded (${existingFile.codeSections.length} sections)`);
+          skippedFiles++;
+          skippedSections += existingFile.codeSections.length;
+          codeFiles.push(existingFile as any);
+          continue;
+        }
+        
+        // File exists but missing file embedding or some sections missing embeddings
+        if (!hasFileEmbedding) {
+          // Add to file embedding tasks
+          chunkFileTasks.push({
+            fileId: existingFile.id,
+            filePath,
+            fileText: `File: ${filePath}\n${fileContent}`,
+            contentHash,
+          });
+        }
+        
+        // Collect sections that need embeddings
+        for (const section of sectionsNeedingEmbeddings) {
+          chunkSectionTasks.push({
+            sectionId: section.id,
+            sectionText: `${section.sectionType}: ${section.sectionName}\n${section.sectionContent}`,
+            contentHash: section.contentHash,
+            fileId: existingFile.id,
+          });
+        }
+        
+        // Store file data for later processing
+        const sections = parseCodeIntoSections(fileContent, filePath, language);
+        chunkFileData.push({
+          fileId: existingFile.id,
           filePath,
           fileName,
           fileContent,
-          language,
           contentHash,
-        },
-        update: {
+          language,
+          existingFile,
+          sections,
+        });
+      } else {
+        // File new or changed, save it first
+        const newFileId = createHash("md5").update(`${searchId}:${filePath}`).digest("hex");
+        
+        const codeFile = await prisma.codeFile.upsert({
+          where: { id: newFileId },
+          create: {
+            id: newFileId,
+            codeSearchId: searchId,
+            filePath,
+            fileName,
+            fileContent,
+            language,
+            contentHash,
+          },
+          update: {
+            fileContent,
+            contentHash,
+            lastIndexedAt: new Date(),
+          },
+        });
+        log(`[CodeIndexer] Saved code file to database - path: "${filePath}", fileName: "${fileName}", language: ${language || "unknown"}, id: ${newFileId}`);
+        
+        // Delete old file embedding if file changed
+        const existingEmbeddings = await prisma.codeFileEmbedding.findMany({
+          where: { codeFileId: newFileId },
+        });
+        if (existingEmbeddings.length > 0) {
+          await prisma.codeFileEmbedding.deleteMany({
+            where: { codeFileId: newFileId },
+          });
+          log(`[CodeIndexer] Deleted old file embedding for changed file ${filePath}`);
+        }
+        
+        // Add to file embedding tasks
+        chunkFileTasks.push({
+          fileId: newFileId,
+          filePath,
+          fileText: `File: ${filePath}\n${fileContent}`,
+          contentHash,
+        });
+        
+        // Parse into sections
+        const sections = parseCodeIntoSections(fileContent, filePath, language);
+        
+        // Get existing sections for this file
+        const existingSections = await prisma.codeSection.findMany({
+          where: { codeFileId: newFileId },
+          include: { embedding: true },
+        });
+        
+        const existingSectionsMap = new Map(
+          existingSections.map(s => [s.id, s])
+        );
+        
+        // Process sections - create/update and collect embedding tasks
+        for (const section of sections) {
+          const sectionId = createHash("md5")
+            .update(`${newFileId}:${section.name}:${section.startLine}`)
+            .digest("hex");
+          
+          const sectionHash = createHash("md5").update(section.content).digest("hex");
+          const existingSection = existingSectionsMap.get(sectionId);
+          
+          if (existingSection && existingSection.contentHash === sectionHash) {
+            // Section unchanged - check if embedding exists
+            if (existingSection.embedding) {
+              skippedSections++;
+            } else {
+              // Section exists but no embedding - add to tasks
+              chunkSectionTasks.push({
+                sectionId,
+                sectionText: `${section.type}: ${section.name}\n${section.content}`,
+                contentHash: sectionHash,
+                fileId: newFileId,
+              });
+            }
+          } else {
+            // Section new or changed - create/update it
+            await prisma.codeSection.upsert({
+              where: { id: sectionId },
+              create: {
+                id: sectionId,
+                codeFileId: newFileId,
+                sectionType: section.type,
+                sectionName: section.name,
+                sectionContent: section.content,
+                startLine: section.startLine,
+                endLine: section.endLine,
+                contentHash: sectionHash,
+              },
+              update: {
+                sectionContent: section.content,
+                contentHash: sectionHash,
+              },
+            });
+            log(`[CodeIndexer] Saved code section to database: ${section.name} (${section.type}) in ${filePath} (id: ${sectionId})`);
+            
+            // Delete old embedding if section changed
+            if (existingSection?.embedding) {
+              await prisma.codeSectionEmbedding.deleteMany({
+                where: { codeSectionId: sectionId },
+              });
+              log(`[CodeIndexer] Deleted old embedding for changed section ${section.name}`);
+            }
+            
+            // Add to section embedding tasks
+            chunkSectionTasks.push({
+              sectionId,
+              sectionText: `${section.type}: ${section.name}\n${section.content}`,
+              contentHash: sectionHash,
+              fileId: newFileId,
+            });
+          }
+        }
+        
+        // Delete sections that no longer exist in the file
+        const currentSectionIds = sections.map(s => 
+          createHash("md5").update(`${newFileId}:${s.name}:${s.startLine}`).digest("hex")
+        );
+        const sectionsToDelete = existingSections.filter(s => !currentSectionIds.includes(s.id));
+        if (sectionsToDelete.length > 0) {
+          await prisma.codeSection.deleteMany({
+            where: { 
+              id: { in: sectionsToDelete.map(s => s.id) },
+            },
+          });
+          log(`[CodeIndexer] Deleted ${sectionsToDelete.length} obsolete sections from ${filePath}`);
+        }
+        
+        // Store file data
+        chunkFileData.push({
+          fileId: newFileId,
+          filePath,
+          fileName,
           fileContent,
           contentHash,
-          lastIndexedAt: new Date(),
-        },
-      });
-      log(`[CodeIndexer] Saved code file to database - path: "${filePath}", fileName: "${fileName}", language: ${language || "unknown"}, id: ${fileId}`);
-      
-      // Delete old file embedding if file changed (will be recomputed below)
-      // Check if embeddings exist for this file
-      const existingEmbeddings = await prisma.codeFileEmbedding.findMany({
-        where: { codeFileId: fileId },
-      });
-      if (existingEmbeddings.length > 0) {
-        await prisma.codeFileEmbedding.deleteMany({
-          where: { codeFileId: fileId },
+          language,
+          sections,
         });
-        log(`[CodeIndexer] Deleted old file embedding for changed file ${filePath}`);
       }
-      
-      // Compute and save file embedding
-      try {
-        const apiKey = process.env.OPENAI_API_KEY;
-        if (apiKey) {
-          const { createEmbedding } = await import("../../core/classify/semantic.js");
+    }
+    
+    // PHASE 1.2: Batch process file embeddings for this chunk
+    if (chunkFileTasks.length > 0) {
+      log(`[CodeIndexer] Chunk ${chunkNum}: Batch processing ${chunkFileTasks.length} file embeddings...`);
+      const apiKey = process.env.OPENAI_API_KEY;
+      if (apiKey) {
+        try {
+          const { createEmbeddings } = await import("../../core/classify/semantic.js");
           const { saveCodeFileEmbedding } = await import("./embeddings.js");
           
-          // Build text for embedding: file path and content
-          const fileText = `File: ${filePath}\n${fileContent}`;
-          log(`[CodeIndexer] Computing file embedding for ${filePath} (${fileText.length} chars)...`);
-          const embedding = await createEmbedding(fileText, apiKey);
-          
-              log(`[CodeIndexer] Saving file embedding for ${filePath} (embedding length: ${embedding.length})...`);
-              await saveCodeFileEmbedding(fileId, embedding, contentHash);
-              log(`[CodeIndexer] Saved file embedding to database for ${filePath} (id: ${fileId})`);
-        } else {
-          log(`[CodeIndexer] OPENAI_API_KEY not set, skipping file embedding computation for ${filePath}`);
-        }
-      } catch (embeddingError) {
-        log(`[CodeIndexer] Failed to compute file embedding for ${filePath}: ${embeddingError instanceof Error ? embeddingError.message : String(embeddingError)}`);
-        if (embeddingError instanceof Error && embeddingError.stack) {
-          log(`[CodeIndexer] Error stack: ${embeddingError.stack}`);
+          // Batch create embeddings (OpenAI supports up to 2048 inputs per request)
+          const BATCH_SIZE_EMBEDDINGS = 100; // Process 100 at a time to stay within limits
+          for (let i = 0; i < chunkFileTasks.length; i += BATCH_SIZE_EMBEDDINGS) {
+            const batch = chunkFileTasks.slice(i, i + BATCH_SIZE_EMBEDDINGS);
+            const texts = batch.map(t => t.fileText);
+            
+            log(`[CodeIndexer] Computing embeddings for file batch ${Math.floor(i / BATCH_SIZE_EMBEDDINGS) + 1}/${Math.ceil(chunkFileTasks.length / BATCH_SIZE_EMBEDDINGS)} (${batch.length} files)...`);
+            const embeddings = await createEmbeddings(texts, apiKey);
+            
+            // Save embeddings
+            for (let j = 0; j < batch.length; j++) {
+              try {
+                await saveCodeFileEmbedding(batch[j].fileId, embeddings[j], batch[j].contentHash);
+                processedFiles++;
+                log(`[CodeIndexer] Saved file embedding for ${batch[j].filePath}`);
+              } catch (error) {
+                log(`[CodeIndexer] Failed to save file embedding for ${batch[j].filePath}: ${error instanceof Error ? error.message : String(error)}`);
+              }
+            }
+          }
+        } catch (error) {
+          log(`[CodeIndexer] Batch file embedding failed, falling back to individual: ${error instanceof Error ? error.message : String(error)}`);
+          // Fallback to individual processing
+          for (const task of chunkFileTasks) {
+            try {
+              const apiKey = process.env.OPENAI_API_KEY;
+              if (apiKey) {
+                const { createEmbedding } = await import("../../core/classify/semantic.js");
+                const { saveCodeFileEmbedding } = await import("./embeddings.js");
+                const embedding = await createEmbedding(task.fileText, apiKey);
+                await saveCodeFileEmbedding(task.fileId, embedding, task.contentHash);
+                processedFiles++;
+              }
+            } catch (embeddingError) {
+              log(`[CodeIndexer] Failed to compute file embedding for ${task.filePath}: ${embeddingError instanceof Error ? embeddingError.message : String(embeddingError)}`);
+            }
+          }
         }
       }
-
-      // Parse into sections (functions, classes, etc.)
-      const sections = parseCodeIntoSections(fileContent, filePath, language);
-      
-      // Get existing sections for this file to check what needs processing
-      const existingSections = await prisma.codeSection.findMany({
-        where: { codeFileId: fileId },
-        include: { embedding: true },
-      });
-      
-      const existingSectionsMap = new Map(
-        existingSections.map(s => [s.id, s])
-      );
-      
-      // Process sections - only create/update/embed what's needed
-      for (const section of sections) {
-        const sectionId = createHash("md5")
-          .update(`${fileId}:${section.name}:${section.startLine}`)
-          .digest("hex");
-        
-        const sectionHash = createHash("md5").update(section.content).digest("hex");
-        const existingSection = existingSectionsMap.get(sectionId);
-        
-        if (existingSection && existingSection.contentHash === sectionHash) {
-          // Section unchanged - check if embedding exists
-          if (existingSection.embedding) {
-            // Section unchanged and has embedding - skip it
-            skippedSections++;
-            continue;
-          } else {
-            // Section exists but no embedding - compute it now
-            log(`[CodeIndexer] Section ${section.name} exists but missing embedding, computing now...`);
+    }
+    
+    // PHASE 1.3: Batch process section embeddings for this chunk
+    if (chunkSectionTasks.length > 0) {
+      log(`[CodeIndexer] Chunk ${chunkNum}: Batch processing ${chunkSectionTasks.length} section embeddings...`);
+      const apiKey = process.env.OPENAI_API_KEY;
+      if (apiKey) {
+        try {
+          const { createEmbeddings } = await import("../../core/classify/semantic.js");
+          const { saveCodeSectionEmbedding } = await import("./embeddings.js");
+          
+          // Batch create embeddings
+          const BATCH_SIZE_EMBEDDINGS = 100; // Process 100 at a time
+          for (let i = 0; i < chunkSectionTasks.length; i += BATCH_SIZE_EMBEDDINGS) {
+            const batch = chunkSectionTasks.slice(i, i + BATCH_SIZE_EMBEDDINGS);
+            const texts = batch.map(t => t.sectionText);
+            
+            log(`[CodeIndexer] Computing embeddings for section batch ${Math.floor(i / BATCH_SIZE_EMBEDDINGS) + 1}/${Math.ceil(chunkSectionTasks.length / BATCH_SIZE_EMBEDDINGS)} (${batch.length} sections)...`);
+            const embeddings = await createEmbeddings(texts, apiKey);
+            
+            // Save embeddings
+            for (let j = 0; j < batch.length; j++) {
+              try {
+                await saveCodeSectionEmbedding(batch[j].sectionId, embeddings[j], batch[j].contentHash);
+                processedSections++;
+              } catch (error) {
+                log(`[CodeIndexer] Failed to save section embedding: ${error instanceof Error ? error.message : String(error)}`);
+              }
+            }
+          }
+        } catch (error) {
+          log(`[CodeIndexer] Batch section embedding failed, falling back to individual: ${error instanceof Error ? error.message : String(error)}`);
+          // Fallback to individual processing
+          for (const task of chunkSectionTasks) {
             try {
               const apiKey = process.env.OPENAI_API_KEY;
               if (apiKey) {
                 const { createEmbedding } = await import("../../core/classify/semantic.js");
                 const { saveCodeSectionEmbedding } = await import("./embeddings.js");
-                
-                // Build text for embedding: section type, name, and content
-                const sectionText = `${section.type}: ${section.name}\n${section.content}`;
-                const embedding = await createEmbedding(sectionText, apiKey);
-                
-                await saveCodeSectionEmbedding(sectionId, embedding, sectionHash);
+                const embedding = await createEmbedding(task.sectionText, apiKey);
+                await saveCodeSectionEmbedding(task.sectionId, embedding, task.contentHash);
                 processedSections++;
-                log(`[CodeIndexer] Saved section embedding to database for ${section.name} (id: ${sectionId})`);
-              } else {
-                log(`[CodeIndexer] OPENAI_API_KEY not set, skipping embedding computation for section ${section.name}`);
               }
             } catch (embeddingError) {
-              log(`[CodeIndexer] Failed to compute embedding for existing section ${section.name}: ${embeddingError instanceof Error ? embeddingError.message : String(embeddingError)}`);
+              log(`[CodeIndexer] Failed to compute section embedding: ${embeddingError instanceof Error ? embeddingError.message : String(embeddingError)}`);
             }
-          }
-        } else {
-          // Section new or changed - create/update it
-          await prisma.codeSection.upsert({
-            where: { id: sectionId },
-            create: {
-              id: sectionId,
-              codeFileId: fileId,
-              sectionType: section.type,
-              sectionName: section.name,
-              sectionContent: section.content,
-              startLine: section.startLine,
-              endLine: section.endLine,
-              contentHash: sectionHash,
-            },
-            update: {
-              sectionContent: section.content,
-              contentHash: sectionHash,
-            },
-          });
-          log(`[CodeIndexer] Saved code section to database: ${section.name} (${section.type}) in ${filePath} (id: ${sectionId})`);
-          
-          // Delete old embedding if section changed (will be recomputed below)
-          if (existingSection?.embedding) {
-            await prisma.codeSectionEmbedding.deleteMany({
-              where: { codeSectionId: sectionId },
-            });
-            log(`[CodeIndexer] Deleted old embedding for changed section ${section.name}`);
-          }
-          
-          // Compute and save embedding for this code section
-          try {
-            const apiKey = process.env.OPENAI_API_KEY;
-            if (apiKey) {
-              const { createEmbedding } = await import("../../core/classify/semantic.js");
-              const { saveCodeSectionEmbedding } = await import("./embeddings.js");
-              
-              // Build text for embedding: section type, name, and content
-              const sectionText = `${section.type}: ${section.name}\n${section.content}`;
-              log(`[CodeIndexer] Computing embedding for section ${section.name} (${sectionText.length} chars)...`);
-              const embedding = await createEmbedding(sectionText, apiKey);
-              
-              log(`[CodeIndexer] Saving embedding for section ${section.name} (embedding length: ${embedding.length})...`);
-              await saveCodeSectionEmbedding(sectionId, embedding, sectionHash);
-              processedSections++;
-              log(`[CodeIndexer] Saved section embedding to database for ${section.name} (id: ${sectionId})`);
-            } else {
-              log(`[CodeIndexer] OPENAI_API_KEY not set, skipping embedding computation for section ${section.name}`);
-            }
-          } catch (embeddingError) {
-            log(`[CodeIndexer] Failed to compute embedding for section ${section.name}: ${embeddingError instanceof Error ? embeddingError.message : String(embeddingError)}`);
-            if (embeddingError instanceof Error && embeddingError.stack) {
-              log(`[CodeIndexer] Error stack: ${embeddingError.stack}`);
-            }
-            // Continue even if embedding fails - section is still indexed
           }
         }
       }
-      
-      // Delete sections that no longer exist in the file
-      const currentSectionIds = sections.map(s => 
-        createHash("md5").update(`${fileId}:${s.name}:${s.startLine}`).digest("hex")
-      );
-      const sectionsToDelete = existingSections.filter(s => !currentSectionIds.includes(s.id));
-      if (sectionsToDelete.length > 0) {
-        await prisma.codeSection.deleteMany({
-          where: { 
-            id: { in: sectionsToDelete.map(s => s.id) },
-          },
-        });
-        log(`[CodeIndexer] Deleted ${sectionsToDelete.length} obsolete sections from ${filePath}`);
-      }
-
-      // Reload with sections
-      codeFile = await prisma.codeFile.findUnique({
-        where: { id: fileId },
+    }
+    
+    // PHASE 1.4: Reload all files with sections for this chunk
+    for (const fileData of chunkFileData) {
+      const codeFile = await prisma.codeFile.findUnique({
+        where: { id: fileData.fileId },
         include: { codeSections: true },
       });
-      processedFiles++;
+      if (codeFile) {
+        codeFiles.push(codeFile as any);
+      }
     }
-
-    if (codeFile) {
-      codeFiles.push(codeFile as any);
-    }
+    
+    log(`[CodeIndexer] Chunk ${chunkNum}/${totalChunks} complete. Progress: ${chunkEnd}/${totalFiles} files processed.`);
   }
   
   log(`[CodeIndexer] Indexing summary: ${processedFiles} files processed, ${skippedFiles} files skipped, ${processedSections} sections processed, ${skippedSections} sections skipped`);
@@ -890,7 +1006,8 @@ export async function matchTextToFeaturesUsingCode(
           rawCodeContext,
           searchId,
           searchQuery,
-          repositoryUrl
+          repositoryUrl,
+          100 // Default chunk size
         );
         
         // Reload with sections and feature mappings
@@ -1060,12 +1177,15 @@ export async function searchAndIndexCodeForGroup(
  * @param repositoryUrl Optional repository URL (uses config if not provided)
  * @param force If true, re-indexes even if code is already indexed
  * @param onProgress Optional progress callback
+ * @param localRepoPathOverride Optional local repo path override
+ * @param chunkSize Number of files to process per chunk (default: 100)
  */
 export async function indexCodeForAllFeatures(
   repositoryUrl?: string,
   force: boolean = false,
   onProgress?: (processed: number, total: number) => void,
-  localRepoPathOverride?: string
+  localRepoPathOverride?: string,
+  chunkSize: number = 100
 ): Promise<{ indexed: number; matched: number; total: number }> {
   const { getConfig } = await import("../../config/index.js");
   const config = getConfig();
@@ -1158,7 +1278,8 @@ export async function indexCodeForAllFeatures(
     repoIdentifier,
     "", // No specific feature ID - just index code
     "all_features",
-    force
+    force,
+    chunkSize
   );
 
   if (!codeContext) {
