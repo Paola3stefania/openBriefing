@@ -28,10 +28,7 @@
     "fetch-issues-incremental": "tsx scripts/fetch-all-issues.ts --incremental",
     "fetch-discord": "tsx scripts/fetch-discord-messages.ts",
     "fetch-discord-incremental": "tsx scripts/fetch-discord-messages.ts --incremental",
-    "fetch-all-discord": "tsx scripts/fetch-discord-messages.ts",
-    "fetch-all-discord-incremental": "tsx scripts/fetch-discord-messages.ts --incremental",
-    "validate-linear": "tsx scripts/validate-linear-setup.ts",
-    "github-oauth-setup": "tsx scripts/github-oauth-setup.ts"
+    "validate-linear": "tsx scripts/validate-linear-setup.ts"
   },
   "keywords": [
     "mcp",

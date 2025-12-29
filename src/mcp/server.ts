@@ -288,6 +288,15 @@ const tools: Tool[] = [
     },
   },
   {
+    name: "check_github_issues_completeness",
+    description: "Check if all GitHub issues have been fetched with comments. Compares database with GitHub API to verify completeness.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      required: [],
+    },
+  },
+  {
     name: "fetch_discord_messages",
     description: "Fetch Discord messages from a channel and cache them. If cache exists, updates incrementally. If not, fetches all with pagination. Uses DISCORD_DEFAULT_CHANNEL_ID from config if channel_id is not provided.",
     inputSchema: {
@@ -515,10 +524,16 @@ const tools: Tool[] = [
   },
   {
     name: "compute_github_issue_embeddings",
-    description: "Compute and update embeddings for GitHub issues. This pre-computes embeddings for all issues, which improves performance for classification and grouping operations. Only computes embeddings for issues that don't have embeddings or have changed content.",
+    description: "Compute and update embeddings for GitHub issues. This pre-computes embeddings for all issues, which improves performance for classification and grouping operations. By default, only computes embeddings for issues that don't have embeddings or have changed content. Set force=true to recompute all embeddings from scratch.",
     inputSchema: {
       type: "object",
-      properties: {},
+      properties: {
+        force: {
+          type: "boolean",
+          description: "If true, recompute all embeddings from scratch. If false (default), only compute embeddings for issues that don't have embeddings or have changed content.",
+          default: false,
+        },
+      },
       required: [],
     },
   },
@@ -1312,6 +1327,152 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
     }
 
+    case "check_github_issues_completeness": {
+      try {
+        const config = getConfig();
+        const repoOwner = config.github.owner;
+        const repoName = config.github.repo;
+        
+        console.error(`[GitHub Issues Check] Checking completeness for ${repoOwner}/${repoName}...`);
+        
+        // Initialize token manager
+        const { GitHubTokenManager } = await import("../connectors/github/tokenManager.js");
+        const tokenManager = await GitHubTokenManager.fromEnvironment();
+        if (!tokenManager) {
+          throw new Error("GITHUB_TOKEN or GitHub App credentials required");
+        }
+        
+        const token = await tokenManager.getCurrentToken();
+        const headers = {
+          Authorization: `Bearer ${token}`,
+          Accept: "application/vnd.github.v3+json",
+        };
+        
+        // Get total issues from GitHub API
+        console.error("[GitHub Issues Check] Fetching issue counts from GitHub API...");
+        let allIssueNumbers: number[] = [];
+        let page = 1;
+        let hasMore = true;
+        
+        while (hasMore) {
+          const response = await fetch(
+            `https://api.github.com/repos/${repoOwner}/${repoName}/issues?state=all&per_page=100&page=${page}&sort=updated&direction=desc`,
+            { headers }
+          );
+          
+          if (!response.ok) {
+            throw new Error(`GitHub API error: ${response.status}`);
+          }
+          
+          const issues: any[] = await response.json();
+          const actualIssues = issues.filter(issue => !issue.pull_request);
+          const issueNumbers = actualIssues.map(issue => issue.number);
+          allIssueNumbers.push(...issueNumbers);
+          
+          if (issues.length < 100) {
+            hasMore = false;
+          } else {
+            page++;
+          }
+        }
+        
+        const totalIssuesFromAPI = allIssueNumbers.length;
+        console.error(`[GitHub Issues Check] GitHub API reports ${totalIssuesFromAPI} total issues`);
+        
+        // Get issues from database
+        const { hasDatabaseConfig, getStorage } = await import("../storage/factory.js");
+        if (!hasDatabaseConfig()) {
+          throw new Error("Database not configured. This check requires a database.");
+        }
+        
+        const storage = getStorage();
+        const dbIssues = await storage.getGitHubIssues();
+        const totalIssuesInDB = dbIssues.length;
+        const dbIssueNumbers = new Set(dbIssues.map(i => i.number));
+        
+        // Check for missing issues
+        const missingIssues = allIssueNumbers.filter(num => !dbIssueNumbers.has(num));
+        
+        // Check issues without comments
+        const issuesWithoutComments = dbIssues.filter(issue => {
+          // Check if issue has comments - we need to query the database directly for this
+          return false; // Will check via database query
+        });
+        
+        // Query database directly for detailed stats
+        const { prisma } = await import("../storage/db/prisma.js");
+        const dbIssuesDetailed = await prisma.gitHubIssue.findMany({
+          select: {
+            issueNumber: true,
+            issueTitle: true,
+            issueState: true,
+            issueComments: true,
+            issueBody: true,
+          },
+        });
+        
+        const issuesWithoutCommentsDetailed = dbIssuesDetailed.filter(issue => {
+          const comments = issue.issueComments as any[];
+          return !comments || comments.length === 0;
+        });
+        
+        const issuesWithoutBody = dbIssuesDetailed.filter(issue => !issue.issueBody || issue.issueBody.trim().length === 0);
+        
+        const openIssues = dbIssuesDetailed.filter(i => i.issueState === "open").length;
+        const closedIssues = dbIssuesDetailed.filter(i => i.issueState === "closed").length;
+        const issuesWithComments = dbIssuesDetailed.filter(issue => {
+          const comments = issue.issueComments as any[];
+          return comments && comments.length > 0;
+        });
+        
+        // Completeness score
+        const completenessScore = totalIssuesFromAPI > 0 
+          ? ((totalIssuesInDB - missingIssues.length) / totalIssuesFromAPI) * 100 
+          : 100;
+        
+        const report = {
+          repository: `${repoOwner}/${repoName}`,
+          totalIssuesFromAPI,
+          totalIssuesInDB,
+          missingIssues: missingIssues.length,
+          missingIssueNumbers: missingIssues,
+          byState: {
+            open: openIssues,
+            closed: closedIssues,
+          },
+          comments: {
+            withComments: issuesWithComments.length,
+            withoutComments: issuesWithoutCommentsDetailed.length,
+            percentageWithComments: totalIssuesInDB > 0 ? ((issuesWithComments.length / totalIssuesInDB) * 100).toFixed(1) : "0",
+          },
+          body: {
+            withBody: totalIssuesInDB - issuesWithoutBody.length,
+            withoutBody: issuesWithoutBody.length,
+          },
+          completenessScore: completenessScore.toFixed(1),
+          status: completenessScore === 100 && issuesWithoutCommentsDetailed.length === 0 
+            ? "complete" 
+            : completenessScore === 100 
+            ? "complete_but_missing_comments" 
+            : "incomplete",
+        };
+        
+        console.error(`[GitHub Issues Check] Completeness: ${report.completenessScore}%`);
+        console.error(`[GitHub Issues Check] Status: ${report.status}`);
+        
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(report, null, 2),
+            },
+          ],
+        };
+      } catch (error) {
+        throw new Error(`Failed to check GitHub issues completeness: ${error instanceof Error ? error.message : error}`);
+      }
+    }
+
     case "compute_discord_embeddings": {
       const { channel_id } = args as { channel_id?: string };
       
@@ -1358,8 +1519,16 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       const { computeAndSaveIssueEmbeddings } = await import("../storage/db/embeddings.js");
       
-      console.error("[Embeddings] Starting GitHub issue embeddings computation...");
-      const result = await computeAndSaveIssueEmbeddings(process.env.OPENAI_API_KEY);
+      const force = (args?.force === true);
+      
+      console.error(`[Embeddings] Starting GitHub issue embeddings computation...`);
+      if (force) {
+        console.error(`[Embeddings] Force mode enabled - will recompute all embeddings from scratch`);
+      } else {
+        console.error(`[Embeddings] Incremental mode - will only compute embeddings for issues that don't have them or have changed content`);
+      }
+      
+      const result = await computeAndSaveIssueEmbeddings(process.env.OPENAI_API_KEY, undefined, force);
 
       return {
         content: [

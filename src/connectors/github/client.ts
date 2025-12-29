@@ -117,13 +117,64 @@ export async function searchGitHubIssues(
 }
 
 /**
- * Fetch comments for a specific GitHub issue
+ * Retry helper function with exponential backoff
+ */
+async function retryWithBackoff<T>(
+  fn: () => Promise<T>,
+  maxRetries: number = 3,
+  initialDelay: number = 1000,
+  retryableErrors: (error: any) => boolean = (error) => {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    // Retry on network errors, 5xx errors, and rate limit errors (but not 403/429 which need token rotation)
+    return errorMsg.includes('fetch') || 
+           errorMsg.includes('ECONNRESET') || 
+           errorMsg.includes('ETIMEDOUT') ||
+           errorMsg.includes('500') ||
+           errorMsg.includes('502') ||
+           errorMsg.includes('503') ||
+           errorMsg.includes('504');
+  }
+): Promise<T> {
+  let lastError: any;
+  
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error;
+      
+      // Don't retry on rate limit errors (403/429) - these need token rotation
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      if (errorMsg.includes('403') || errorMsg.includes('429')) {
+        throw error; // Re-throw immediately for rate limit errors
+      }
+      
+      // Don't retry if not a retryable error
+      if (!retryableErrors(error)) {
+        throw error;
+      }
+      
+      // Don't retry on last attempt
+      if (attempt < maxRetries) {
+        const delay = initialDelay * Math.pow(2, attempt);
+        log(`Retry attempt ${attempt + 1}/${maxRetries} after ${delay}ms delay...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+  }
+  
+  throw lastError;
+}
+
+/**
+ * Fetch comments for a specific GitHub issue with retry logic
  */
 export async function fetchIssueComments(
   issueNumber: number,
   token?: string,
   owner?: string,
-  repo?: string
+  repo?: string,
+  retryOnFailure: boolean = true
 ): Promise<GitHubComment[]> {
   const config = getConfig();
   const repoOwner = owner || config.github.owner;
@@ -142,40 +193,55 @@ export async function fetchIssueComments(
   let hasMore = true;
 
   while (hasMore) {
-    const url = `https://api.github.com/repos/${repoOwner}/${repoName}/issues/${issueNumber}/comments?per_page=100&page=${page}`;
-    
-    const response = await fetch(url, { headers });
-    
-    if (!response.ok) {
-      const rateLimitRemaining = response.headers.get('X-RateLimit-Remaining');
-      const rateLimitReset = response.headers.get('X-RateLimit-Reset');
-      const rateLimitLimit = response.headers.get('X-RateLimit-Limit');
+    const fetchPage = async () => {
+      const url = `https://api.github.com/repos/${repoOwner}/${repoName}/issues/${issueNumber}/comments?per_page=100&page=${page}`;
+      const response = await fetch(url, { headers });
       
-      let errorMessage = `GitHub API error fetching comments: ${response.status} ${response.statusText}`;
-      
-      if (response.status === 403 || response.status === 429) {
-        errorMessage += '\n\nRate limit information:';
-        if (rateLimitLimit) errorMessage += `\n  Limit: ${rateLimitLimit} requests/hour`;
-        if (rateLimitRemaining !== null) errorMessage += `\n  Remaining: ${rateLimitRemaining} requests`;
-        if (rateLimitReset) {
-          const resetDate = new Date(parseInt(rateLimitReset) * 1000);
-          const resetIn = Math.ceil((parseInt(rateLimitReset) * 1000 - Date.now()) / 1000 / 60);
-          errorMessage += `\n  Resets at: ${resetDate.toISOString()} (in ~${resetIn} minutes)`;
+      if (!response.ok) {
+        const rateLimitRemaining = response.headers.get('X-RateLimit-Remaining');
+        const rateLimitReset = response.headers.get('X-RateLimit-Reset');
+        const rateLimitLimit = response.headers.get('X-RateLimit-Limit');
+        
+        let errorMessage = `GitHub API error fetching comments: ${response.status} ${response.statusText}`;
+        
+        if (response.status === 403 || response.status === 429) {
+          errorMessage += '\n\nRate limit information:';
+          if (rateLimitLimit) errorMessage += `\n  Limit: ${rateLimitLimit} requests/hour`;
+          if (rateLimitRemaining !== null) errorMessage += `\n  Remaining: ${rateLimitRemaining} requests`;
+          if (rateLimitReset) {
+            const resetDate = new Date(parseInt(rateLimitReset) * 1000);
+            const resetIn = Math.ceil((parseInt(rateLimitReset) * 1000 - Date.now()) / 1000 / 60);
+            errorMessage += `\n  Resets at: ${resetDate.toISOString()} (in ~${resetIn} minutes)`;
+          }
+          // Check if token is set by looking at the limit (5000 = token, 60 = no token)
+          const hasToken = rateLimitLimit && parseInt(rateLimitLimit) >= 5000;
+          if (hasToken) {
+            errorMessage += '\n\nRate limit exhausted. Please wait for the limit to reset, or use a different GitHub token.';
+            errorMessage += '\nThe fetch will automatically resume from where it left off when you try again.';
+          } else {
+            errorMessage += '\n\nTip: Set GITHUB_TOKEN environment variable for higher rate limits (5000/hour vs 60/hour)';
+          }
         }
-        // Check if token is set by looking at the limit (5000 = token, 60 = no token)
-        const hasToken = rateLimitLimit && parseInt(rateLimitLimit) >= 5000;
-        if (hasToken) {
-          errorMessage += '\n\nRate limit exhausted. Please wait for the limit to reset, or use a different GitHub token.';
-          errorMessage += '\nThe fetch will automatically resume from where it left off when you try again.';
-        } else {
-          errorMessage += '\n\nTip: Set GITHUB_TOKEN environment variable for higher rate limits (5000/hour vs 60/hour)';
-        }
+        
+        throw new Error(errorMessage);
       }
-      
-      throw new Error(errorMessage);
-    }
 
-    const comments: GitHubComment[] = await response.json();
+      return await response.json() as GitHubComment[];
+    };
+
+    let comments: GitHubComment[];
+    try {
+      if (retryOnFailure) {
+        comments = await retryWithBackoff(fetchPage, 3, 1000);
+      } else {
+        comments = await fetchPage();
+      }
+    } catch (error) {
+      // If retry failed, log and re-throw
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      log(`[ERROR] Failed to fetch comments for issue #${issueNumber}, page ${page} after retries: ${errorMsg}`);
+      throw error;
+    }
     
     if (comments.length > 0) {
       allComments.push(...comments);
@@ -243,20 +309,28 @@ export async function fetchIssueDetails(
 
   const issue: GitHubIssue = await issueResponse.json();
 
-  // Fetch comments if requested, but only if the issue actually has comments
-  // This saves API calls for issues with 0 comments
+  // Always fetch comments if requested (removed comments_count check to ensure we get all comments)
+  // This ensures we catch comments that were added after the issue was last fetched
   if (includeComments) {
-    // Use comments_count field if available, otherwise check if comments is a number
-    const commentsCount = issue.comments_count ?? (typeof issue.comments === 'number' ? issue.comments : 0);
-    if (commentsCount > 0) {
-      try {
-        issue.comments = await fetchIssueComments(issueNumber, token, owner, repo);
-      } catch (error) {
-        log(`Warning: Failed to fetch comments for issue #${issueNumber}: ${error}`);
-        issue.comments = [];
+    try {
+      issue.comments = await fetchIssueComments(issueNumber, token, owner, repo, true);
+      // Only log if there are comments (to reduce log noise)
+      if (issue.comments.length > 0) {
+        log(`[SUCCESS] Fetched ${issue.comments.length} comments for issue #${issueNumber}`);
       }
-    } else {
-      // Issue has no comments, skip the API call
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      
+      // Check if it's a rate limit error - these should be re-thrown to trigger token rotation
+      if (errorMsg.includes('403') || errorMsg.includes('429')) {
+        log(`[ERROR] Rate limit error fetching comments for issue #${issueNumber}: ${errorMsg}`);
+        throw error; // Re-throw rate limit errors so they can trigger token rotation
+      }
+      
+      // For other errors, log but don't fail the entire issue fetch
+      // We'll save the issue without comments so it can be retried later
+      log(`[WARNING] Failed to fetch comments for issue #${issueNumber} after retries: ${errorMsg}`);
+      log(`[INFO] Issue #${issueNumber} will be saved without comments. Run fetch_github_issues again to retry.`);
       issue.comments = [];
     }
   } else {

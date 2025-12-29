@@ -1647,7 +1647,8 @@ export async function getIssueEmbedding(
  */
 export async function computeAndSaveIssueEmbeddings(
   apiKey: string,
-  onProgress?: (processed: number, total: number) => void
+  onProgress?: (processed: number, total: number) => void,
+  force: boolean = false
 ): Promise<{ computed: number; cached: number; total: number }> {
   // Get all issues with full conversation data
   const allIssues = await prisma.gitHubIssue.findMany({
@@ -1665,18 +1666,20 @@ export async function computeAndSaveIssueEmbeddings(
 
   const model = getEmbeddingModel();
 
-  // Check which issues already have embeddings
-  const existingEmbeddings = await prisma.issueEmbedding.findMany({
-    where: { model },
-    select: {
-      issueNumber: true,
-      contentHash: true,
-    },
-  });
-
+  // Check which issues already have embeddings (skip if force=true)
   const existingHashes = new Map<number, string>();
-  for (const row of existingEmbeddings) {
-    existingHashes.set(row.issueNumber, row.contentHash);
+  if (!force) {
+    const existingEmbeddings = await prisma.issueEmbedding.findMany({
+      where: { model },
+      select: {
+        issueNumber: true,
+        contentHash: true,
+      },
+    });
+
+    for (const row of existingEmbeddings) {
+      existingHashes.set(row.issueNumber, row.contentHash);
+    }
   }
 
   // Compute content hashes and find issues that need embeddings
@@ -1720,7 +1723,8 @@ export async function computeAndSaveIssueEmbeddings(
     const currentHash = hashContent(issueText);
     const existingHash = existingHashes.get(issue.issueNumber);
 
-    if (!existingHash || existingHash !== currentHash) {
+    // If force=true, recompute all. Otherwise, only compute if missing or changed
+    if (force || !existingHash || existingHash !== currentHash) {
       issuesToEmbed.push({
         issueNumber: issue.issueNumber,
         issueTitle: issue.issueTitle,
