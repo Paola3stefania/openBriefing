@@ -18,7 +18,8 @@ export interface FeatureExtractionConfig {
 export interface PMIntegrationConfig {
   enabled: boolean;
   documentation_urls?: string[];
-  github_repo_url?: string; // GitHub repository URL (e.g., https://github.com/better-auth/better-auth)
+  github_repo_url?: string; // GitHub repository URL or Linear format (e.g., "better-auth/better-auth" or "https://github.com/better-auth/better-auth")
+  local_repo_path?: string; // Local repository path (e.g., /path/to/repo) - used for local code indexing before falling back to GitHub API
   feature_extraction?: FeatureExtractionConfig;
   pm_tool?: PMToolConfig;
 }
@@ -34,6 +35,7 @@ export function getPMIntegrationConfig(): PMIntegrationConfig {
           .filter(url => url.length > 0)
       : undefined,
     github_repo_url: process.env.GITHUB_REPO_URL?.trim() || undefined,
+    local_repo_path: process.env.LOCAL_REPO_PATH?.trim() || undefined,
     feature_extraction: {
       enabled: process.env.FEATURE_EXTRACTION_ENABLED !== "false",
       auto_update: process.env.FEATURE_AUTO_UPDATE === "true",

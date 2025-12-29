@@ -11,17 +11,32 @@ export interface GitHubRepoInfo {
 
 /**
  * Parse GitHub repository URL to extract owner and repo
+ * Supports multiple formats:
+ * - owner/repo (Linear format, preferred)
+ * - https://github.com/owner/repo
+ * - https://github.com/owner/repo.git
+ * - git@github.com:owner/repo.git
+ * - github.com/owner/repo
  */
 export function parseGitHubRepoUrl(url: string): GitHubRepoInfo | null {
   try {
-    // Handle various GitHub URL formats:
-    // https://github.com/owner/repo
-    // https://github.com/owner/repo.git
-    // git@github.com:owner/repo.git
-    // owner/repo
-    
     let cleanUrl = url.trim();
     
+    // First check if it's already in owner/repo format (no protocol, no domain)
+    // This is the simplest and most common format (e.g., "better-auth/better-auth")
+    if (!cleanUrl.includes('://') && !cleanUrl.includes('@') && !cleanUrl.includes('github.com')) {
+      const parts = cleanUrl.split('/').filter(Boolean);
+      if (parts.length >= 2) {
+        // Remove .git suffix if present
+        const repo = parts[1].endsWith('.git') ? parts[1].slice(0, -4) : parts[1];
+        return {
+          owner: parts[0],
+          repo: repo,
+        };
+      }
+    }
+    
+    // Handle full URLs and other formats
     // Remove .git suffix
     if (cleanUrl.endsWith('.git')) {
       cleanUrl = cleanUrl.slice(0, -4);

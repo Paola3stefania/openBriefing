@@ -103,7 +103,8 @@ model Group {
 
   channel      Channel       @relation(fields: [channelId], references: [id], onDelete: Cascade)
   groupThreads GroupThread[]
-  githubIssues GitHubIssue[] // Issues in this group
+  githubIssues  GitHubIssue[] // Issues in this group
+  embedding    GroupEmbedding?
 
   @@index([channelId])
   @@index([status])
@@ -244,6 +245,21 @@ model ThreadEmbedding {
   @@map("thread_embeddings")
 }
 
+model GroupEmbedding {
+  groupId     String   @id @map("group_id")
+  embedding   Json     // Array of floats (1536 dimensions)
+  contentHash String   @map("content_hash")
+  model       String
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  group Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@index([contentHash])
+  @@index([model])
+  @@map("group_embeddings")
+}
+
 model DocumentationCache {
   url       String   @id
   title     String?
@@ -324,6 +340,7 @@ model Feature {
   updatedAt           DateTime @updatedAt @map("updated_at")
 
   embedding FeatureEmbedding?
+  codeMappings FeatureCodeMapping[]
 
   @@index([name])
   @@index([category])
@@ -347,6 +364,119 @@ model FeatureEmbedding {
   @@index([contentHash])
   @@index([model])
   @@map("feature_embeddings")
+}
+
+// Lazy code indexing - only index code when searched/needed
+model CodeSearch {
+  id            String   @id // Hash of search query + repo
+  searchQuery   String   @map("search_query") // e.g., "SSO authentication"
+  repositoryUrl String   @map("repository_url") // GitHub repo URL
+  searchType    String   @map("search_type") // 'semantic', 'keyword', 'exact'
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+  
+  codeFiles     CodeFile[]
+  
+  @@unique([searchQuery, repositoryUrl])
+  @@index([repositoryUrl])
+  @@index([createdAt(sort: Desc)])
+  @@map("code_searches")
+}
+
+model CodeFile {
+  id            String   @id
+  codeSearchId  String   @map("code_search_id")
+  filePath      String   @map("file_path")
+  fileName      String   @map("file_name")
+  fileContent   String   @db.Text @map("file_content") // Full file content
+  language      String?  // ts, js, py, etc.
+  contentHash   String   @map("content_hash") // To detect changes
+  lastIndexedAt DateTime @default(now()) @map("last_indexed_at")
+  indexedAt     DateTime @default(now()) @map("indexed_at")
+  
+  codeSearch    CodeSearch      @relation(fields: [codeSearchId], references: [id], onDelete: Cascade)
+  codeSections  CodeSection[]
+  embeddings    CodeFileEmbedding?
+  
+  @@unique([codeSearchId, filePath])
+  @@index([codeSearchId])
+  @@index([filePath])
+  @@index([contentHash])
+  @@index([lastIndexedAt])
+  @@map("code_files")
+}
+
+model CodeSection {
+  id            String   @id
+  codeFileId    String   @map("code_file_id")
+  sectionType   String   @map("section_type") // 'function', 'class', 'interface', 'type', 'export'
+  sectionName   String   @map("section_name") // Function/class name
+  sectionContent String  @db.Text @map("section_content") // Just this section's code
+  startLine     Int?     @map("start_line")
+  endLine       Int?     @map("end_line")
+  contentHash   String   @map("content_hash")
+  createdAt     DateTime @default(now()) @map("created_at")
+  
+  codeFile      CodeFile         @relation(fields: [codeFileId], references: [id], onDelete: Cascade)
+  embedding     CodeSectionEmbedding?
+  featureMappings FeatureCodeMapping[]
+  
+  @@index([codeFileId])
+  @@index([sectionType])
+  @@index([sectionName])
+  @@index([contentHash])
+  @@map("code_sections")
+}
+
+model CodeFileEmbedding {
+  codeFileId   String   @id @map("code_file_id")
+  embedding    Json     // Array of floats (1536 dimensions) - embedding of entire file
+  contentHash  String   @map("content_hash")
+  model        String
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+  
+  codeFile     CodeFile @relation(fields: [codeFileId], references: [id], onDelete: Cascade)
+  
+  @@index([contentHash])
+  @@index([model])
+  @@map("code_file_embeddings")
+}
+
+model CodeSectionEmbedding {
+  codeSectionId String   @id @map("code_section_id")
+  embedding     Json     // Array of floats (1536 dimensions) - embedding of this section
+  contentHash   String   @map("content_hash")
+  model         String
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+  
+  codeSection   CodeSection @relation(fields: [codeSectionId], references: [id], onDelete: Cascade)
+  
+  @@index([contentHash])
+  @@index([model])
+  @@map("code_section_embeddings")
+}
+
+model FeatureCodeMapping {
+  id            String   @id
+  featureId     String   @map("feature_id")
+  codeSectionId String   @map("code_section_id")
+  similarity    Decimal  @db.Decimal(5, 4) // 0.0-1.0 cosine similarity
+  matchType     String   @map("match_type") // 'semantic', 'keyword', 'exact'
+  searchQuery   String?  @map("search_query") // Original search that found this
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+  
+  feature    Feature    @relation(fields: [featureId], references: [id], onDelete: Cascade)
+  codeSection CodeSection @relation(fields: [codeSectionId], references: [id], onDelete: Cascade)
+  
+  @@unique([featureId, codeSectionId])
+  @@index([featureId])
+  @@index([codeSectionId])
+  @@index([similarity(sort: Desc)])
+  @@index([matchType])
+  @@map("feature_code_mappings")
 }
 
 model UngroupedIssue {

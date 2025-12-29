@@ -5,6 +5,7 @@ dist/
 
 # IDE files
 .idea/
+.cursorrules
 
 # Cache and data files - ignore all JSON files in these directories
 cache/**/*.json

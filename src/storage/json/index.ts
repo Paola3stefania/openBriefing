@@ -1058,8 +1058,8 @@ export class JsonStorage implements IStorage {
   }>): Promise<void> {
     // For JSON storage, GitHub issues are stored in the cache file
     // This method is a no-op as issues are saved via the cache file in fetch_github_issues
-    // The cache file is managed by the MCP server directly
   }
+
 
   async getGitHubIssues(options?: {
     inGroup?: boolean;

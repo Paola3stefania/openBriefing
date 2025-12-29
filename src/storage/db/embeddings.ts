@@ -456,7 +456,8 @@ export async function computeAndSaveDocumentationEmbeddings(
 export async function computeAndSaveFeatureEmbeddings(
   apiKey: string,
   onProgress?: (processed: number, total: number) => void,
-  force: boolean = false
+  force: boolean = false,
+  providedCodeContext?: string
 ): Promise<void> {
   if (!apiKey) {
     throw new Error("OPENAI_API_KEY is required to compute feature embeddings");
@@ -483,37 +484,48 @@ export async function computeAndSaveFeatureEmbeddings(
 
   console.error(`[Embeddings] Found ${allFeatures.length} features in database`);
 
-  // Fetch code context from GitHub repository if configured
-  let codeContext = "";
-  try {
-    const { getConfig } = await import("../../config/index.js");
-    const config = getConfig();
-    const githubRepoUrl = config.pmIntegration?.github_repo_url;
-    
-    if (githubRepoUrl) {
-      console.error(`[Embeddings] Fetching code context from GitHub repository: ${githubRepoUrl}`);
-      const { parseGitHubRepoUrl, fetchRepositoryCodeContext } = await import("../../connectors/github/codeFetcher.js");
-      const repoInfo = parseGitHubRepoUrl(githubRepoUrl);
+  // Use provided code context, or fetch from GitHub repository if configured
+  let codeContext = providedCodeContext || "";
+  
+  if (!codeContext) {
+    try {
+      const { getConfig } = await import("../../config/index.js");
+      const config = getConfig();
+      const githubRepoUrl = config.pmIntegration?.github_repo_url;
       
-      if (repoInfo) {
-        const githubToken = process.env.GITHUB_TOKEN;
-        codeContext = await fetchRepositoryCodeContext(repoInfo, githubToken, 15); // Fetch up to 15 files
-        if (codeContext) {
-          console.error(`[Embeddings] Fetched code context (${codeContext.length} characters) from repository`);
-          // Truncate to reasonable size to avoid token limits
-          if (codeContext.length > 5000) {
-            codeContext = codeContext.substring(0, 5000) + "... [truncated]";
+      if (githubRepoUrl) {
+        console.error(`[Embeddings] Fetching code context from GitHub repository: ${githubRepoUrl}`);
+        const { parseGitHubRepoUrl, fetchRepositoryCodeContext } = await import("../../connectors/github/codeFetcher.js");
+        const repoInfo = parseGitHubRepoUrl(githubRepoUrl);
+        
+        if (repoInfo) {
+          const githubToken = process.env.GITHUB_TOKEN;
+          // Fetch more files for better context (increased from 15 to 30)
+          codeContext = await fetchRepositoryCodeContext(repoInfo, githubToken, 30);
+          if (codeContext) {
+            console.error(`[Embeddings] Fetched code context (${codeContext.length} characters) from repository`);
+            // Truncate to reasonable size to avoid token limits (increased from 5000 to 10000)
+            if (codeContext.length > 10000) {
+              codeContext = codeContext.substring(0, 10000) + "... [truncated]";
+            }
+          } else {
+            console.error(`[Embeddings] No code context fetched from repository`);
           }
         } else {
-          console.error(`[Embeddings] No code context fetched from repository`);
+          console.error(`[Embeddings] Failed to parse GitHub repo URL: ${githubRepoUrl}`);
         }
-      } else {
-        console.error(`[Embeddings] Failed to parse GitHub repo URL: ${githubRepoUrl}`);
       }
+    } catch (error) {
+      console.error(`[Embeddings] Failed to fetch code context: ${error instanceof Error ? error.message : String(error)}`);
+      // Continue without code context
     }
-  } catch (error) {
-    console.error(`[Embeddings] Failed to fetch code context: ${error instanceof Error ? error.message : String(error)}`);
-    // Continue without code context
+  } else {
+    console.error(`[Embeddings] Using provided code context (${codeContext.length} characters)`);
+    // Truncate provided context to reasonable size to avoid token limits
+    if (codeContext.length > 10000) {
+      codeContext = codeContext.substring(0, 10000) + "... [truncated]";
+      console.error(`[Embeddings] Truncated provided code context to 10000 characters`);
+    }
   }
 
   const model = getEmbeddingModel();
@@ -556,6 +568,28 @@ export async function computeAndSaveFeatureEmbeddings(
   
   for (const feature of allFeatures) {
     const keywords = Array.isArray(feature.relatedKeywords) ? feature.relatedKeywords : [];
+    
+    // Get code context using lazy indexing (automatically searches and indexes if needed)
+    let featureCodeContext = "";
+    try {
+      const { getCodeContextForFeature } = await import("./codeIndexer.js");
+      const { getConfig } = await import("../../config/index.js");
+      const config = getConfig();
+      const repositoryUrl = config.pmIntegration?.github_repo_url;
+      
+      featureCodeContext = await getCodeContextForFeature(
+        feature.id,
+        feature.name,
+        keywords,
+        repositoryUrl
+      );
+      
+      if (featureCodeContext) {
+        console.error(`[Embeddings] Got code context for feature "${feature.name}" (${featureCodeContext.length} characters)`);
+      }
+    } catch (error) {
+      console.error(`[Embeddings] Failed to get code context for feature "${feature.name}": ${error instanceof Error ? error.message : String(error)}`);
+    }
     
     // Find groups that have this feature in their affectsFeatures (shared for both issues and threads)
     // Prisma doesn't support direct JSONB array queries, so we fetch and filter
@@ -828,9 +862,14 @@ export async function computeAndSaveFeatureEmbeddings(
       console.error(`[Embeddings] Could not fetch documentation sections for feature ${feature.id}: ${error instanceof Error ? error.message : String(error)}`);
     }
     
-    // Find feature-specific code context (code files that mention the feature)
+    // Use lazy-indexed code context (preferred) or fallback to general code context
     let featureSpecificCodeContext = "";
-    if (codeContext) {
+    
+    // Prefer lazy-indexed code context (more accurate, feature-specific)
+    if (featureCodeContext) {
+      featureSpecificCodeContext = ` Feature-Specific Code: ${featureCodeContext.substring(0, 2000)}`;
+    } else if (codeContext) {
+      // Fallback to general code context if lazy indexing didn't find anything
       const featureNameLower = feature.name.toLowerCase();
       const featureKeywords = keywords.map(k => k.toLowerCase());
       
@@ -857,17 +896,19 @@ export async function computeAndSaveFeatureEmbeddings(
       }
     }
     
-    // Include code context for all features (shared repository context)
+    // Include code context - prefer lazy-indexed (feature-specific) over general
     const codeContextPart = codeContext ? ` Code Context: ${codeContext}` : "";
-    // Include feature-specific code context if available (more relevant)
+    // Include feature-specific code context if available (from lazy indexing - more relevant)
     const finalCodeContext = featureSpecificCodeContext || codeContextPart;
     
     const contentText = `${feature.name}${feature.description ? `: ${feature.description}` : ""}${keywords.length > 0 ? ` Keywords: ${keywords.join(", ")}` : ""}${docContext}${issueContext}${threadContext}${finalCodeContext}`;
     const currentHash = hashContent(contentText);
     const existingHash = existingHashes.get(feature.id);
 
-    // Prepare code context to save (use feature-specific if available, otherwise general)
-    const codeContextToSave = featureSpecificCodeContext ? featureSpecificCodeContext.replace(" Feature-Specific Code: ", "") : (codeContext || "");
+    // Prepare code context to save (prefer lazy-indexed, then feature-specific, then general)
+    const codeContextToSave = featureCodeContext 
+      ? featureCodeContext.substring(0, 5000) // Limit size
+      : (featureSpecificCodeContext ? featureSpecificCodeContext.replace(" Feature-Specific Code: ", "") : (codeContext || ""));
 
     if (!existingHash || existingHash !== currentHash) {
       featuresToEmbed.push({
@@ -1074,16 +1115,182 @@ export async function saveThreadEmbedding(
 
 /**
  * Get thread embedding
+ * @param currentContentHash Optional - if provided, validates that content hasn't changed
+ * @returns Embedding if exists and contentHash matches (if provided), null otherwise
  */
-export async function getThreadEmbedding(threadId: string): Promise<Embedding | null> {
+export async function getThreadEmbedding(
+  threadId: string,
+  currentContentHash?: string
+): Promise<Embedding | null> {
   const model = getEmbeddingModel();
   const result = await prisma.threadEmbedding.findUnique({
     where: { threadId },
-    select: { embedding: true, model: true },
+    select: { embedding: true, model: true, contentHash: true },
   });
 
   if (!result || result.model !== model) {
     return null;
+  }
+
+  // If currentContentHash provided, validate content hasn't changed
+  if (currentContentHash && result.contentHash !== currentContentHash) {
+    return null; // Content changed, need to recompute
+  }
+
+  return result.embedding as Embedding;
+}
+
+/**
+ * Save group embedding
+ */
+export async function saveGroupEmbedding(
+  groupId: string,
+  embedding: Embedding,
+  contentHash: string
+): Promise<void> {
+  const model = getEmbeddingModel();
+  await prisma.groupEmbedding.upsert({
+    where: { groupId },
+    update: {
+      embedding: embedding as Prisma.InputJsonValue,
+      contentHash,
+      model,
+    },
+    create: {
+      groupId,
+      embedding: embedding as Prisma.InputJsonValue,
+      contentHash,
+      model,
+    },
+  });
+}
+
+/**
+ * Get group embedding
+ * @param currentContentHash Optional - if provided, validates that content hasn't changed
+ * @returns Embedding if exists and contentHash matches (if provided), null otherwise
+ */
+export async function getGroupEmbedding(
+  groupId: string,
+  currentContentHash?: string
+): Promise<Embedding | null> {
+  const model = getEmbeddingModel();
+  const result = await prisma.groupEmbedding.findUnique({
+    where: { groupId },
+    select: { embedding: true, model: true, contentHash: true },
+  });
+
+  if (!result || result.model !== model) {
+    return null;
+  }
+
+  // If currentContentHash provided, validate content hasn't changed
+  if (currentContentHash && result.contentHash !== currentContentHash) {
+    return null; // Content changed, need to recompute
+  }
+
+  return result.embedding as Embedding;
+}
+
+/**
+ * Save code section embedding
+ */
+export async function saveCodeSectionEmbedding(
+  codeSectionId: string,
+  embedding: Embedding,
+  contentHash: string
+): Promise<void> {
+  const model = getEmbeddingModel();
+  await prisma.codeSectionEmbedding.upsert({
+    where: { codeSectionId },
+    update: {
+      embedding: embedding as Prisma.InputJsonValue,
+      contentHash,
+      model,
+    },
+    create: {
+      codeSectionId,
+      embedding: embedding as Prisma.InputJsonValue,
+      contentHash,
+      model,
+    },
+  });
+}
+
+/**
+ * Get code section embedding
+ * @param currentContentHash Optional - if provided, validates that content hasn't changed
+ * @returns Embedding if exists and contentHash matches (if provided), null otherwise
+ */
+export async function getCodeSectionEmbedding(
+  codeSectionId: string,
+  currentContentHash?: string
+): Promise<Embedding | null> {
+  const model = getEmbeddingModel();
+  const result = await prisma.codeSectionEmbedding.findUnique({
+    where: { codeSectionId },
+    select: { embedding: true, model: true, contentHash: true },
+  });
+
+  if (!result || result.model !== model) {
+    return null;
+  }
+
+  // If currentContentHash provided, validate content hasn't changed
+  if (currentContentHash && result.contentHash !== currentContentHash) {
+    return null; // Content changed, need to recompute
+  }
+
+  return result.embedding as Embedding;
+}
+
+/**
+ * Save code file embedding
+ */
+export async function saveCodeFileEmbedding(
+  codeFileId: string,
+  embedding: Embedding,
+  contentHash: string
+): Promise<void> {
+  const model = getEmbeddingModel();
+  await prisma.codeFileEmbedding.upsert({
+    where: { codeFileId },
+    update: {
+      embedding: embedding as Prisma.InputJsonValue,
+      contentHash,
+      model,
+    },
+    create: {
+      codeFileId,
+      embedding: embedding as Prisma.InputJsonValue,
+      contentHash,
+      model,
+    },
+  });
+}
+
+/**
+ * Get code file embedding
+ * @param currentContentHash Optional - if provided, validates that content hasn't changed
+ * @returns Embedding if exists and contentHash matches (if provided), null otherwise
+ */
+export async function getCodeFileEmbedding(
+  codeFileId: string,
+  currentContentHash?: string
+): Promise<Embedding | null> {
+  const model = getEmbeddingModel();
+  const result = await prisma.codeFileEmbedding.findUnique({
+    where: { codeFileId },
+    select: { embedding: true, model: true, contentHash: true },
+  });
+
+  if (!result || result.model !== model) {
+    return null;
+  }
+
+  // If currentContentHash provided, validate content hasn't changed
+  if (currentContentHash && result.contentHash !== currentContentHash) {
+    return null; // Content changed, need to recompute
   }
 
   return result.embedding as Embedding;
@@ -1408,15 +1615,28 @@ export async function saveIssueEmbedding(
   });
 }
 
-export async function getIssueEmbedding(issueNumber: number): Promise<Embedding | null> {
+/**
+ * Get issue embedding
+ * @param currentContentHash Optional - if provided, validates that content hasn't changed
+ * @returns Embedding if exists and contentHash matches (if provided), null otherwise
+ */
+export async function getIssueEmbedding(
+  issueNumber: number,
+  currentContentHash?: string
+): Promise<Embedding | null> {
   const model = getEmbeddingModel();
   const result = await prisma.issueEmbedding.findUnique({
     where: { issueNumber },
-    select: { embedding: true, model: true },
+    select: { embedding: true, model: true, contentHash: true },
   });
 
   if (!result || result.model !== model) {
     return null;
+  }
+
+  // If currentContentHash provided, validate content hasn't changed
+  if (currentContentHash && result.contentHash !== currentContentHash) {
+    return null; // Content changed, need to recompute
   }
 
   return result.embedding as Embedding;

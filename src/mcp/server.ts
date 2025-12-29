@@ -251,6 +251,24 @@ const tools: Tool[] = [
     },
   },
   {
+    name: "setup_github_oauth",
+    description: "Set up GitHub OAuth to automatically generate tokens. Generates OAuth URL and provides setup instructions. Requires GITHUB_OAUTH_CLIENT_ID and GITHUB_OAUTH_CLIENT_SECRET to be set.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        client_id: {
+          type: "string",
+          description: "GitHub OAuth Client ID (optional if GITHUB_OAUTH_CLIENT_ID env var is set)",
+        },
+        client_secret: {
+          type: "string",
+          description: "GitHub OAuth Client Secret (optional if GITHUB_OAUTH_CLIENT_SECRET env var is set)",
+        },
+      },
+      required: [],
+    },
+  },
+  {
     name: "fetch_github_issues",
     description: "Fetch all GitHub issues and cache them. If cache exists, updates incrementally. If not, fetches all with pagination.",
     inputSchema: {
@@ -428,7 +446,7 @@ const tools: Tool[] = [
   },
   {
     name: "match_groups_to_features",
-    description: "Match groups from grouping results to product features using semantic similarity. Updates the grouping JSON file with affects_features and is_cross_cutting. Requires OPENAI_API_KEY and documentation URLs in config.",
+    description: "Match groups from grouping results to product features using semantic similarity. Updates the grouping JSON file with affects_features and is_cross_cutting. By default, skips groups that are already matched to features (resume mode). Set force=true to re-match all groups. Requires OPENAI_API_KEY and documentation URLs in config.",
     inputSchema: {
       type: "object",
       properties: {
@@ -446,6 +464,11 @@ const tools: Tool[] = [
           minimum: 0,
           maximum: 1,
           default: 0.6,
+        },
+        force: {
+          type: "boolean",
+          description: "If true, re-match all groups even if they already have affects_features set. If false (default), only match groups that don't have affects_features set yet (resume mode).",
+          default: false,
         },
       },
       required: [],
@@ -501,7 +524,7 @@ const tools: Tool[] = [
   },
   {
     name: "compute_feature_embeddings",
-    description: "Compute and update embeddings for product features. This includes documentation context, related GitHub issues, Discord conversations, and code context from the repository (if GITHUB_REPO_URL is configured). Only computes embeddings for features that don't have embeddings or have changed content. Set force=true to recompute all embeddings. Requires OPENAI_API_KEY.",
+    description: "Compute and update embeddings for product features. This includes documentation context, related GitHub issues, Discord conversations, and code context from the repository. Code indexing will automatically try LOCAL_REPO_PATH first (if configured) for faster local code access, then fallback to GitHub API. IMPORTANT: When called from within a codebase (e.g., Better Auth repo), you can either: (1) Set LOCAL_REPO_PATH environment variable to point to the local repo, or (2) Use codebase_search to find relevant code files and pass them via the code_context parameter. Only computes embeddings for features that don't have embeddings or have changed content. Set force=true to recompute all embeddings. Requires OPENAI_API_KEY.",
     inputSchema: {
       type: "object",
       properties: {
@@ -510,8 +533,32 @@ const tools: Tool[] = [
           description: "Force recomputation of all feature embeddings, even if they already exist. Useful when you've added new context sources (e.g., GitHub issues, Discord conversations).",
           default: false,
         },
+        code_context: {
+          type: "string",
+          description: "Optional code context from the repository. If provided, this will be used instead of fetching from GitHub API or local filesystem. The agent can use codebase_search to find relevant code files (search for core features, authentication, main functionality, etc.) and pass the results here. If not provided and LOCAL_REPO_PATH is set, will use local filesystem. Otherwise, will use GitHub API.",
+        },
       },
       required: [],
+    },
+  },
+  {
+    name: "index_codebase",
+    description: "Manually search and index code from the repository for a specific query. This is useful for pre-indexing code or re-indexing after code changes. The indexed code will be available for feature matching. Will use LOCAL_REPO_PATH if configured (faster), otherwise falls back to GITHUB_REPO_URL. Requires either LOCAL_REPO_PATH or GITHUB_REPO_URL to be configured.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        search_query: {
+          type: "string",
+          description: "Search query to find relevant code (e.g., 'SSO authentication', 'session management'). The code matching this query will be indexed.",
+          default: "",
+        },
+        force: {
+          type: "boolean",
+          description: "Force re-indexing even if code is already indexed. Useful after code changes.",
+          default: false,
+        },
+      },
+      required: ["search_query"],
     },
   },
   {
@@ -887,6 +934,82 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       };
     }
 
+    case "setup_github_oauth": {
+      const { client_id, client_secret } = args as { client_id?: string; client_secret?: string };
+      
+      const CLIENT_ID = client_id || process.env.GITHUB_OAUTH_CLIENT_ID;
+      const CLIENT_SECRET = client_secret || process.env.GITHUB_OAUTH_CLIENT_SECRET;
+      
+      if (!CLIENT_ID || !CLIENT_SECRET) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                success: false,
+                error: "Missing GitHub OAuth credentials",
+                instructions: [
+                  "1. Go to https://github.com/settings/developers",
+                  "2. Click 'New OAuth App'",
+                  "3. Fill in:",
+                  "   - Application name: 'UnMute MCP'",
+                  "   - Homepage URL: http://localhost:3000",
+                  "   - Authorization callback URL: http://localhost:3000/callback",
+                  "4. Copy the Client ID and Client Secret",
+                  "5. Set environment variables:",
+                  "   export GITHUB_OAUTH_CLIENT_ID='your_client_id'",
+                  "   export GITHUB_OAUTH_CLIENT_SECRET='your_client_secret'",
+                  "6. Or pass them as parameters to this tool",
+                  "",
+                  "Alternatively, run the interactive setup:",
+                  "   npm run github-oauth-setup"
+                ].join("\n"),
+              }, null, 2),
+            },
+          ],
+        };
+      }
+      
+      const PORT = 3000;
+      const REDIRECT_URI = `http://localhost:${PORT}/callback`;
+      const authUrl = `https://github.com/login/oauth/authorize?client_id=${CLIENT_ID}&scope=public_repo&redirect_uri=${encodeURIComponent(REDIRECT_URI)}`;
+      
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              success: true,
+              message: "GitHub OAuth setup ready",
+              instructions: [
+                "To complete the OAuth flow:",
+                "",
+                "Option 1: Interactive Setup (Recommended)",
+                "  Run: npm run github-oauth-setup",
+                "  This will open your browser and handle everything automatically",
+                "",
+                "Option 2: Manual Setup",
+                `  1. Visit this URL in your browser:`,
+                `     ${authUrl}`,
+                "  2. Authorize the application",
+                "  3. You'll be redirected to localhost:3000/callback with a code",
+                "  4. Exchange the code for a token using the GitHub API",
+                "",
+                "After getting your token, add it to GITHUB_TOKEN:",
+                "  export GITHUB_TOKEN='your_token_here'",
+                "",
+                "Or if you have multiple tokens (for rotation):",
+                "  export GITHUB_TOKEN='token1,token2,token3'"
+              ].join("\n"),
+              auth_url: authUrl,
+              redirect_uri: REDIRECT_URI,
+              scope: "public_repo",
+            }, null, 2),
+          },
+        ],
+      };
+    }
+
     case "fetch_github_issues": {
       const { incremental = false, limit } = args as { incremental?: boolean; limit?: number };
       const config = getConfig();
@@ -941,13 +1064,83 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           console.error(`[GitHub Issues] Using provided limit: ${actualLimit}`);
         }
 
-        const githubToken = process.env.GITHUB_TOKEN;
+        // Initialize token manager (supports multiple comma-separated tokens)
+        const { GitHubTokenManager } = await import("../connectors/github/tokenManager.js");
+        let tokenManager = await GitHubTokenManager.fromEnvironment();
+        
+        // Initialize OAuth client manager (supports multiple comma-separated client IDs)
+        const { OAuthClientManager } = await import("../connectors/github/oauthClientManager.js");
+        const oauthClientManager = OAuthClientManager.fromEnvironment();
+        if (oauthClientManager) {
+          const allClients = oauthClientManager.getAllClients();
+          console.error(`[GitHub Issues] OAuth client manager initialized with ${allClients.length} client(s)`);
+          allClients.forEach((client, index) => {
+            console.error(`[GitHub Issues]   Client ${index + 1}: ${client.clientId.substring(0, 8)}...`);
+          });
+        } else {
+          console.error(`[GitHub Issues] No OAuth client manager configured (GITHUB_OAUTH_CLIENT_ID and GITHUB_OAUTH_CLIENT_SECRET not set)`);
+        }
+        
+        if (!tokenManager) {
+          // Try to get token via OAuth if credentials are available
+          if (oauthClientManager) {
+            console.error(`[GitHub Issues] No tokens found. Attempting to get token via OAuth...`);
+            const { getNewTokenViaOAuth } = await import("../connectors/github/oauthFlow.js");
+            
+            // Try each client ID until we get a token or run out of clients
+            let newToken: string | null = null;
+            const allClients = oauthClientManager.getAllClients();
+            let attempts = 0;
+            const maxAttempts = allClients.length;
+            
+            while (!newToken && attempts < maxAttempts) {
+              const client = oauthClientManager.getUnusedClient();
+              if (!client) {
+                break;
+              }
+              
+              try {
+                console.error(`[GitHub Issues] Trying OAuth client ${client.clientId.substring(0, 8)}... (attempt ${attempts + 1}/${maxAttempts})`);
+                newToken = await getNewTokenViaOAuth(client.clientId, client.clientSecret);
+                if (newToken) {
+                  // Create token manager with the new token (in memory only)
+                  tokenManager = new GitHubTokenManager([newToken]);
+                  console.error(`[GitHub Issues] Successfully obtained new token via OAuth (Client ID: ${client.clientId.substring(0, 8)}...)!`);
+                  break;
+                }
+              } catch (oauthError) {
+                console.error(`[GitHub Issues] OAuth flow failed for client ${client.clientId.substring(0, 8)}...: ${oauthError}`);
+                attempts++;
+                // Continue to next client
+              }
+            }
+            
+            if (!newToken && attempts > 0) {
+              console.error(`[GitHub Issues] All ${attempts} OAuth client(s) failed. Please check your OAuth credentials.`);
+            }
+          }
+          
+          if (!tokenManager) {
+            throw new Error("GITHUB_TOKEN environment variable is required. You can provide multiple tokens separated by commas: token1,token2,token3. Or set GITHUB_OAUTH_CLIENT_ID and GITHUB_OAUTH_CLIENT_SECRET (comma-separated for multiple clients) for automatic token generation.");
+          }
+        }
+        
+        const tokenStatus = tokenManager.getStatus();
+        console.error(`[GitHub Issues] Token status: ${tokenStatus.map(t => `Token ${t.index}: ${t.remaining}/${t.limit}`).join(', ')}`);
+        
         console.error(`[GitHub Issues] Starting to fetch issues from GitHub API...`);
         const startTime = Date.now();
         
         // Prepare existing issues for resume capability (even if not incremental, we can resume from partial cache)
         const existingIssuesForResume = existingCache?.issues || [];
         let accumulatedIssues = [...existingIssuesForResume];
+        
+        // Extract issue numbers from existing cache to help Phase 1 resume
+        // This allows Phase 1 to skip re-collecting issue numbers we already have
+        const existingIssueNumbers = existingIssuesForResume.map(issue => issue.number);
+        if (existingIssueNumbers.length > 0 && !incremental) {
+          console.error(`[GitHub Issues] Resume mode: ${existingIssueNumbers.length} issue numbers already known, Phase 1 will use these to avoid re-collection`);
+        }
         
         // Callback to save progress incrementally after each batch
         const onBatchComplete = async (batchIssues: GitHubIssue[]) => {
@@ -977,17 +1170,36 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
         };
         
-        const newIssues = await fetchAllGitHubIssues(
-          githubToken, 
-          true, 
-          undefined, 
-          undefined, 
-          sinceDate, 
-          actualLimit,
-          true, // includeComments
-          existingIssuesForResume, // Pass existing issues for resume
-          onBatchComplete // Pass callback for incremental saving
-        );
+        let newIssues: GitHubIssue[];
+        try {
+          newIssues = await fetchAllGitHubIssues(
+            tokenManager, // Pass token manager instead of single token
+            true, 
+            undefined, 
+            undefined, 
+            sinceDate, 
+            actualLimit,
+            true, // includeComments
+            existingIssuesForResume, // Pass existing issues for resume
+            onBatchComplete, // Pass callback for incremental saving
+            existingIssueNumbers.length > 0 && !incremental ? existingIssueNumbers : undefined // Pass issue numbers for Phase 1 resume
+          );
+        } catch (error) {
+          // Check if error is due to all tokens being exhausted
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          const isRateLimitError = errorMessage.includes('403') || errorMessage.includes('429') || errorMessage.includes('exhausted');
+          
+          if (isRateLimitError && tokenManager.areAllTokensExhausted()) {
+            // All tokens exhausted - rate limits are per GitHub user account
+            // OAuth client rotation doesn't help (same user = same rate limit)
+            console.error(`[GitHub Issues] All tokens exhausted. Rate limits are per GitHub user account, not per OAuth client.`);
+            console.error(`[GitHub Issues] To get separate rate limits, use tokens from different GitHub accounts via GITHUB_TOKEN (comma-separated).`);
+            throw error; // Re-throw original error
+          } else {
+            throw error; // Re-throw if not a rate limit error
+          }
+        }
+        
         const fetchTime = ((Date.now() - startTime) / 1000).toFixed(2);
         console.error(`[GitHub Issues] Fetch completed in ${fetchTime}s. Fetched ${newIssues.length} issues.`);
 
@@ -1173,14 +1385,21 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const { computeAndSaveFeatureEmbeddings } = await import("../storage/db/embeddings.js");
       
       const force = (args?.force === true);
+      const codeContext = (args?.code_context as string | undefined);
       
       console.error("[Embeddings] Starting feature embeddings computation...");
-      console.error("[Embeddings] This will include: documentation context, related GitHub issues, Discord conversations, and code context from repository (if GITHUB_REPO_URL is configured)");
+      if (codeContext) {
+        console.error(`[Embeddings] Using provided code context from agent (${codeContext.length} characters)`);
+      } else {
+        console.error("[Embeddings] No code context provided - will attempt to fetch from GitHub API if GITHUB_REPO_URL is configured");
+        console.error("[Embeddings] Note: For better accuracy, the agent should use codebase_search to find relevant code and pass it via code_context parameter");
+      }
+      console.error("[Embeddings] This will include: documentation context, related GitHub issues, Discord conversations, and code context from repository");
       if (force) {
         console.error("[Embeddings] Force mode enabled - will recompute all embeddings");
       }
       
-      await computeAndSaveFeatureEmbeddings(process.env.OPENAI_API_KEY, undefined, force);
+      await computeAndSaveFeatureEmbeddings(process.env.OPENAI_API_KEY, undefined, force, codeContext);
 
       return {
         content: [
@@ -1188,11 +1407,84 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             type: "text",
             text: JSON.stringify({
               success: true,
-              message: "Feature embeddings computed successfully. Features now include documentation context, related GitHub issues, and code context from repository (if configured).",
+              message: codeContext 
+                ? "Feature embeddings computed successfully with provided code context. Features now include documentation context, related GitHub issues, Discord conversations, and the provided code context."
+                : "Feature embeddings computed successfully. Features now include documentation context, related GitHub issues, Discord conversations, and code context from repository (if configured).",
             }, null, 2),
           },
         ],
       };
+    }
+
+    case "index_codebase": {
+      const { search_query, force = false } = args as {
+        search_query: string;
+        force?: boolean;
+      };
+
+      if (!search_query || search_query.trim().length === 0) {
+        throw new Error("search_query is required");
+      }
+
+      const { getConfig } = await import("../config/index.js");
+      const config = getConfig();
+      const repositoryUrl = config.pmIntegration?.github_repo_url;
+      const localRepoPath = config.pmIntegration?.local_repo_path;
+
+      if (!repositoryUrl && !localRepoPath) {
+        throw new Error("Either GITHUB_REPO_URL or LOCAL_REPO_PATH must be configured to index codebase");
+      }
+
+      const { searchAndIndexCode } = await import("../storage/db/codeIndexer.js");
+      
+      console.error(`[CodeIndexing] Starting manual code indexing for query: "${search_query}"`);
+      if (force) {
+        console.error(`[CodeIndexing] Force mode enabled - will re-index even if already indexed`);
+      }
+      
+      try {
+        // Search and index code (this will use cache if not forcing)
+        // Use repositoryUrl if available, otherwise use localRepoPath as fallback identifier
+        const repoIdentifier = repositoryUrl || localRepoPath || "";
+        const codeContext = await searchAndIndexCode(
+          search_query,
+          repoIdentifier,
+          "", // No specific feature ID for manual indexing
+          search_query,
+          force
+        );
+
+        if (codeContext) {
+          const fileCount = (codeContext.match(/File: /g) || []).length;
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  success: true,
+                  message: `Code indexed successfully for query "${search_query}". Found ${fileCount} file(s).`,
+                  code_context_length: codeContext.length,
+                  file_count: fileCount,
+                }, null, 2),
+              },
+            ],
+          };
+        } else {
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  success: false,
+                  message: `No code found for query "${search_query}"`,
+                }, null, 2),
+              },
+            ],
+          };
+        }
+      } catch (error) {
+        throw new Error(`Failed to index codebase: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
 
     case "fetch_discord_messages": {
@@ -4415,10 +4707,12 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           grouping_data_path,
           channel_id,
           min_similarity = 0.6,
+          force = false,
         } = args as {
           grouping_data_path?: string;
           channel_id?: string;
           min_similarity?: number;
+          force?: boolean;
         };
 
         const config = getConfig();
@@ -4619,21 +4913,43 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         
         // Map groups to features and save incrementally (in batches)
         // This ensures progress is saved even if the process fails partway through
-        console.error(`[Feature Matching] Mapping ${groupingData.groups.length} groups to ${features.length} features (saving incrementally)...`);
+        // By default, skip groups that already have affects_features set (resume mode)
         const { mapGroupsToFeatures, mapUngroupedThreadsToFeatures, mapUngroupedIssuesToFeatures } = await import("../export/featureMapper.js");
         const { hasDatabaseConfig: hasDbConfig, getStorage: getStorageFn } = await import("../storage/factory.js");
         const useDatabaseForIncrementalSaving = useDatabaseForStorage || (hasDbConfig() && await getStorageFn().isAvailable());
         
-        // Process groups in batches, match each batch, then save immediately
+        // Separate groups into already-matched and unmatched
+        const alreadyMatchedGroups: Group[] = [];
+        const unmatchedGroups: Group[] = [];
+        
+        for (const group of groupingData.groups) {
+          // Check if group already has affects_features set (and it's not just "general")
+          const hasValidMatch = group.affects_features && 
+            group.affects_features.length > 0 && 
+            !(group.affects_features.length === 1 && group.affects_features[0]?.id === "general");
+          
+          if (!force && hasValidMatch) {
+            // Group already matched, preserve it
+            alreadyMatchedGroups.push(group);
+          } else {
+            // Group needs matching (either unmatched or force=true)
+            unmatchedGroups.push(group);
+          }
+        }
+        
+        console.error(`[Feature Matching] Found ${alreadyMatchedGroups.length} already-matched groups, ${unmatchedGroups.length} groups to match`);
+        console.error(`[Feature Matching] Mapping ${unmatchedGroups.length} groups to ${features.length} features (saving incrementally)...`);
+        
+        // Process unmatched groups in batches, match each batch, then save immediately
         const BATCH_SIZE = 50; // Process 50 groups at a time
         const allGroupsWithFeatures: Group[] = [];
         let totalMatched = 0;
         let totalSaved = 0;
         
-        for (let i = 0; i < groupingData.groups.length; i += BATCH_SIZE) {
-          const batch = groupingData.groups.slice(i, i + BATCH_SIZE);
+        for (let i = 0; i < unmatchedGroups.length; i += BATCH_SIZE) {
+          const batch = unmatchedGroups.slice(i, i + BATCH_SIZE);
           const batchNumber = Math.floor(i / BATCH_SIZE) + 1;
-          const totalBatches = Math.ceil(groupingData.groups.length / BATCH_SIZE);
+          const totalBatches = Math.ceil(unmatchedGroups.length / BATCH_SIZE);
           
           console.error(`[Feature Matching] Processing batch ${batchNumber}/${totalBatches} (${batch.length} groups)...`);
           
@@ -4657,7 +4973,8 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
         }
         
-        const groupsWithFeatures = allGroupsWithFeatures;
+        // Merge already-matched groups with newly matched groups
+        const groupsWithFeatures = [...alreadyMatchedGroups, ...allGroupsWithFeatures];
         
         // Debug: Check what was matched
         console.error(`[DEBUG] After mapping: ${groupsWithFeatures.length} groups returned, ${totalSaved} saved to database`);
@@ -4683,28 +5000,52 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           console.error(`[DEBUG] WARNING: ALL ${groupsWithFeatures.length} groups matched to General! This suggests similarity scores are too low or embeddings aren't working.`);
         }
 
-        // Map ungrouped threads to features
+        // Map ungrouped threads to features (skip already-matched unless force=true)
         if (groupingData.ungrouped_threads && groupingData.ungrouped_threads.length > 0) {
-          // Log removed to avoid interfering with MCP JSON protocol
-          // console.error(`[Feature Matching] Mapping ${groupingData.ungrouped_threads.length} ungrouped threads to features...`);
-          // Ensure channel_id is preserved for ungrouped threads
-          const ungroupedThreadsWithChannelId = groupingData.ungrouped_threads.map(t => ({
-            ...t,
-            channel_id: t.channel_id || groupingData.channel_id,
-          }));
-          const ungroupedThreadsWithFeatures = await mapUngroupedThreadsToFeatures(
-            ungroupedThreadsWithChannelId,
-            features,
-            min_similarity
-          );
-          // Preserve channel_id in the result
-          groupingData.ungrouped_threads = ungroupedThreadsWithFeatures.map(t => ({
-            ...t,
-            channel_id: t.channel_id || groupingData.channel_id,
-          })) as UngroupedThread[];
+          // Separate already-matched and unmatched threads
+          const alreadyMatchedThreads: typeof groupingData.ungrouped_threads = [];
+          const unmatchedThreads: typeof groupingData.ungrouped_threads = [];
+          
+          for (const thread of groupingData.ungrouped_threads) {
+            const hasValidMatch = thread.affects_features && 
+              thread.affects_features.length > 0 && 
+              !(thread.affects_features.length === 1 && thread.affects_features[0]?.id === "general");
+            
+            if (!force && hasValidMatch) {
+              alreadyMatchedThreads.push(thread);
+            } else {
+              unmatchedThreads.push(thread);
+            }
+          }
+          
+          console.error(`[Feature Matching] Found ${alreadyMatchedThreads.length} already-matched ungrouped threads, ${unmatchedThreads.length} threads to match`);
+          
+          if (unmatchedThreads.length > 0) {
+            // Ensure channel_id is preserved for ungrouped threads
+            const ungroupedThreadsWithChannelId = unmatchedThreads.map(t => ({
+              ...t,
+              channel_id: t.channel_id || groupingData.channel_id,
+            }));
+            const ungroupedThreadsWithFeatures = await mapUngroupedThreadsToFeatures(
+              ungroupedThreadsWithChannelId,
+              features,
+              min_similarity
+            );
+            // Preserve channel_id in the result and merge with already-matched
+            groupingData.ungrouped_threads = [
+              ...alreadyMatchedThreads,
+              ...ungroupedThreadsWithFeatures.map(t => ({
+                ...t,
+                channel_id: t.channel_id || groupingData.channel_id,
+              }))
+            ] as UngroupedThread[];
+          } else {
+            // All threads already matched, keep them as-is
+            groupingData.ungrouped_threads = alreadyMatchedThreads;
+          }
         }
 
-        // Map ungrouped issues to features (if using database)
+        // Map ungrouped issues to features (if using database, skip already-matched unless force=true)
         let ungroupedIssuesMatched = 0;
         const useDatabase = hasDbConfig() && await getStorageFn().isAvailable();
         
@@ -4721,41 +5062,66 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 issueBody: true,
                 issueLabels: true,
                 issueAuthor: true,
+                affectsFeatures: true,
               },
             });
 
             if (ungroupedIssues.length > 0) {
-              // Convert to format expected by mapUngroupedIssuesToFeatures
-              const issuesToMatch = ungroupedIssues.map(issue => ({
-                issue_number: issue.issueNumber,
-                issue_title: issue.issueTitle,
-                issue_url: issue.issueUrl || undefined,
-                issue_state: issue.issueState || undefined,
-                issue_body: issue.issueBody || undefined,
-                issue_labels: issue.issueLabels || undefined,
-                issue_author: issue.issueAuthor || undefined,
-              }));
-
-              // Map to features
-              const ungroupedIssuesWithFeatures = await mapUngroupedIssuesToFeatures(
-                issuesToMatch,
-                features,
-                min_similarity
-              );
-
-              // Save back to database with affects_features
-              for (const issue of ungroupedIssuesWithFeatures) {
-                await prisma.ungroupedIssue.update({
-                  where: { issueNumber: issue.issue_number },
-                  data: {
-                    affectsFeatures: issue.affects_features ? JSON.parse(JSON.stringify(issue.affects_features)) : [],
-                  },
-                });
+              // Separate already-matched and unmatched issues
+              const alreadyMatchedIssues: typeof ungroupedIssues = [];
+              const unmatchedIssues: typeof ungroupedIssues = [];
+              
+              for (const issue of ungroupedIssues) {
+                const affectsFeatures = issue.affectsFeatures as Array<{ id: string; name: string }> | null;
+                const hasValidMatch = affectsFeatures && 
+                  affectsFeatures.length > 0 && 
+                  !(affectsFeatures.length === 1 && affectsFeatures[0]?.id === "general");
+                
+                if (!force && hasValidMatch) {
+                  alreadyMatchedIssues.push(issue);
+                } else {
+                  unmatchedIssues.push(issue);
+                }
               }
+              
+              console.error(`[Feature Matching] Found ${alreadyMatchedIssues.length} already-matched ungrouped issues, ${unmatchedIssues.length} issues to match`);
+              
+              if (unmatchedIssues.length > 0) {
+                // Convert to format expected by mapUngroupedIssuesToFeatures
+                const issuesToMatch = unmatchedIssues.map(issue => ({
+                  issue_number: issue.issueNumber,
+                  issue_title: issue.issueTitle,
+                  issue_url: issue.issueUrl || undefined,
+                  issue_state: issue.issueState || undefined,
+                  issue_body: issue.issueBody || undefined,
+                  issue_labels: issue.issueLabels || undefined,
+                  issue_author: issue.issueAuthor || undefined,
+                }));
 
-              ungroupedIssuesMatched = ungroupedIssuesWithFeatures.length;
-              // Log removed to avoid interfering with MCP JSON protocol
-              // console.error(`[Feature Matching] Matched ${ungroupedIssuesMatched} ungrouped issues to features`);
+                // Map to features
+                const ungroupedIssuesWithFeatures = await mapUngroupedIssuesToFeatures(
+                  issuesToMatch,
+                  features,
+                  min_similarity
+                );
+
+                // Save back to database with affects_features
+                for (const issue of ungroupedIssuesWithFeatures) {
+                  await prisma.ungroupedIssue.update({
+                    where: { issueNumber: issue.issue_number },
+                    data: {
+                      affectsFeatures: issue.affects_features ? JSON.parse(JSON.stringify(issue.affects_features)) : [],
+                    },
+                  });
+                }
+
+                ungroupedIssuesMatched = ungroupedIssuesWithFeatures.length;
+                // Log removed to avoid interfering with MCP JSON protocol
+                // console.error(`[Feature Matching] Matched ${ungroupedIssuesMatched} ungrouped issues to features`);
+              } else {
+                // All issues already matched
+                ungroupedIssuesMatched = alreadyMatchedIssues.length;
+              }
             }
           } catch (ungroupedIssuesError) {
             // Log but don't fail - ungrouped issues matching is optional
@@ -5281,9 +5647,9 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 if (bestMatch && bestMatch.projectId) {
                   matchedProjectId = bestMatch.projectId;
                   results.projects_matched++;
-                  console.error(`[Linear Classification] ✓ Matched issue ${issue.identifier} to project "${bestMatch.feature.name}" (similarity: ${bestMatch.similarity.toFixed(2)})`);
+                  console.error(`[Linear Classification] Matched issue ${issue.identifier} to project "${bestMatch.feature.name}" (similarity: ${bestMatch.similarity.toFixed(2)})`);
                 } else {
-                  console.error(`[Linear Classification] ✗ No match found for issue ${issue.identifier} (best similarity: ${top3[0]?.similarity.toFixed(2) || "N/A"}, threshold: 0.5)`);
+                  console.error(`[Linear Classification] No match found for issue ${issue.identifier} (best similarity: ${top3[0]?.similarity.toFixed(2) || "N/A"}, threshold: 0.5)`);
                 }
               } catch (error) {
                 console.error(`[Linear Classification] Failed to match issue ${issue.identifier}:`, error);

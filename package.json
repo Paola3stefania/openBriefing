@@ -30,7 +30,8 @@
     "fetch-discord-incremental": "tsx scripts/fetch-discord-messages.ts --incremental",
     "fetch-all-discord": "tsx scripts/fetch-discord-messages.ts",
     "fetch-all-discord-incremental": "tsx scripts/fetch-discord-messages.ts --incremental",
-    "validate-linear": "tsx scripts/validate-linear-setup.ts"
+    "validate-linear": "tsx scripts/validate-linear-setup.ts",
+    "github-oauth-setup": "tsx scripts/github-oauth-setup.ts"
   },
   "keywords": [
     "mcp",
@@ -40,6 +41,7 @@
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
+    "@octokit/auth-app": "^8.0.1",
     "@prisma/client": "^6.19.1",
     "discord.js": "^14.16.3",
     "dotenv": "^17.2.3",

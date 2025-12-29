@@ -3,6 +3,8 @@
  */
 import { getConfig } from "../../config/index.js";
 import { log } from "../../mcp/logger.js";
+import { GitHubTokenManager } from "./tokenManager.js";
+import type { OAuthClientManager } from "./oauthClientManager.js";
 
 export interface GitHubComment {
   id: number;
@@ -160,7 +162,14 @@ export async function fetchIssueComments(
           const resetIn = Math.ceil((parseInt(rateLimitReset) * 1000 - Date.now()) / 1000 / 60);
           errorMessage += `\n  Resets at: ${resetDate.toISOString()} (in ~${resetIn} minutes)`;
         }
-        errorMessage += '\n\nTip: Set GITHUB_TOKEN environment variable for higher rate limits (5000/hour vs 60/hour)';
+        // Check if token is set by looking at the limit (5000 = token, 60 = no token)
+        const hasToken = rateLimitLimit && parseInt(rateLimitLimit) >= 5000;
+        if (hasToken) {
+          errorMessage += '\n\nRate limit exhausted. Please wait for the limit to reset, or use a different GitHub token.';
+          errorMessage += '\nThe fetch will automatically resume from where it left off when you try again.';
+        } else {
+          errorMessage += '\n\nTip: Set GITHUB_TOKEN environment variable for higher rate limits (5000/hour vs 60/hour)';
+        }
       }
       
       throw new Error(errorMessage);
@@ -234,12 +243,20 @@ export async function fetchIssueDetails(
 
   const issue: GitHubIssue = await issueResponse.json();
 
-  // Fetch comments if requested (always try to fetch, even if comments_count is 0 or missing)
+  // Fetch comments if requested, but only if the issue actually has comments
+  // This saves API calls for issues with 0 comments
   if (includeComments) {
-    try {
-      issue.comments = await fetchIssueComments(issueNumber, token, owner, repo);
-    } catch (error) {
-      log(`Warning: Failed to fetch comments for issue #${issueNumber}: ${error}`);
+    // Use comments_count field if available, otherwise check if comments is a number
+    const commentsCount = issue.comments_count ?? (typeof issue.comments === 'number' ? issue.comments : 0);
+    if (commentsCount > 0) {
+      try {
+        issue.comments = await fetchIssueComments(issueNumber, token, owner, repo);
+      } catch (error) {
+        log(`Warning: Failed to fetch comments for issue #${issueNumber}: ${error}`);
+        issue.comments = [];
+      }
+    } else {
+      // Issue has no comments, skip the API call
       issue.comments = [];
     }
   } else {
@@ -262,7 +279,7 @@ export async function fetchIssueDetails(
  */
 async function batchFetchIssueDetails(
   issueNumbers: number[],
-  token: string | undefined,
+  tokenOrManager: string | GitHubTokenManager | undefined,
   owner: string | undefined,
   repo: string | undefined,
   includeComments: boolean,
@@ -287,17 +304,60 @@ async function batchFetchIssueDetails(
     }
   }
   
-  for (let i = 0; i < issuesToFetch.length; i += batchSize) {
-    const batch = issuesToFetch.slice(i, i + batchSize);
-    const batchNum = Math.floor(i / batchSize) + 1;
-    const totalBatches = Math.ceil(issuesToFetch.length / batchSize);
+  let currentBatchSize = batchSize;
+  
+  for (let i = 0; i < issuesToFetch.length; i += currentBatchSize) {
+    const batch = issuesToFetch.slice(i, i + currentBatchSize);
+    const batchNum = Math.floor(i / currentBatchSize) + 1;
+    const totalBatches = Math.ceil(issuesToFetch.length / currentBatchSize);
     
-    console.error(`[GitHub] Fetching batch ${batchNum}/${totalBatches} (${batch.length} issues)...`);
+    console.error(`[GitHub] Fetching batch ${batchNum}/${totalBatches} (${batch.length} issues, batch size: ${currentBatchSize})...`);
+    
+    // Get current token before batch (may rotate if previous was exhausted)
+    let currentToken = await getToken(tokenOrManager);
+    
+    // If using token manager and token is exhausted, try to get next available
+    if (tokenOrManager && tokenOrManager instanceof GitHubTokenManager) {
+      const availableToken = await tokenOrManager.getNextAvailableToken();
+      if (availableToken) {
+        currentToken = availableToken;
+      } else {
+        // All tokens exhausted - check if we can get a new one via OAuth
+        const status = tokenOrManager.getStatus();
+        const nextReset = Math.min(...status.map(s => s.resetIn));
+        
+        // Check if OAuth is configured
+        const CLIENT_ID = process.env.GITHUB_OAUTH_CLIENT_ID;
+        const CLIENT_SECRET = process.env.GITHUB_OAUTH_CLIENT_SECRET;
+        
+        if (CLIENT_ID && CLIENT_SECRET) {
+          // Throw a special error that the server can catch to trigger OAuth
+          throw new Error(`RATE_LIMIT_EXHAUSTED_OAUTH_AVAILABLE: All GitHub tokens exhausted. Next reset in ~${nextReset} minutes. OAuth credentials available for automatic token generation.`);
+        }
+        
+        throw new Error(`All GitHub tokens exhausted. Next reset in ~${nextReset} minutes.`);
+      }
+    }
     
     const batchPromises = batch.map(async (issueNumber) => {
       try {
-        return await fetchIssueDetails(issueNumber, token, owner, repo, includeComments);
+        return await fetchIssueDetails(issueNumber, currentToken, owner, repo, includeComments);
       } catch (error) {
+        // If rate limit error and using token manager, try to rotate
+        if (tokenOrManager && tokenOrManager instanceof GitHubTokenManager) {
+          const errorMsg = error instanceof Error ? error.message : String(error);
+          if (errorMsg.includes('403') || errorMsg.includes('429')) {
+            // Try next token
+            const nextToken = await tokenOrManager.getNextAvailableToken();
+            if (nextToken) {
+              try {
+                return await fetchIssueDetails(issueNumber, nextToken, owner, repo, includeComments);
+              } catch (retryError) {
+                log(`Warning: Failed to fetch details for issue #${issueNumber} even after token rotation: ${retryError}`);
+              }
+            }
+          }
+        }
         log(`Warning: Failed to fetch details for issue #${issueNumber}: ${error}`);
         return null;
       }
@@ -306,6 +366,7 @@ async function batchFetchIssueDetails(
     const batchResults = await Promise.all(batchPromises);
     const validResults = batchResults.filter((issue): issue is GitHubIssue => issue !== null);
     results.push(...validResults);
+    
     
     // Save progress after each batch (if callback provided)
     if (onBatchComplete && validResults.length > 0) {
@@ -317,8 +378,11 @@ async function batchFetchIssueDetails(
     }
     
     // Small delay between batches to respect rate limits
-    if (i + batchSize < issuesToFetch.length) {
-      await new Promise((resolve) => setTimeout(resolve, token ? 100 : 500));
+    // Delay increases if we're processing large batches to be more conservative
+    const hasToken = !!(await getToken(tokenOrManager));
+    const delay = hasToken ? (currentBatchSize > 5 ? 200 : 100) : (currentBatchSize > 3 ? 1000 : 500);
+    if (i + currentBatchSize < issuesToFetch.length) {
+      await new Promise((resolve) => setTimeout(resolve, delay));
     }
   }
   
@@ -341,8 +405,45 @@ async function batchFetchIssueDetails(
  * @param existingIssues - Array of already-fetched issues to skip (for resume capability)
  * @param onBatchComplete - Optional callback after each batch completes (for saving progress)
  */
+/**
+ * Helper to get token from either string or token manager
+ */
+async function getToken(tokenOrManager: string | GitHubTokenManager | undefined): Promise<string | undefined> {
+  if (!tokenOrManager) return undefined;
+  if (typeof tokenOrManager === 'string') return tokenOrManager;
+  return await tokenOrManager.getCurrentToken();
+}
+
+/**
+ * Helper to create headers with token
+ */
+async function createHeaders(tokenOrManager: string | GitHubTokenManager | undefined): Promise<Record<string, string>> {
+  const headers: Record<string, string> = {
+    Accept: "application/vnd.github.v3+json",
+  };
+  
+  const token = await getToken(tokenOrManager);
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+  
+  return headers;
+}
+
+/**
+ * Helper to update rate limit from response
+ */
+function updateRateLimit(
+  response: Response,
+  tokenOrManager: string | GitHubTokenManager | undefined
+): void {
+  if (tokenOrManager && tokenOrManager instanceof GitHubTokenManager) {
+    tokenOrManager.updateRateLimitFromResponse(response);
+  }
+}
+
 export async function fetchAllGitHubIssues(
-  token?: string,
+  tokenOrManager?: string | GitHubTokenManager,
   includeClosed = true,
   owner?: string,
   repo?: string,
@@ -350,23 +451,22 @@ export async function fetchAllGitHubIssues(
   limit?: number,
   includeComments = true,
   existingIssues: GitHubIssue[] = [],
-  onBatchComplete?: (issues: GitHubIssue[]) => Promise<void>
+  onBatchComplete?: (issues: GitHubIssue[]) => Promise<void>,
+  existingIssueNumbers?: number[] // For resume: skip these issue numbers during Phase 1 collection
 ): Promise<GitHubIssue[]> {
   const config = getConfig();
   const repoOwner = owner || config.github.owner;
   const repoName = repo || config.github.repo;
-  const allIssueNumbers: number[] = [];
+  const allIssueNumbers: number[] = existingIssueNumbers ? [...existingIssueNumbers] : [];
   
-  const headers: Record<string, string> = {
-    Accept: "application/vnd.github.v3+json",
-  };
-
-  if (token) {
-    headers.Authorization = `Bearer ${token}`;
-  }
+  let headers = await createHeaders(tokenOrManager);
 
   // Phase 1: Paginate through all pages to collect issue numbers
-  console.error(`[GitHub] Phase 1: Paginating through issue lists...`);
+  if (existingIssueNumbers && existingIssueNumbers.length > 0) {
+    console.error(`[GitHub] Phase 1: Resuming - ${existingIssueNumbers.length} issue numbers already collected, continuing collection...`);
+  } else {
+    console.error(`[GitHub] Phase 1: Paginating through issue lists...`);
+  }
   console.error(`[GitHub] Fetching open issues from ${repoOwner}/${repoName}...`);
   if (since) {
     console.error(`[GitHub] Filtering by updated date: ${since}`);
@@ -386,7 +486,17 @@ export async function fetchAllGitHubIssues(
     }
     
     console.error(`[GitHub] Fetching open issues page ${page}...`);
-    const response = await fetch(url, { headers });
+    
+      // Get current token (may rotate if previous was exhausted)
+      const currentToken = await getToken(tokenOrManager);
+      headers = await createHeaders(tokenOrManager); // Refresh headers with current token
+      
+      const response = await fetch(url, { headers });
+    
+    // Update rate limit info if using token manager
+    if (response.ok) {
+      updateRateLimit(response, tokenOrManager);
+    }
     
     // Log rate limit status periodically (every 5 pages)
     if (page % 5 === 1 && response.ok) {
@@ -408,6 +518,65 @@ export async function fetchAllGitHubIssues(
       const rateLimitReset = response.headers.get('X-RateLimit-Reset');
       const rateLimitLimit = response.headers.get('X-RateLimit-Limit');
       
+      // If rate limit error and using token manager, try to rotate token
+      if ((response.status === 403 || response.status === 429) && tokenOrManager && tokenOrManager instanceof GitHubTokenManager) {
+        // Update rate limit info for current token before rotating
+        updateRateLimit(response, tokenOrManager);
+        
+        // Try to get next available token from existing tokens or GitHub Apps
+        // Note: Rate limits are per GitHub user account for OAuth/PAT, per installation for GitHub Apps
+        const nextToken = await tokenOrManager.getNextAvailableToken();
+        
+        if (!nextToken) {
+          console.error(`[GitHub] All tokens exhausted. Rate limits are per GitHub user account.`);
+          console.error(`[GitHub] To get separate rate limits, use tokens from different GitHub accounts via GITHUB_TOKEN (comma-separated).`);
+        }
+        
+        if (nextToken) {
+          console.error(`[GitHub] Rate limit hit, rotating to next token...`);
+          headers = await createHeaders(tokenOrManager); // Refresh headers with new token
+          // Retry the same request with new token
+          const retryResponse = await fetch(url, { headers });
+          
+          // Update rate limit info for new token
+          if (retryResponse.ok) {
+            updateRateLimit(retryResponse, tokenOrManager);
+          }
+          
+          if (retryResponse.ok) {
+            // Success with new token, continue processing
+            const issues: GitHubIssue[] = await retryResponse.json();
+            const actualIssues = issues.filter(issue => !issue.pull_request);
+            console.error(`[GitHub] Page ${page}: Found ${actualIssues.length} issues (${issues.length - actualIssues.length} PRs filtered out) after token rotation`);
+            
+            const issueNumbers = actualIssues.map(issue => issue.number);
+            if (limit !== undefined && allIssueNumbers.length + issueNumbers.length > limit) {
+              const remaining = limit - allIssueNumbers.length;
+              if (remaining > 0) {
+                allIssueNumbers.push(...issueNumbers.slice(0, remaining));
+              }
+              console.error(`[GitHub] Reached limit of ${limit} issues. Stopping pagination.`);
+              hasMore = false;
+              break;
+            }
+            
+            allIssueNumbers.push(...issueNumbers);
+            console.error(`[GitHub] Page ${page} complete: Collected ${issueNumbers.length} issue numbers (total: ${allIssueNumbers.length})`);
+            
+            if (issues.length === 0 || issues.length < 100) {
+              hasMore = false;
+              console.error(`[GitHub] Reached end of open issues (last page had ${issues.length} items)`);
+            } else {
+              page++;
+              const hasToken = !!(await getToken(tokenOrManager));
+              await new Promise((resolve) => setTimeout(resolve, hasToken ? 100 : 1000));
+            }
+            continue; // Continue to next iteration
+          }
+          // If retry also failed, fall through to error handling
+        }
+      }
+      
       let errorMessage = `GitHub API error: ${response.status} ${response.statusText}`;
       
       if (response.status === 403 || response.status === 429) {
@@ -419,7 +588,14 @@ export async function fetchAllGitHubIssues(
           const resetIn = Math.ceil((parseInt(rateLimitReset) * 1000 - Date.now()) / 1000 / 60);
           errorMessage += `\n  Resets at: ${resetDate.toISOString()} (in ~${resetIn} minutes)`;
         }
-        errorMessage += '\n\nTip: Set GITHUB_TOKEN environment variable for higher rate limits (5000/hour vs 60/hour)';
+        // Check if token is set by looking at the limit (5000 = token, 60 = no token)
+        const hasToken = rateLimitLimit && parseInt(rateLimitLimit) >= 5000;
+        if (hasToken) {
+          errorMessage += '\n\nRate limit exhausted. Please wait for the limit to reset, or use a different GitHub token.';
+          errorMessage += '\nThe fetch will automatically resume from where it left off when you try again.';
+        } else {
+          errorMessage += '\n\nTip: Set GITHUB_TOKEN environment variable for higher rate limits (5000/hour vs 60/hour)';
+        }
         errorMessage += `\nProgress: Collected ${allIssueNumbers.length} issue numbers before hitting rate limit`;
       }
       
@@ -457,7 +633,8 @@ export async function fetchAllGitHubIssues(
     } else {
       page++;
       // Rate limit: wait a bit between pages
-      await new Promise((resolve) => setTimeout(resolve, token ? 100 : 1000));
+      const hasToken = !!(await getToken(tokenOrManager));
+      await new Promise((resolve) => setTimeout(resolve, hasToken ? 100 : 1000));
     }
   }
   
@@ -476,7 +653,17 @@ export async function fetchAllGitHubIssues(
       }
       
       console.error(`[GitHub] Fetching closed issues page ${page}...`);
+      
+      // Get current token (may rotate if previous was exhausted)
+      const currentToken = await getToken(tokenOrManager);
+      headers = await createHeaders(tokenOrManager); // Refresh headers with current token
+      
       const response = await fetch(url, { headers });
+      
+      // Update rate limit info if using token manager
+      if (response.ok) {
+        updateRateLimit(response, tokenOrManager);
+      }
       
       // Log rate limit status periodically (every 5 pages)
       if (page % 5 === 1 && response.ok) {
@@ -498,6 +685,65 @@ export async function fetchAllGitHubIssues(
         const rateLimitReset = response.headers.get('X-RateLimit-Reset');
         const rateLimitLimit = response.headers.get('X-RateLimit-Limit');
         
+        // If rate limit error and using token manager, try to rotate token
+        if ((response.status === 403 || response.status === 429) && tokenOrManager && tokenOrManager instanceof GitHubTokenManager) {
+          // Update rate limit info for current token before rotating
+          updateRateLimit(response, tokenOrManager);
+          
+          // Try to get next available token from existing tokens or GitHub Apps
+          // Note: Rate limits are per GitHub user account for OAuth/PAT, per installation for GitHub Apps
+          const nextToken = await tokenOrManager.getNextAvailableToken();
+          
+          if (!nextToken) {
+            console.error(`[GitHub] All tokens exhausted. Rate limits are per GitHub user account.`);
+            console.error(`[GitHub] To get separate rate limits, use tokens from different GitHub accounts via GITHUB_TOKEN (comma-separated).`);
+          }
+          
+          if (nextToken) {
+            console.error(`[GitHub] Rate limit hit, rotating to next token...`);
+            headers = await createHeaders(tokenOrManager); // Refresh headers with new token
+            // Retry the same request with new token
+            const retryResponse = await fetch(url, { headers });
+            
+            // Update rate limit info for new token
+            if (retryResponse.ok) {
+              updateRateLimit(retryResponse, tokenOrManager);
+            }
+            
+            if (retryResponse.ok) {
+              // Success with new token, continue processing
+              const issues: GitHubIssue[] = await retryResponse.json();
+              const actualIssues = issues.filter(issue => !issue.pull_request);
+              console.error(`[GitHub] Page ${page}: Found ${actualIssues.length} closed issues (${issues.length - actualIssues.length} PRs filtered out) after token rotation`);
+              
+              const issueNumbers = actualIssues.map(issue => issue.number);
+              if (limit !== undefined && allIssueNumbers.length + issueNumbers.length > limit) {
+                const remaining = limit - allIssueNumbers.length;
+                if (remaining > 0) {
+                  allIssueNumbers.push(...issueNumbers.slice(0, remaining));
+                }
+                console.error(`[GitHub] Reached limit of ${limit} issues. Stopping pagination.`);
+                hasMore = false;
+                break;
+              }
+              
+              allIssueNumbers.push(...issueNumbers);
+              console.error(`[GitHub] Page ${page} complete: Collected ${issueNumbers.length} issue numbers (total: ${allIssueNumbers.length})`);
+              
+              if (issues.length === 0 || issues.length < 100) {
+                hasMore = false;
+                console.error(`[GitHub] Reached end of closed issues (last page had ${issues.length} items)`);
+              } else {
+                page++;
+                const hasToken = !!(await getToken(tokenOrManager));
+                await new Promise((resolve) => setTimeout(resolve, hasToken ? 100 : 1000));
+              }
+              continue; // Continue to next iteration
+            }
+            // If retry also failed, fall through to error handling
+          }
+        }
+        
         let errorMessage = `GitHub API error: ${response.status} ${response.statusText}`;
         
         if (response.status === 403 || response.status === 429) {
@@ -509,7 +755,14 @@ export async function fetchAllGitHubIssues(
             const resetIn = Math.ceil((parseInt(rateLimitReset) * 1000 - Date.now()) / 1000 / 60);
             errorMessage += `\n  Resets at: ${resetDate.toISOString()} (in ~${resetIn} minutes)`;
           }
-          errorMessage += '\n\nTip: Set GITHUB_TOKEN environment variable for higher rate limits (5000/hour vs 60/hour)';
+          // Check if token is set by looking at the limit (5000 = token, 60 = no token)
+          const hasToken = rateLimitLimit && parseInt(rateLimitLimit) >= 5000;
+          if (hasToken) {
+            errorMessage += '\n\nRate limit exhausted. Please wait for the limit to reset, or use a different GitHub token.';
+            errorMessage += '\nThe fetch will automatically resume from where it left off when you try again.';
+          } else {
+            errorMessage += '\n\nTip: Set GITHUB_TOKEN environment variable for higher rate limits (5000/hour vs 60/hour)';
+          }
           errorMessage += `\nProgress: Collected ${allIssueNumbers.length} issue numbers before hitting rate limit`;
         }
         
@@ -547,7 +800,8 @@ export async function fetchAllGitHubIssues(
       } else {
         page++;
         // Rate limit: wait a bit between pages
-        await new Promise((resolve) => setTimeout(resolve, token ? 100 : 1000));
+        const hasToken = !!(await getToken(tokenOrManager));
+        await new Promise((resolve) => setTimeout(resolve, hasToken ? 100 : 1000));
       }
     }
     
@@ -556,8 +810,12 @@ export async function fetchAllGitHubIssues(
   
   // Phase 2: Batch fetch issue details in parallel
   console.error(`[GitHub] Phase 2: Batch fetching issue details for ${allIssueNumbers.length} issues...`);
-  const batchSize = token ? 10 : 3; // More aggressive batching with token
-  console.error(`[GitHub] Using batch size: ${batchSize} issues per batch`);
+  
+  // Determine initial batch size based on whether we have a token
+  // Will be adjusted dynamically based on rate limit
+  const hasToken = !!(await getToken(tokenOrManager));
+  const initialBatchSize = hasToken ? 10 : 3;
+  console.error(`[GitHub] Using initial batch size: ${initialBatchSize} issues per batch`);
   
   // Create map of existing issues for fast lookup
   const existingIssuesMap = new Map<number, GitHubIssue>();
@@ -570,11 +828,11 @@ export async function fetchAllGitHubIssues(
   
   const allIssues = await batchFetchIssueDetails(
     allIssueNumbers,
-    token,
+    tokenOrManager,
     owner,
     repo,
     includeComments,
-    batchSize,
+    initialBatchSize,
     existingIssuesMap,
     onBatchComplete
   );

@@ -3,8 +3,17 @@
     "UnMute": {
       "command": "/absolute/path/to/your/unmute-mcp/run-mcp.sh",
       "env": {
-        "DISCORD_TOKEN_TOKEN": "your_unmute_bot_token_here",
-        "GITHUB_TOKEN": "your_github_token_here_optional"
+        "DISCORD_TOKEN": "your_discord_bot_token_here",
+        "GITHUB_TOKEN": "your_github_token_here_optional",
+        "GITHUB_OWNER": "your_org_or_username",
+        "GITHUB_REPO": "your_repository_name",
+        "OPENAI_API_KEY": "your_openai_api_key_here_optional",
+        "DATABASE_URL": "postgresql://user:password@localhost:5432/unmute_mcp_optional",
+        "DOCUMENTATION_URLS": "https://docs.example.com/docs_optional",
+        "GITHUB_REPO_URL": "https://github.com/owner/repo_optional",
+        "PM_TOOL_TYPE": "linear_optional",
+        "PM_TOOL_API_KEY": "your_pm_tool_api_key_optional",
+        "PM_TOOL_TEAM_ID": "your_team_id_optional"
       }
     }
   }

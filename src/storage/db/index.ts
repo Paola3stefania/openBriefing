@@ -1024,42 +1024,56 @@ export class DatabaseStorage implements IStorage {
   }>): Promise<void> {
     if (issues.length === 0) return;
 
-    await prisma.$transaction(async (tx) => {
-      for (const issue of issues) {
-        await tx.gitHubIssue.upsert({
-          where: { issueNumber: issue.number },
-          update: {
-            issueTitle: issue.title,
-            issueUrl: issue.url,
-            issueState: issue.state ?? null,
-            issueBody: issue.body ?? null,
-            issueLabels: issue.labels ?? [],
-            issueAuthor: issue.author ?? null,
-            issueCreatedAt: issue.created_at ? new Date(issue.created_at) : null,
-            issueUpdatedAt: issue.updated_at ? new Date(issue.updated_at) : null,
-            issueComments: issue.comments ? (issue.comments as any) : [],
-            issueAssignees: issue.assignees ? issue.assignees.map(a => a.login) : [],
-            issueMilestone: issue.milestone?.title ?? null,
-            issueReactions: issue.reactions ? (issue.reactions as any) : null,
-          },
-          create: {
-            issueNumber: issue.number,
-            issueTitle: issue.title,
-            issueUrl: issue.url,
-            issueState: issue.state ?? null,
-            issueBody: issue.body ?? null,
-            issueLabels: issue.labels ?? [],
-            issueAuthor: issue.author ?? null,
-            issueCreatedAt: issue.created_at ? new Date(issue.created_at) : null,
-            issueUpdatedAt: issue.updated_at ? new Date(issue.updated_at) : null,
-            issueComments: issue.comments ? (issue.comments as any) : [],
-            issueAssignees: issue.assignees ? issue.assignees.map(a => a.login) : [],
-            issueMilestone: issue.milestone?.title ?? null,
-            issueReactions: issue.reactions ? (issue.reactions as any) : null,
-          },
-        });
-      }
-    });
+    // Process issues in batches to avoid transaction timeout
+    // Batch size of 50 should keep each transaction under 5 seconds
+    const BATCH_SIZE = 50;
+    const batches: typeof issues[] = [];
+    
+    for (let i = 0; i < issues.length; i += BATCH_SIZE) {
+      batches.push(issues.slice(i, i + BATCH_SIZE));
+    }
+
+    // Process each batch in a separate transaction with increased timeout
+    for (const batch of batches) {
+      await prisma.$transaction(async (tx) => {
+        for (const issue of batch) {
+          await tx.gitHubIssue.upsert({
+            where: { issueNumber: issue.number },
+            update: {
+              issueTitle: issue.title,
+              issueUrl: issue.url,
+              issueState: issue.state ?? null,
+              issueBody: issue.body ?? null,
+              issueLabels: issue.labels ?? [],
+              issueAuthor: issue.author ?? null,
+              issueCreatedAt: issue.created_at ? new Date(issue.created_at) : null,
+              issueUpdatedAt: issue.updated_at ? new Date(issue.updated_at) : null,
+              issueComments: issue.comments ? (issue.comments as any) : [],
+              issueAssignees: issue.assignees ? issue.assignees.map(a => a.login) : [],
+              issueMilestone: issue.milestone?.title ?? null,
+              issueReactions: issue.reactions ? (issue.reactions as any) : null,
+            },
+            create: {
+              issueNumber: issue.number,
+              issueTitle: issue.title,
+              issueUrl: issue.url,
+              issueState: issue.state ?? null,
+              issueBody: issue.body ?? null,
+              issueLabels: issue.labels ?? [],
+              issueAuthor: issue.author ?? null,
+              issueCreatedAt: issue.created_at ? new Date(issue.created_at) : null,
+              issueUpdatedAt: issue.updated_at ? new Date(issue.updated_at) : null,
+              issueComments: issue.comments ? (issue.comments as any) : [],
+              issueAssignees: issue.assignees ? issue.assignees.map(a => a.login) : [],
+              issueMilestone: issue.milestone?.title ?? null,
+              issueReactions: issue.reactions ? (issue.reactions as any) : null,
+            },
+          });
+        }
+      }, {
+        timeout: 30000, // 30 seconds timeout per batch (should be more than enough for 50 issues)
+      });
+    }
   }
 
   async getGitHubIssues(options?: {
@@ -1109,4 +1123,5 @@ export class DatabaseStorage implements IStorage {
       matched_to_threads: issue.matchedToThreads,
     }));
   }
+
 }

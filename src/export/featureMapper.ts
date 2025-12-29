@@ -5,7 +5,7 @@
 
 import { log } from "../mcp/logger.js";
 import { createEmbedding, createEmbeddings } from "../core/classify/semantic.js";
-import { getFeatureEmbedding, saveFeatureEmbedding } from "../storage/db/embeddings.js";
+import { getFeatureEmbedding, saveFeatureEmbedding, getGroupEmbedding, saveGroupEmbedding } from "../storage/db/embeddings.js";
 import type { ProductFeature } from "./types.js";
 import { createHash } from "crypto";
 
@@ -232,6 +232,11 @@ export async function mapGroupsToFeatures(
   // Step 2: Map each group to features
   const mappedGroups: GroupingGroup[] = [];
   
+  // Get repository URL for code indexing
+  const { getConfig } = await import("../config/index.js");
+  const config = getConfig();
+  const repositoryUrl = config.pmIntegration?.github_repo_url;
+  
   for (const group of groups) {
     // Build group text from title, GitHub issue, and thread titles
     const groupTextParts: string[] = [];
@@ -270,22 +275,86 @@ export async function mapGroupsToFeatures(
       continue;
     }
     
-    // Compute group embedding
-    let groupEmbedding: Embedding;
-    try {
-      groupEmbedding = await createEmbedding(groupText, apiKey);
-    } catch (error) {
-      log(`Failed to create embedding for group ${group.id}: ${error instanceof Error ? error.message : String(error)}`);
-      mappedGroups.push({
-        ...group,
-        affects_features: [{ id: "general", name: "General" }],
-        is_cross_cutting: false,
-      });
-      continue;
+    // NEW: Search and index code related to this group's topic
+    // This helps us understand which features the code relates to
+    let groupCodeContext = "";
+    let codeToFeatureMappings: Map<string, number> = new Map(); // featureId -> similarity
+    
+    if (repositoryUrl) {
+      try {
+        const { matchTextToFeaturesUsingCode } = await import("../storage/db/codeIndexer.js");
+        const result = await matchTextToFeaturesUsingCode(
+          groupText,
+          repositoryUrl,
+          features
+        );
+        groupCodeContext = result.codeContext;
+        codeToFeatureMappings = result.featureSimilarities;
+        
+        if (groupCodeContext) {
+          log(`[FeatureMapper] Found code context for group "${group.id}" (${groupCodeContext.length} characters)`);
+          log(`[FeatureMapper] Code maps to ${codeToFeatureMappings.size} features using function-level embeddings`);
+        }
+      } catch (error) {
+        log(`[FeatureMapper] Failed to index code for group ${group.id}: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
     
-    // Find matching features using both semantic similarity and keyword matching
-    const affectedFeatures: Array<{ id: string; similarity: number; ruleBased?: boolean }> = [];
+    // Compute group embedding (include code context if available)
+    const groupTextWithCode = groupCodeContext 
+      ? `${groupText} ${groupCodeContext.substring(0, 1000)}` // Include code context in embedding
+      : groupText;
+    
+    // Try to get group embedding from database first (lazy loading)
+    // Only reuse if content hasn't changed (check contentHash)
+    const { hasDatabaseConfig, getStorage } = await import("../storage/factory.js");
+    const useDatabase = hasDatabaseConfig() && await getStorage().isAvailable();
+    
+    // Compute contentHash for current content
+    const contentHash = createHash("md5").update(groupTextWithCode).digest("hex");
+    
+    let groupEmbedding: Embedding | null = null;
+    if (useDatabase) {
+      try {
+        // Check database with contentHash validation - only reuse if unchanged
+        groupEmbedding = await getGroupEmbedding(group.id, contentHash);
+        if (groupEmbedding) {
+          log(`[FeatureMapper] Reused group embedding from database for group ${group.id} (content unchanged)`);
+        } else {
+          log(`[FeatureMapper] Group embedding not found or content changed for group ${group.id}, will compute`);
+        }
+      } catch (error) {
+        // Group embedding not found, will compute below
+        log(`[FeatureMapper] Group embedding not found in database for group ${group.id}, will compute`);
+      }
+    }
+    
+    // Compute embedding if not found in database or content changed
+    if (!groupEmbedding) {
+      try {
+        log(`[FeatureMapper] Computing group embedding for group ${group.id}...`);
+        groupEmbedding = await createEmbedding(groupTextWithCode, apiKey);
+        
+        // Save to database if available
+        if (useDatabase && groupEmbedding) {
+          try {
+            await saveGroupEmbedding(group.id, groupEmbedding, contentHash);
+            log(`[FeatureMapper] Saved group embedding to database for group ${group.id}`);
+          } catch (saveError) {
+            log(`[FeatureMapper] Failed to save group embedding for group ${group.id}: ${saveError instanceof Error ? saveError.message : String(saveError)}`);
+          }
+        }
+      } catch (error) {
+        log(`[WARNING] Failed to create embedding for group ${group.id}: ${error instanceof Error ? error.message : String(error)}`);
+        log(`[WARNING] Will still attempt rule-based and code-based matching (no semantic similarity available)`);
+        // Set to null - we'll still try rule-based and code-based matching below
+        groupEmbedding = null;
+      }
+    }
+    
+    // Find matching features using semantic similarity, keyword matching, AND code-to-feature mappings
+    // Even if embedding failed, we can still use rule-based and code-based matching
+    const affectedFeatures: Array<{ id: string; similarity: number; ruleBased?: boolean; codeBased?: boolean }> = [];
     const allSimilarities: Array<{ id: string; name: string; similarity: number }> = [];
     
     // Build searchable text from group (for keyword matching)
@@ -325,21 +394,59 @@ export async function mapGroupsToFeatures(
         }
       }
       
-      // If no rule-based match, use semantic similarity
-      if (!ruleBasedMatch && featureEmb) {
-        similarity = cosineSimilarity(groupEmbedding, featureEmb);
-        allSimilarities.push({ id: feature.id, name: feature.name, similarity });
-      } else if (ruleBasedMatch) {
-        // Include rule-based matches in allSimilarities for debugging
-        allSimilarities.push({ id: feature.id, name: feature.name, similarity });
-      } else {
-        log(`[DEBUG] Group ${group.id}: Feature ${feature.id} has no embedding, skipping`);
-        continue;
+      // Check code-to-feature mapping (if code was indexed for this group)
+      let codeBasedMatch = false;
+      let codeSimilarity = 0;
+      if (codeToFeatureMappings.has(feature.id)) {
+        codeBasedMatch = true;
+        codeSimilarity = codeToFeatureMappings.get(feature.id) || 0;
+        log(`[DEBUG] Group ${group.id}: Code-based match - feature "${feature.name}" has similarity ${codeSimilarity.toFixed(3)} from code`);
       }
       
-      // Add to affected features if above threshold OR if rule-based match
-      if (similarity >= minSimilarity || ruleBasedMatch) {
-        affectedFeatures.push({ id: feature.id, similarity, ruleBased: ruleBasedMatch });
+      // If no rule-based match, use semantic similarity (if available)
+      if (!ruleBasedMatch) {
+        if (featureEmb && groupEmbedding) {
+          // Both embeddings available - use semantic similarity
+          similarity = cosineSimilarity(groupEmbedding, featureEmb);
+          allSimilarities.push({ id: feature.id, name: feature.name, similarity });
+        } else {
+          // No semantic similarity available (embedding failed or missing)
+          // Still continue to check code-based matching below
+          if (!groupEmbedding) {
+            log(`[DEBUG] Group ${group.id}: No group embedding available, skipping semantic similarity (will try code-based only)`);
+          } else {
+            log(`[DEBUG] Group ${group.id}: Feature ${feature.id} has no embedding, skipping semantic similarity`);
+          }
+          // Don't continue here - we still want to check code-based matching
+        }
+      } else {
+        // Rule-based match found - include in allSimilarities for debugging
+        allSimilarities.push({ id: feature.id, name: feature.name, similarity });
+      }
+      
+      // Use code-based matching (code is strong signal, works even without embeddings)
+      if (codeBasedMatch && codeSimilarity > 0.5) {
+        // If we have semantic similarity, boost it with code
+        // If no semantic similarity (embedding failed), use code similarity directly
+        if (similarity > 0) {
+          similarity = Math.max(similarity, codeSimilarity * 0.9); // Code match is 90% weight
+          log(`[DEBUG] Group ${group.id}: Boosted similarity for "${feature.name}" from ${similarity.toFixed(3)} to ${similarity.toFixed(3)} (code match: ${codeSimilarity.toFixed(3)})`);
+        } else {
+          // No semantic similarity available - use code similarity directly
+          similarity = codeSimilarity * 0.9; // Code match is 90% weight
+          log(`[DEBUG] Group ${group.id}: Using code-based similarity for "${feature.name}" (${similarity.toFixed(3)}) - embedding unavailable`);
+        }
+      }
+      
+      // Add to affected features if above threshold OR if rule-based match OR if strong code match
+      // This allows matching even when embeddings fail, as long as rule-based or code-based matching works
+      if (similarity >= minSimilarity || ruleBasedMatch || (codeBasedMatch && codeSimilarity > 0.6)) {
+        affectedFeatures.push({ 
+          id: feature.id, 
+          similarity, 
+          ruleBased: ruleBasedMatch,
+          codeBased: codeBasedMatch 
+        });
       }
     }
     
@@ -348,9 +455,12 @@ export async function mapGroupsToFeatures(
     const top5All = allSimilarities.slice(0, 5);
     log(`[DEBUG] Group ${group.id} top 5 similarities (threshold=${minSimilarity}): ${top5All.map(f => `${f.name}:${f.similarity.toFixed(3)}`).join(", ")}`);
     
-    // Sort by similarity (rule-based matches first, then by score) and take top matches
+    // Sort by similarity (code-based matches first, then rule-based, then by score) and take top matches
     affectedFeatures.sort((a, b) => {
-      // Rule-based matches first
+      // Code-based matches first (strongest signal)
+      if (a.codeBased && !b.codeBased) return -1;
+      if (!a.codeBased && b.codeBased) return 1;
+      // Rule-based matches second
       if (a.ruleBased && !b.ruleBased) return -1;
       if (!a.ruleBased && b.ruleBased) return 1;
       // Then by similarity score
@@ -526,10 +636,17 @@ export async function mapUngroupedThreadsToFeatures(
       }
       
       // Try to get thread embedding from database first
+      // Only reuse if content hasn't changed (check contentHash)
+      const threadContentHash = createHash("md5").update(threadText).digest("hex");
       let threadEmbedding: Embedding | null = null;
       if (useDatabase) {
         try {
-          threadEmbedding = await getThreadEmbedding(thread.thread_id);
+          threadEmbedding = await getThreadEmbedding(thread.thread_id, threadContentHash);
+          if (threadEmbedding) {
+            // Content unchanged, reuse embedding
+          } else {
+            // Content changed or not found, will compute in batch
+          }
         } catch (error) {
           // Thread embedding not found, will compute in batch
         }
@@ -605,26 +722,65 @@ export async function mapUngroupedThreadsToFeatures(
     
     // Now match all threads in batch to features
     for (const data of threadData) {
-      if (!data.embedding) {
-        // Failed to get or compute embedding, assign to general
-        mappedThreads.push({
-          ...data.thread,
-          affects_features: [{ id: "general", name: "General" }],
-        });
-        continue;
-      }
+      // Find matching features using thread embedding + code matching
+      // Even if embedding failed, we can still try code-based matching
+      const affectedFeatures: Array<{ id: string; similarity: number; codeBased?: boolean }> = [];
       
-      // Find matching features
-      const affectedFeatures: Array<{ id: string; similarity: number }> = [];
+      // Try code-based matching if repository URL is available
+      // This works even if embedding computation failed
+      let codeToFeatureMappings = new Map<string, number>();
+      const { getConfig } = await import("../config/index.js");
+      const config = getConfig();
+      const repositoryUrl = config.pmIntegration?.github_repo_url;
+      
+      if (repositoryUrl && data.threadText) {
+        try {
+          const { matchTextToFeaturesUsingCode } = await import("../storage/db/codeIndexer.js");
+          const codeResult = await matchTextToFeaturesUsingCode(
+            data.threadText,
+            repositoryUrl,
+            features
+          );
+          codeToFeatureMappings = codeResult.featureSimilarities;
+          if (codeToFeatureMappings.size > 0) {
+            log(`[FeatureMapper] Thread ${data.thread.thread_id} code maps to ${codeToFeatureMappings.size} features`);
+          }
+        } catch (error) {
+          log(`[FeatureMapper] Failed to match code for thread ${data.thread.thread_id}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
       
       for (const feature of features) {
         const featureEmb = featureEmbeddings.get(feature.id);
-        if (!featureEmb) continue;
+        let similarity = 0;
+        let codeBased = false;
         
-        const similarity = cosineSimilarity(data.embedding, featureEmb);
+        // Try semantic similarity if embeddings are available
+        if (data.embedding && featureEmb) {
+          similarity = cosineSimilarity(data.embedding, featureEmb);
+        } else if (!data.embedding) {
+          log(`[FeatureMapper] Thread ${data.thread.thread_id}: No embedding available, will try code-based matching only`);
+        }
         
-        if (similarity >= minSimilarity) {
-          affectedFeatures.push({ id: feature.id, similarity });
+        // Use code-based matching (works even without embeddings)
+        if (codeToFeatureMappings.has(feature.id)) {
+          const codeSimilarity = codeToFeatureMappings.get(feature.id) || 0;
+          if (codeSimilarity > 0.5) {
+            // If we have semantic similarity, boost it with code
+            // If no semantic similarity (embedding failed), use code similarity directly
+            if (similarity > 0) {
+              similarity = Math.max(similarity, codeSimilarity * 0.9); // Code match is 90% weight
+            } else {
+              similarity = codeSimilarity * 0.9; // Use code similarity directly
+              log(`[FeatureMapper] Thread ${data.thread.thread_id}: Using code-based similarity for "${feature.name}" (${similarity.toFixed(3)}) - embedding unavailable`);
+            }
+            codeBased = true;
+          }
+        }
+        
+        // Include if above threshold OR if strong code match (even without semantic similarity)
+        if (similarity >= minSimilarity || (codeBased && codeToFeatureMappings.get(feature.id)! > 0.6)) {
+          affectedFeatures.push({ id: feature.id, similarity, codeBased });
         }
       }
       
@@ -765,10 +921,17 @@ export async function mapUngroupedIssuesToFeatures(
       }
       
       // Try to get issue embedding from database first
+      // Only reuse if content hasn't changed (check contentHash)
+      const issueContentHash = hashContent(issueText);
       let issueEmbedding: Embedding | null = null;
       if (useDatabase) {
         try {
-          issueEmbedding = await getIssueEmbedding(issue.issue_number);
+          issueEmbedding = await getIssueEmbedding(issue.issue_number, issueContentHash);
+          if (issueEmbedding) {
+            // Content unchanged, reuse embedding
+          } else {
+            // Content changed or not found, will compute in batch
+          }
         } catch (error) {
           // Issue embedding not found, will compute in batch
         }
@@ -844,26 +1007,65 @@ export async function mapUngroupedIssuesToFeatures(
     
     // Now match all issues in batch to features
     for (const data of issueData) {
-      if (!data.embedding) {
-        // Failed to get or compute embedding, assign to general
-        mappedIssues.push({
-          ...data.issue,
-          affects_features: [{ id: "general", name: "General" }],
-        });
-        continue;
-      }
+      // Find matching features using issue embedding + code matching
+      // Even if embedding failed, we can still try code-based matching
+      const affectedFeatures: Array<{ id: string; similarity: number; codeBased?: boolean }> = [];
       
-      // Find matching features
-      const affectedFeatures: Array<{ id: string; similarity: number }> = [];
+      // Try code-based matching if repository URL is available
+      // This works even if embedding computation failed
+      let codeToFeatureMappings = new Map<string, number>();
+      const { getConfig } = await import("../config/index.js");
+      const config = getConfig();
+      const repositoryUrl = config.pmIntegration?.github_repo_url;
+      
+      if (repositoryUrl && data.issueText) {
+        try {
+          const { matchTextToFeaturesUsingCode } = await import("../storage/db/codeIndexer.js");
+          const codeResult = await matchTextToFeaturesUsingCode(
+            data.issueText,
+            repositoryUrl,
+            features
+          );
+          codeToFeatureMappings = codeResult.featureSimilarities;
+          if (codeToFeatureMappings.size > 0) {
+            log(`[FeatureMapper] Issue ${data.issue.issue_number} code maps to ${codeToFeatureMappings.size} features`);
+          }
+        } catch (error) {
+          log(`[FeatureMapper] Failed to match code for issue ${data.issue.issue_number}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
       
       for (const feature of features) {
         const featureEmb = featureEmbeddings.get(feature.id);
-        if (!featureEmb) continue;
+        let similarity = 0;
+        let codeBased = false;
         
-        const similarity = cosineSimilarity(data.embedding, featureEmb);
+        // Try semantic similarity if embeddings are available
+        if (data.embedding && featureEmb) {
+          similarity = cosineSimilarity(data.embedding, featureEmb);
+        } else if (!data.embedding) {
+          log(`[FeatureMapper] Issue ${data.issue.issue_number}: No embedding available, will try code-based matching only`);
+        }
         
-        if (similarity >= minSimilarity) {
-          affectedFeatures.push({ id: feature.id, similarity });
+        // Use code-based matching (works even without embeddings)
+        if (codeToFeatureMappings.has(feature.id)) {
+          const codeSimilarity = codeToFeatureMappings.get(feature.id) || 0;
+          if (codeSimilarity > 0.5) {
+            // If we have semantic similarity, boost it with code
+            // If no semantic similarity (embedding failed), use code similarity directly
+            if (similarity > 0) {
+              similarity = Math.max(similarity, codeSimilarity * 0.9); // Code match is 90% weight
+            } else {
+              similarity = codeSimilarity * 0.9; // Use code similarity directly
+              log(`[FeatureMapper] Issue ${data.issue.issue_number}: Using code-based similarity for "${feature.name}" (${similarity.toFixed(3)}) - embedding unavailable`);
+            }
+            codeBased = true;
+          }
+        }
+        
+        // Include if above threshold OR if strong code match (even without semantic similarity)
+        if (similarity >= minSimilarity || (codeBased && codeToFeatureMappings.get(feature.id)! > 0.6)) {
+          affectedFeatures.push({ id: feature.id, similarity, codeBased });
         }
       }
       

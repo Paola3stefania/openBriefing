@@ -44,7 +44,8 @@ See [docs/LINEAR_GITHUB_CONTRACT.md](docs/LINEAR_GITHUB_CONTRACT.md) for the ful
 
 - **Keyword-based**: Fast, free classification using keyword matching (default when OpenAI not configured)
 - **Semantic (LLM-based)**: Context-aware classification using OpenAI embeddings (enabled by default when `OPENAI_API_KEY` is set)
-- **Persistent embedding cache**: Issue embeddings are cached to disk, avoiding redundant API calls
+- **Persistent embedding cache with lazy loading**: All embeddings (issues, threads, groups, code sections, features) are cached to database/disk and only recomputed when content changes (contentHash validation)
+- **Lazy embedding computation**: Embeddings are computed on-demand and cached. If content hasn't changed (same contentHash), cached embeddings are reused - no redundant API calls
 - Thread-aware classification
 - Classification history tracking
 - Automatically syncs issues and messages before classifying
@@ -77,9 +78,13 @@ UNMute uses **two different similarity scales** depending on the operation:
 ### Semantic Grouping
 
 - **Issue-based grouping**: Group threads by their matched GitHub issues (fast, no LLM calls)
-- **Feature matching**: Separate step to map groups to product features using semantic similarity
+- **Feature matching**: Separate step to map groups to product features using three-tier matching:
+  - **Rule-based matching**: Keyword/name matching (highest priority, works without embeddings)
+  - **Semantic similarity**: Cosine similarity between embeddings (when embeddings available)
+  - **Code-based matching**: Function-level code matching using saved code section embeddings (strong signal, works even if group embeddings fail)
 - **Cross-cutting detection**: Identify issues affecting multiple product features
-- **Shared embedding cache**: Embeddings computed once, reused by classification and grouping
+- **Shared embedding cache with lazy loading**: All embeddings (groups, threads, issues, code sections, features) are cached and only recomputed when content changes
+- **Graceful degradation**: If embedding computation fails, still attempts rule-based and code-based matching
 - **Reviewable workflow**: Match groups to features, review, then export
 
 ### PM Tool Export
@@ -117,6 +122,18 @@ Switch between backends by setting or removing `DATABASE_URL` environment variab
 - Groups → `groups` table
 - Documentation cache → `documentation_cache` table
 - Features cache → `features_cache` table
+- **Embeddings** (with contentHash for lazy loading):
+  - Thread embeddings → `thread_embeddings` table
+  - Issue embeddings → `issue_embeddings` table
+  - Group embeddings → `group_embeddings` table
+  - Code section embeddings → `code_section_embeddings` table (function/class/interface level)
+  - Code file embeddings → `code_file_embeddings` table
+  - Feature embeddings → `feature_embeddings` table
+- **Code indexing**:
+  - Code searches → `code_searches` table
+  - Code files → `code_files` table
+  - Code sections → `code_sections` table (functions, classes, interfaces)
+  - Feature-code mappings → `feature_code_mappings` table
 
 ## Setup
 
@@ -141,7 +158,9 @@ Switch between backends by setting or removing `DATABASE_URL` environment variab
    - `DOCUMENTATION_URLS`: URLs or file paths to product documentation (optional, for PM export)
    - `PM_TOOL_*`: PM tool configuration (optional, for PM export)
 
-   Create a `.env` file or export these variables.
+   **For local usage**: Create a `.env` file in the discord-mcp repository or export these variables.
+   
+   **For cross-repo usage** (calling from another repository like Better Auth): All environment variables must be in the MCP config's `env` section (see "Using from Another Repository" section below). The MCP server doesn't read `.env` files when called from another repo.
 
 4. **(Optional) Set up PostgreSQL database:**
    
@@ -291,7 +310,10 @@ After grouping, use `match_groups_to_features` to map groups to product features
 **Workflow:**
 1. Loads grouping results from file
 2. Extracts product features from documentation (using `DOCUMENTATION_URLS`)
-3. Maps each group to relevant features using semantic similarity
+3. Maps each group to relevant features using **three-tier matching**:
+   - **Rule-based**: Feature names/keywords in group text (similarity: 0.8-0.9)
+   - **Semantic**: Cosine similarity between group and feature embeddings (0.0-1.0)
+   - **Code-based**: Function-level code matching - searches codebase, indexes functions/classes, matches using code section embeddings (0.0-1.0, 90% weight when >0.5)
 4. Updates the grouping JSON file with `affects_features` and `is_cross_cutting` flags
 
 ```
@@ -304,10 +326,16 @@ match_groups_to_features → updates grouping file with feature mappings
 - **Faster grouping**: No feature extraction during grouping
 - **Clearer workflow**: Explicit analysis → action separation
 
+**Embedding Performance:**
+- **Lazy loading**: Group embeddings are loaded from database if content unchanged (contentHash validation)
+- **Code indexing**: Code is indexed at function/class/interface level, embeddings saved to database
+- **Reuse**: Code section embeddings are reused if code unchanged - no redundant computation
+- **Graceful degradation**: If embedding computation fails, still uses rule-based and code-based matching
+
 **Options:**
 - `grouping_data_path`: Path to grouping file (optional, uses latest if not provided)
 - `channel_id`: Channel ID to find latest grouping file (if path not provided)
-- `min_similarity`: Minimum similarity for feature matching (**0.0-1.0 scale**, default 0.5). Uses cosine similarity between group embeddings and feature embeddings.
+- `min_similarity`: Minimum similarity for feature matching (**0.0-1.0 scale**, default 0.6). Uses cosine similarity between group embeddings and feature embeddings.
 
 **Output (issue-based grouping):**
 ```json
@@ -359,6 +387,121 @@ Use the `export_to_pm_tool` MCP tool to export classified data or grouped issues
 
 Configure `DOCUMENTATION_URLS` in `.env` (can be URLs like `https://docs.example.com/docs` which will be crawled, or local file paths).
 
+## Using from Another Repository (e.g., Better Auth)
+
+You can configure this MCP tool to be available when working in another repository (like Better Auth). This provides powerful benefits:
+
+### Benefits
+
+1. **Full Codebase Context**: When called from within the Better Auth repo, the agent has access to the entire codebase via Cursor's codebase search
+2. **Better Matching**: The agent can use semantic code search to find relevant code files and pass them as code context for more accurate feature matching
+3. **Real-time Code**: Uses the actual current codebase, not just what's on GitHub
+
+### Setup
+
+1. **Configure MCP in Better Auth repo**:
+   
+   Add to `cursor-mcp-config.json` (or `~/.cursor/mcp.json`) in the Better Auth repository:
+   
+   **Important**: All environment variables must be in the MCP config's `env` section. The MCP server doesn't read `.env` files from the discord-mcp repository when called from another repo.
+   
+   ```json
+   {
+     "mcpServers": {
+       "UnMute": {
+         "command": "/absolute/path/to/discord-mcp/run-mcp.sh",
+         "env": {
+           "DISCORD_TOKEN": "your_discord_bot_token",
+           "GITHUB_TOKEN": "your_github_token",
+           "GITHUB_OWNER": "better-auth",
+           "GITHUB_REPO": "better-auth",
+           "OPENAI_API_KEY": "your_openai_key",
+           "DATABASE_URL": "postgresql://user:password@localhost:5432/unmute_mcp",
+           "DOCUMENTATION_URLS": "https://better-auth.com/docs",
+           "GITHUB_REPO_URL": "https://github.com/better-auth/better-auth",
+           "PM_TOOL_TYPE": "linear",
+           "PM_TOOL_API_KEY": "your_linear_api_key",
+           "PM_TOOL_TEAM_ID": "your_linear_team_id"
+         }
+       }
+     }
+   }
+   ```
+   
+   **Required variables** (minimum):
+   - `DISCORD_TOKEN` - Discord bot token
+   - `GITHUB_OWNER` - GitHub org/username
+   - `GITHUB_REPO` - GitHub repository name
+   
+   **Recommended variables**:
+   - `GITHUB_TOKEN` - For higher rate limits
+   - `OPENAI_API_KEY` - For semantic classification
+   - `DATABASE_URL` - For production use (PostgreSQL)
+   
+   **Optional variables** (for PM integration):
+   - `DOCUMENTATION_URLS` - Documentation URLs for feature extraction
+   - `GITHUB_REPO_URL` - Repository URL for code context (if not using `code_context` parameter)
+   - `PM_TOOL_TYPE`, `PM_TOOL_API_KEY`, `PM_TOOL_TEAM_ID` - For Linear/Jira export
+   
+   See `env.example` in the discord-mcp repository for all available variables.
+
+2. **Automatic Code Context**:
+   
+   **The agent automatically handles code context!** When you call `compute_feature_embeddings` from within a codebase (like Better Auth), the agent will:
+   
+   1. **Automatically use `codebase_search`** to find relevant code files related to the features
+   2. **Automatically pass that code context** to the tool via the `code_context` parameter
+   3. The code context is available in the agent's conversation memory, so it doesn't need to search again
+   
+   You don't need to manually search - just call the tool and the agent handles it automatically:
+   
+   ```typescript
+   // Agent automatically does this:
+   // 1. Searches codebase for relevant code (authentication, features, etc.)
+   // 2. Passes code context to the tool
+   await compute_feature_embeddings({
+     force: true
+     // code_context is automatically added by the agent
+   });
+   ```
+   
+   The tool description guides the agent to automatically search for code related to:
+   - Core features and functionality
+   - Authentication and security
+   - Main API routes and handlers
+   - Key business logic
+
+### Example Workflow
+
+When classifying Discord messages about Better Auth features:
+
+1. **Agent searches Better Auth codebase** for relevant code:
+   - "How does session management work?"
+   - "Where is OAuth implemented?"
+   - "How are database queries structured?"
+
+2. **Agent calls MCP tool** with code context:
+   ```typescript
+   compute_feature_embeddings({
+     code_context: "// Session management code...\n// OAuth implementation...\n// etc."
+   })
+   ```
+
+3. **Feature embeddings** now include actual code context, leading to:
+   - More accurate matching between Discord threads and features
+   - Better understanding of what each feature actually does
+   - Improved grouping and classification
+
+### Code Context Parameter
+
+The `compute_feature_embeddings` tool accepts an optional `code_context` parameter:
+
+- **When provided**: Uses the provided code context (from agent's codebase search)
+- **When not provided**: Falls back to fetching from GitHub API (if `GITHUB_REPO_URL` is configured)
+- **Size limit**: Automatically truncated to 10,000 characters to avoid token limits
+
+This gives you the best of both worlds: accurate code context when available, with fallback to GitHub API when not.
+
 ## MCP Tools (Stable API)
 
 These tool names are **stable** and will not change. Semantics may evolve, but names are fixed. New tools are additive only.
@@ -404,6 +547,7 @@ These tools are used internally by the workflow tools, but can also be called di
 | Tool | Description |
 |------|-------------|
 | `manage_documentation_cache` | Manage documentation cache: `fetch` (fetch docs), `extract_features` (extract features), `compute_embeddings` (compute all embeddings), `compute_docs_embeddings` (docs only), `compute_sections_embeddings` (sections only), `compute_features_embeddings` (features only), `list` (list cached docs), `clear` (clear cache) |
+| `compute_feature_embeddings` | Compute embeddings for product features with code context. Accepts optional `code_context` parameter for passing code from agent's codebase search (recommended when called from within a repository). Also accepts `force` to recompute all embeddings. |
 | `list_linear_teams` | List Linear teams (for configuration) |
 | `validate_pm_setup` | Validate PM tool configuration |
 
