@@ -256,28 +256,100 @@ export async function exportGroupingToPMTool(
       return true;
     });
     
-    // Save closed groups resolution status to database (batch update)
-    if (closedGroups.length > 0) {
+    // Check threads in groups for resolution status (even if GitHub issue is open, threads might be resolved)
+    // Load Discord cache to check thread messages for resolution signals
+    let discordCache: import("../storage/cache/discordCache.js").DiscordCache | null = null;
+    try {
+      const { loadDiscordCache } = await import("../storage/cache/discordCache.js");
+      const { join } = await import("path");
+      const { existsSync } = await import("fs");
+      const config = getConfig();
+      const cacheDir = join(process.cwd(), config.paths.cacheDir);
+      const cacheFileName = `discord-messages-${groupingData.channel_id}.json`;
+      const cachePath = join(cacheDir, cacheFileName);
+      
+      if (existsSync(cachePath)) {
+        discordCache = await loadDiscordCache(cachePath);
+      }
+    } catch (error) {
+      logError("Error loading Discord cache for thread resolution check:", error);
+    }
+    
+    // Check and save resolution status for threads in groups
+    if (discordCache) {
       try {
+        const { loadDiscordCache } = await import("../storage/cache/discordCache.js");
+        const { join } = await import("path");
+        const { existsSync } = await import("fs");
+        const config = getConfig();
+        const cacheDir = join(process.cwd(), config.paths.cacheDir);
+        const cacheFileName = `discord-messages-${groupingData.channel_id}.json`;
+        const cachePath = join(cacheDir, cacheFileName);
+        
+        if (existsSync(cachePath)) {
+          discordCache = await loadDiscordCache(cachePath);
+        }
+      } catch (error) {
+        logError("Error loading Discord cache for thread resolution check:", error);
+      }
+    }
+    
+    // Check and save resolution status for threads in groups
+    const resolvedThreadIds = new Set<string>();
+    if (discordCache && groupsWithFeatures.length > 0) {
+      try {
+        const { getThreadMessages } = await import("../storage/cache/discordCache.js");
         const { prisma } = await import("../storage/db/prisma.js");
         const resolvedAt = new Date();
-        await Promise.all(
-          closedGroups.map(group =>
-            prisma.group.update({
-              where: { id: group.id },
-              data: {
-                resolutionStatus: "closed_issue",
-                resolvedAt,
-              },
-            }).catch(error => {
-              logError(`Error saving resolution status for group ${group.id}:`, error);
-              return null;
-            })
-          )
-        );
-        log(`Saved resolution status for ${closedGroups.length} closed groups to database`);
+        
+        for (const group of groupsWithFeatures) {
+          if (group.threads) {
+            for (const thread of group.threads) {
+              const threadId = thread.thread_id;
+              if (resolvedThreadIds.has(threadId)) continue; // Already checked
+              
+              try {
+                const threadMessages = getThreadMessages(discordCache, threadId);
+                if (threadMessages && threadMessages.length > 0) {
+                  let isResolved = false;
+                  
+                  // First try quick pattern matching
+                  if (hasObviousResolutionSignals(threadMessages)) {
+                    isResolved = true;
+                  } else {
+                    // Use LLM to analyze
+                    const llmResult = await isThreadResolvedWithLLM(threadMessages);
+                    if (llmResult === true) {
+                      isResolved = true;
+                    }
+                  }
+                  
+                  if (isResolved) {
+                    resolvedThreadIds.add(threadId);
+                    // Save resolution status to database
+                    await prisma.classifiedThread.update({
+                      where: { threadId },
+                      data: {
+                        resolutionStatus: "conversation_resolved",
+                        resolvedAt,
+                      },
+                    }).catch(error => {
+                      logError(`Error saving resolution status for thread ${threadId}:`, error);
+                    });
+                  }
+                }
+              } catch (error) {
+                logError(`Error checking resolution status for thread ${threadId}:`, error);
+              }
+            }
+          }
+        }
+        
+        if (resolvedThreadIds.size > 0) {
+          log(`Marked ${resolvedThreadIds.size} threads in groups as resolved via conversation analysis`);
+        }
       } catch (error) {
-        logError("Error saving closed groups resolution status to database:", error);
+        logError("Error checking threads in groups for resolution status:", error);
       }
     }
 
@@ -481,26 +553,8 @@ export async function exportGroupingToPMTool(
     // STEP 2: Export ungrouped threads (threads that didn't match any issues)
     // Filter: Only export ungrouped threads with open top_issue or no top_issue
     // Also filter out threads that appear resolved based on conversation content
+    // (discordCache is already loaded above for checking threads in groups)
     const allUngroupedThreads = groupingData.ungrouped_threads || [];
-    
-    // Load Discord cache to check thread messages for resolution signals
-    let discordCache: import("../storage/cache/discordCache.js").DiscordCache | null = null;
-    try {
-      const { loadDiscordCache } = await import("../storage/cache/discordCache.js");
-      const { join } = await import("path");
-      const { existsSync } = await import("fs");
-      const config = getConfig();
-      const cacheDir = join(process.cwd(), config.paths.cacheDir);
-      const cacheFileName = `discord-messages-${groupingData.channel_id}.json`;
-      const cachePath = join(cacheDir, cacheFileName);
-      
-      if (existsSync(cachePath)) {
-        discordCache = await loadDiscordCache(cachePath);
-      }
-    } catch (error) {
-      logError("Error loading Discord cache for thread resolution check:", error);
-      // Continue without cache - we'll just skip resolution detection
-    }
     
     // Look up issue states for ungrouped threads that have top_issue
     const topIssueNumbers = allUngroupedThreads

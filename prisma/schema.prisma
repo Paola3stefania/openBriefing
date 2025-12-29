@@ -42,6 +42,8 @@ model ClassifiedThread {
   matchStatus           String?  @map("match_status") // 'matched' | 'below_threshold' | 'no_matches' | null (not classified yet)
   exportStatus          String?  @map("export_status") // 'pending' | 'exported' | null (not exported yet)
   exportedAt            DateTime? @map("exported_at")
+  resolutionStatus      String?  @map("resolution_status") // 'conversation_resolved' | null (not resolved)
+  resolvedAt            DateTime? @map("resolved_at")
   linearIssueId         String?  @map("linear_issue_id")
   linearIssueUrl        String?  @map("linear_issue_url")
   linearIssueIdentifier String?  @map("linear_issue_identifier")
@@ -57,6 +59,7 @@ model ClassifiedThread {
   @@index([status])
   @@index([matchStatus])
   @@index([exportStatus])
+  @@index([resolutionStatus])
   @@map("classified_threads")
 }
 
@@ -92,8 +95,6 @@ model Group {
   threadCount           Int       @default(0) @map("thread_count")
   isCrossCutting        Boolean   @default(false) @map("is_cross_cutting")
   status                String    @default("pending") // 'pending' | 'exported'
-  resolutionStatus      String?   @map("resolution_status") // 'closed_issue' | null (not closed)
-  resolvedAt            DateTime? @map("resolved_at")
   createdAt             DateTime  @default(now()) @map("created_at")
   updatedAt             DateTime  @updatedAt @map("updated_at")
   exportedAt            DateTime? @map("exported_at")
@@ -110,7 +111,6 @@ model Group {
 
   @@index([channelId])
   @@index([status])
-  @@index([resolutionStatus])
   @@index([githubIssueNumber])
   @@index([affectsFeatures], type: Gin)
   @@map("groups")
@@ -156,7 +156,6 @@ model UngroupedThread {
   @@index([channelId])
   @@index([reason])
   @@index([exportStatus])
-  @@index([resolutionStatus])
   @@index([affectsFeatures], type: Gin)
   @@map("ungrouped_threads")
 }
