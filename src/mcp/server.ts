@@ -25,6 +25,7 @@ import {
   mergeIssues,
   getMostRecentUpdateDate as getMostRecentIssueDate,
   type GitHubIssue,
+  type GitHubComment,
   type IssuesCache,
 } from "../connectors/github/client.js";
 import { loadDiscordCache, getAllMessagesFromCache, getMostRecentMessageDate, mergeMessagesByThread, organizeMessagesByThread, getThreadContextForMessage, type DiscordCache, type DiscordMessage as CachedDiscordMessage } from "../storage/cache/discordCache.js";
@@ -293,6 +294,20 @@ const tools: Tool[] = [
     inputSchema: {
       type: "object",
       properties: {},
+      required: [],
+    },
+  },
+  {
+    name: "check_discord_classification_completeness",
+    description: "Check if all Discord messages in a channel have been classified. Compares total messages with classified messages/threads to verify completeness. Uses DISCORD_DEFAULT_CHANNEL_ID from config if channel_id is not provided.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        channel_id: {
+          type: "string",
+          description: "Discord channel ID to check. If not provided, uses DISCORD_DEFAULT_CHANNEL_ID from config.",
+        },
+      },
       required: [],
     },
   },
@@ -1568,6 +1583,185 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
     }
 
+    case "check_discord_classification_completeness": {
+      try {
+        const { channel_id } = args as { channel_id?: string };
+        const config = getConfig();
+        const actualChannelId = channel_id || config.discord.defaultChannelId;
+        
+        if (!actualChannelId) {
+          throw new Error("channel_id is required or DISCORD_DEFAULT_CHANNEL_ID must be set in config");
+        }
+        
+        console.error(`[Discord Classification Check] Checking completeness for channel ${actualChannelId}...`);
+        
+        const { hasDatabaseConfig, getStorage } = await import("../storage/factory.js");
+        const useDatabase = hasDatabaseConfig();
+        const storage = useDatabase ? getStorage() : null;
+        
+        let totalMessages = 0;
+        let totalThreads = 0;
+        let classifiedThreads = 0;
+        let classifiedMessages = 0;
+        let unclassifiedMessages = 0;
+        
+        if (useDatabase && storage) {
+          // Get total messages from database
+          const { prisma } = await import("../storage/db/prisma.js");
+          totalMessages = await prisma.discordMessage.count({
+            where: { channelId: actualChannelId },
+          });
+          
+          // Count unique threads (messages with threadId or standalone messages)
+          const threadCountResult = await prisma.discordMessage.groupBy({
+            by: ["threadId"],
+            where: { channelId: actualChannelId },
+            _count: { id: true },
+          });
+          
+          // Count threads: messages with threadId count as 1 thread each, standalone messages (null threadId) count as individual threads
+          const threadsWithId = new Set(threadCountResult.filter(t => t.threadId).map(t => t.threadId!));
+          const standaloneMessages = threadCountResult.filter(t => !t.threadId).length;
+          totalThreads = threadsWithId.size + standaloneMessages;
+          
+          // Get all messages with thread info to map message IDs to threads
+          const allMessagesWithThreads = await prisma.discordMessage.findMany({
+            where: { channelId: actualChannelId },
+            select: { id: true, threadId: true },
+          });
+          const messageIdSet = new Set(allMessagesWithThreads.map(m => m.id));
+          
+          // Get classification history and verify messages exist in database
+          const classificationHistory = await storage.getClassificationHistory(actualChannelId);
+          
+          // Count classified messages and threads by checking message IDs
+          const classifiedMessageIds = new Set<string>();
+          const classifiedThreadIds = new Set<string>();
+          
+          classificationHistory.forEach(entry => {
+            const messageId = entry.message_id;
+            // Only count if message exists in database
+            if (messageIdSet.has(messageId)) {
+              classifiedMessageIds.add(messageId);
+              
+              // Find the message to get its thread ID
+              const message = allMessagesWithThreads.find(m => m.id === messageId);
+              if (message) {
+                // Use threadId if exists, otherwise use message ID (standalone message)
+                const threadId = message.threadId || message.id;
+                classifiedThreadIds.add(threadId);
+              }
+            }
+          });
+          
+          classifiedMessages = classifiedMessageIds.size;
+          classifiedThreads = classifiedThreadIds.size;
+        } else {
+          // Use cache files
+          const { loadDiscordCache, getAllMessagesFromCache } = await import("../storage/cache/discordCache.js");
+          const { loadClassificationHistory } = await import("../storage/cache/classificationHistory.js");
+          const { join } = await import("path");
+          
+          const classifyConfig = getConfig();
+          const resultsDir = join(process.cwd(), classifyConfig.paths.resultsDir || "results");
+          const discordCacheDir = join(process.cwd(), classifyConfig.paths.cacheDir);
+          const safeChannelName = actualChannelId.replace(/[^a-zA-Z0-9]/g, "_");
+          const discordCachePath = join(discordCacheDir, `discord-${safeChannelName}-${actualChannelId}.json`);
+          
+          try {
+            const discordCache = await loadDiscordCache(discordCachePath);
+            const allMessages = getAllMessagesFromCache(discordCache);
+            totalMessages = allMessages.length;
+            
+            // Count unique threads
+            const threadIds = new Set<string>();
+            allMessages.forEach(msg => {
+              if (msg.thread?.id) {
+                threadIds.add(msg.thread.id);
+              } else {
+                // Standalone message - use message ID as thread ID
+                threadIds.add(msg.id);
+              }
+            });
+            totalThreads = threadIds.size;
+          } catch (error) {
+            console.error(`[Discord Classification Check] Could not load cache: ${error instanceof Error ? error.message : error}`);
+          }
+          
+          // Get classification history from JSON
+          const classificationHistory = await loadClassificationHistory(resultsDir, actualChannelId);
+          const classifiedMessageIds = new Set(Object.keys(classificationHistory.messages || {}));
+          classifiedMessages = classifiedMessageIds.size;
+          
+          // Count classified threads
+          if (classificationHistory.threads) {
+            classifiedThreads = Object.keys(classificationHistory.threads).filter(
+              threadId => classificationHistory.threads![threadId].status === "completed"
+            ).length;
+          }
+        }
+        
+        unclassifiedMessages = totalMessages - classifiedMessages;
+        const unclassifiedThreads = totalThreads - classifiedThreads;
+        
+        // Calculate completeness scores
+        const messageCompleteness = totalMessages > 0 
+          ? ((classifiedMessages / totalMessages) * 100).toFixed(1)
+          : "100.0";
+        
+        const threadCompleteness = totalThreads > 0
+          ? ((classifiedThreads / totalThreads) * 100).toFixed(1)
+          : "100.0";
+        
+        const overallCompleteness = totalMessages > 0
+          ? ((classifiedMessages / totalMessages) * 100).toFixed(1)
+          : "100.0";
+        
+        const status = parseFloat(overallCompleteness) === 100 
+          ? "complete"
+          : parseFloat(overallCompleteness) >= 90
+          ? "mostly_complete"
+          : parseFloat(overallCompleteness) >= 50
+          ? "in_progress"
+          : "incomplete";
+        
+        const report = {
+          channelId: actualChannelId,
+          messages: {
+            total: totalMessages,
+            classified: classifiedMessages,
+            unclassified: unclassifiedMessages,
+            completeness: `${messageCompleteness}%`,
+          },
+          threads: {
+            total: totalThreads,
+            classified: classifiedThreads,
+            unclassified: unclassifiedThreads,
+            completeness: `${threadCompleteness}%`,
+          },
+          overallCompleteness: `${overallCompleteness}%`,
+          status,
+          dataSource: useDatabase ? "database" : "cache_files",
+        };
+        
+        console.error(`[Discord Classification Check] Overall Completeness: ${report.overallCompleteness}`);
+        console.error(`[Discord Classification Check] Status: ${report.status}`);
+        console.error(`[Discord Classification Check] Messages: ${classifiedMessages}/${totalMessages} classified`);
+        console.error(`[Discord Classification Check] Threads: ${classifiedThreads}/${totalThreads} classified`);
+        
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(report, null, 2),
+            },
+          ],
+        };
+      } catch (error) {
+        throw new Error(`Failed to check Discord classification completeness: ${error instanceof Error ? error.message : error}`);
+      }
+    }
+
     case "compute_discord_embeddings": {
       const { channel_id } = args as { channel_id?: string };
       
@@ -2143,22 +2337,168 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const issuesCachePath = join(process.cwd(), classifyConfig.paths.cacheDir, classifyConfig.paths.issuesCacheFile);
       let existingIssuesCache: IssuesCache | null = null;
       let sinceIssuesDate: string | undefined = undefined;
+      let existingIssuesForResume: GitHubIssue[] = [];
 
+      // Load existing issues from database (if using database) or cache
+      if (useDatabase) {
+        try {
+          const { prisma } = await import("../storage/db/prisma.js");
+          const dbIssues = await prisma.gitHubIssue.findMany({
+            select: {
+              issueNumber: true,
+              issueTitle: true,
+              issueBody: true,
+              issueUrl: true,
+              issueState: true,
+              issueLabels: true,
+              issueAuthor: true,
+              issueCreatedAt: true,
+              issueUpdatedAt: true,
+              issueComments: true,
+              issueAssignees: true,
+              issueMilestone: true,
+              issueReactions: true,
+            },
+            orderBy: { issueNumber: "asc" },
+          });
+
+          // Convert database format to GitHubIssue format
+          existingIssuesForResume = dbIssues.map((issue) => ({
+            id: issue.issueNumber,
+            number: issue.issueNumber,
+            title: issue.issueTitle,
+            body: issue.issueBody || "",
+            state: (issue.issueState || "open") as "open" | "closed",
+            created_at: issue.issueCreatedAt?.toISOString() || new Date().toISOString(),
+            updated_at: issue.issueUpdatedAt?.toISOString() || new Date().toISOString(),
+            user: {
+              login: issue.issueAuthor || "unknown",
+              avatar_url: "",
+            },
+            labels: issue.issueLabels.map((name: string) => ({ name, color: "" })),
+            html_url: issue.issueUrl,
+            assignees: issue.issueAssignees.map((login: string) => ({ login, avatar_url: "" })),
+            milestone: issue.issueMilestone ? { title: issue.issueMilestone, state: "open" } : null,
+            reactions: issue.issueReactions as any,
+            comments: (() => {
+              if (!Array.isArray(issue.issueComments)) return [];
+              const validComments: GitHubComment[] = [];
+              for (const c of issue.issueComments) {
+                if (
+                  typeof c === 'object' &&
+                  c !== null &&
+                  'id' in c &&
+                  'body' in c &&
+                  'user' in c &&
+                  typeof (c as Record<string, any>).id === 'number' &&
+                  typeof (c as Record<string, any>).body === 'string' &&
+                  typeof (c as Record<string, any>).user?.login === 'string'
+                ) {
+                  const comment = c as Record<string, any>;
+                  validComments.push({
+                    id: comment.id,
+                    body: comment.body,
+                    user: {
+                      login: comment.user.login,
+                      avatar_url: comment.user.avatar_url || '',
+                    },
+                    created_at: comment.created_at || '',
+                    updated_at: comment.updated_at || '',
+                    html_url: comment.html_url || '',
+                    reactions: comment.reactions,
+                  });
+                }
+              }
+              return validComments;
+            })(),
+          }));
+
+          // Get most recent update date for incremental fetch
+          if (existingIssuesForResume.length > 0) {
+            const mostRecent = existingIssuesForResume
+              .map(i => new Date(i.updated_at).getTime())
+              .reduce((max, time) => Math.max(max, time), 0);
+            sinceIssuesDate = new Date(mostRecent).toISOString();
+          }
+
+          console.error(`[Classification] Loaded ${existingIssuesForResume.length} existing issues from database`);
+        } catch (dbError) {
+          console.error(`[Classification] Failed to load issues from database, will use cache:`, dbError);
+        }
+      }
+
+      // Fallback to cache if database not available or empty
+      if (existingIssuesForResume.length === 0) {
       try {
         if (existsSync(issuesCachePath)) {
           existingIssuesCache = await loadIssuesFromCache(issuesCachePath);
+            existingIssuesForResume = existingIssuesCache.issues || [];
           sinceIssuesDate = getMostRecentIssueDate(existingIssuesCache);
+            console.error(`[Classification] Loaded ${existingIssuesForResume.length} existing issues from cache`);
         }
       } catch (error) {
         // Cache doesn't exist or invalid, will fetch all
+        }
       }
 
-      const githubToken = process.env.GITHUB_TOKEN;
-      if (!githubToken) {
-        throw new Error("GITHUB_TOKEN environment variable is required for fetching issues");
+      // Use token manager for automatic token rotation (same logic as fetch_github_issues)
+      const { GitHubTokenManager } = await import("../connectors/github/tokenManager.js");
+      let tokenManager = await GitHubTokenManager.fromEnvironment();
+      
+      // Initialize OAuth client manager (supports multiple comma-separated client IDs)
+      const { OAuthClientManager } = await import("../connectors/github/oauthClientManager.js");
+      const oauthClientManager = OAuthClientManager.fromEnvironment();
+      
+      if (!tokenManager) {
+        // Try to get token via OAuth if credentials are available
+        if (oauthClientManager) {
+          console.error(`[Classification] No tokens found. Attempting to get token via OAuth...`);
+          const { getNewTokenViaOAuth } = await import("../connectors/github/oauthFlow.js");
+          
+          // Try each client ID until we get a token or run out of clients
+          let newToken: string | null = null;
+          const allClients = oauthClientManager.getAllClients();
+          let attempts = 0;
+          const maxAttempts = allClients.length;
+          
+          while (!newToken && attempts < maxAttempts) {
+            const client = oauthClientManager.getUnusedClient();
+            if (!client) {
+              break;
+            }
+            
+            try {
+              console.error(`[Classification] Trying OAuth client ${client.clientId.substring(0, 8)}... (attempt ${attempts + 1}/${maxAttempts})`);
+              newToken = await getNewTokenViaOAuth(client.clientId, client.clientSecret);
+              if (newToken) {
+                // Create token manager with the new token (in memory only)
+                tokenManager = new GitHubTokenManager([newToken]);
+                console.error(`[Classification] Successfully obtained new token via OAuth!`);
+                break;
+              }
+            } catch (oauthError) {
+              console.error(`[Classification] OAuth flow failed: ${oauthError}`);
+              attempts++;
+            }
+          }
+        }
+        
+        if (!tokenManager) {
+          throw new Error("GITHUB_TOKEN environment variable is required. You can provide multiple tokens separated by commas: token1,token2,token3. Or set GITHUB_OAUTH_CLIENT_ID and GITHUB_OAUTH_CLIENT_SECRET (comma-separated for multiple clients) for automatic token generation.");
+        }
       }
 
-      const newIssues = await fetchAllGitHubIssues(githubToken, true, undefined, undefined, sinceIssuesDate);
+      // Pass existing issues to skip fetching them (more efficient)
+      const newIssues = await fetchAllGitHubIssues(
+        tokenManager, 
+        true, 
+        undefined, 
+        undefined, 
+        sinceIssuesDate,
+        undefined, // limit
+        true, // includeComments
+        existingIssuesForResume // Pass existing issues to skip fetching
+      );
 
       // Merge with existing cache if doing incremental update
       let finalIssues: GitHubIssue[];
@@ -3213,18 +3553,128 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const issuesCachePath = join(process.cwd(), config.paths.cacheDir, config.paths.issuesCacheFile);
         let existingIssuesCache: IssuesCache | null = null;
         let sinceDate: string | undefined = undefined;
+        let existingIssuesForResume: GitHubIssue[] = [];
 
+        // Load existing issues from database (if using database) or cache
+        const { hasDatabaseConfig: hasDbConfig, getStorage: getStorageFunc } = await import("../storage/factory.js");
+        const useDatabaseForIssues = hasDbConfig() && await getStorageFunc().isAvailable();
+        
+        if (useDatabaseForIssues) {
+          try {
+            const { prisma } = await import("../storage/db/prisma.js");
+            const dbIssues = await prisma.gitHubIssue.findMany({
+              select: {
+                issueNumber: true,
+                issueTitle: true,
+                issueBody: true,
+                issueUrl: true,
+                issueState: true,
+                issueLabels: true,
+                issueAuthor: true,
+                issueCreatedAt: true,
+                issueUpdatedAt: true,
+                issueComments: true,
+                issueAssignees: true,
+                issueMilestone: true,
+                issueReactions: true,
+              },
+              orderBy: { issueNumber: "asc" },
+            });
+
+            // Convert database format to GitHubIssue format
+            existingIssuesForResume = dbIssues.map((issue) => ({
+              id: issue.issueNumber,
+              number: issue.issueNumber,
+              title: issue.issueTitle,
+              body: issue.issueBody || "",
+              state: (issue.issueState || "open") as "open" | "closed",
+              created_at: issue.issueCreatedAt?.toISOString() || new Date().toISOString(),
+              updated_at: issue.issueUpdatedAt?.toISOString() || new Date().toISOString(),
+              user: {
+                login: issue.issueAuthor || "unknown",
+                avatar_url: "",
+              },
+              labels: issue.issueLabels.map((name: string) => ({ name, color: "" })),
+              html_url: issue.issueUrl,
+              assignees: issue.issueAssignees.map((login: string) => ({ login, avatar_url: "" })),
+              milestone: issue.issueMilestone ? { title: issue.issueMilestone, state: "open" } : null,
+              reactions: issue.issueReactions as any,
+              comments: (() => {
+              if (!Array.isArray(issue.issueComments)) return [];
+              const validComments: GitHubComment[] = [];
+              for (const c of issue.issueComments) {
+                if (
+                  typeof c === 'object' &&
+                  c !== null &&
+                  'id' in c &&
+                  'body' in c &&
+                  'user' in c &&
+                  typeof (c as Record<string, any>).id === 'number' &&
+                  typeof (c as Record<string, any>).body === 'string' &&
+                  typeof (c as Record<string, any>).user?.login === 'string'
+                ) {
+                  const comment = c as Record<string, any>;
+                  validComments.push({
+                    id: comment.id,
+                    body: comment.body,
+                    user: {
+                      login: comment.user.login,
+                      avatar_url: comment.user.avatar_url || '',
+                    },
+                    created_at: comment.created_at || '',
+                    updated_at: comment.updated_at || '',
+                    html_url: comment.html_url || '',
+                    reactions: comment.reactions,
+                  });
+                }
+              }
+              return validComments;
+            })(),
+            }));
+
+            // Get most recent update date for incremental fetch
+            if (existingIssuesForResume.length > 0) {
+              const mostRecent = existingIssuesForResume
+                .map(i => new Date(i.updated_at).getTime())
+                .reduce((max, time) => Math.max(max, time), 0);
+              sinceDate = new Date(mostRecent).toISOString();
+            }
+
+            console.error(`[Sync] Loaded ${existingIssuesForResume.length} existing issues from database`);
+          } catch (dbError) {
+            console.error(`[Sync] Failed to load issues from database, will use cache:`, dbError);
+          }
+        }
+
+        // Fallback to cache if database not available or empty
+        if (existingIssuesForResume.length === 0) {
         if (existsSync(issuesCachePath)) {
           existingIssuesCache = await loadIssuesFromCache(issuesCachePath);
+            existingIssuesForResume = existingIssuesCache.issues || [];
           sinceDate = getMostRecentIssueDate(existingIssuesCache);
+            console.error(`[Sync] Loaded ${existingIssuesForResume.length} existing issues from cache`);
+          }
         }
 
-        const githubToken = process.env.GITHUB_TOKEN;
-        if (!githubToken) {
-          throw new Error("GITHUB_TOKEN environment variable is required");
+        // Use token manager for automatic token rotation (same logic as fetch_github_issues)
+        const { GitHubTokenManager } = await import("../connectors/github/tokenManager.js");
+        let tokenManager = await GitHubTokenManager.fromEnvironment();
+        
+        if (!tokenManager) {
+          throw new Error("GITHUB_TOKEN environment variable is required. You can provide multiple tokens separated by commas: token1,token2,token3. Or set GITHUB_APP_ID and GITHUB_APP_INSTALLATION_ID for GitHub App authentication.");
         }
 
-        const newIssues = await fetchAllGitHubIssues(githubToken, true, undefined, undefined, sinceDate);
+        // Pass existing issues to skip fetching them (more efficient)
+        const newIssues = await fetchAllGitHubIssues(
+          tokenManager, 
+          true, 
+          undefined, 
+          undefined, 
+          sinceDate,
+          undefined, // limit
+          true, // includeComments
+          existingIssuesForResume // Pass existing issues to skip fetching
+        );
 
         // Merge with existing cache
         let finalIssues: GitHubIssue[];
@@ -3818,13 +4268,16 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
               
               // Fetch GitHub issues
               try {
-                const githubToken = process.env.GITHUB_TOKEN;
-                if (!githubToken) {
-                  throw new Error("GITHUB_TOKEN environment variable is required for fetching issues");
+                // Use token manager for automatic token rotation (same logic as fetch_github_issues)
+                const { GitHubTokenManager } = await import("../connectors/github/tokenManager.js");
+                let tokenManager = await GitHubTokenManager.fromEnvironment();
+                
+                if (!tokenManager) {
+                  throw new Error("GITHUB_TOKEN environment variable is required. You can provide multiple tokens separated by commas: token1,token2,token3. Or set GITHUB_APP_ID and GITHUB_APP_INSTALLATION_ID for GitHub App authentication.");
                 }
                 
                 console.error(`[Grouping] Fetching GitHub issues...`);
-                const newIssues = await fetchAllGitHubIssues(githubToken, true);
+                const newIssues = await fetchAllGitHubIssues(tokenManager, true);
                 
                 // Save issues to database
                 await storage.saveGitHubIssues(newIssues.map(issue => ({

@@ -167,9 +167,29 @@ async function savePersistentCache(cache: PersistentEmbeddingCache): Promise<voi
     }
     
     try {
-      // Save all entries to database in a batch
+      // First, check which issues actually exist in the database
+      const issueNumbers = Object.keys(entries)
+        .filter((issueNumberStr) => !isNaN(parseInt(issueNumberStr, 10)))
+        .map((issueNumberStr) => parseInt(issueNumberStr, 10));
+      
+      if (issueNumbers.length === 0) {
+        return;
+      }
+      
+      // Check which issues exist in gitHubIssue table
+      const existingIssues = await prisma.gitHubIssue.findMany({
+        where: { issueNumber: { in: issueNumbers } },
+        select: { issueNumber: true },
+      });
+      
+      const existingIssueNumbers = new Set(existingIssues.map(i => i.issueNumber));
+      
+      // Only save embeddings for issues that exist in the database
       const operations = Object.entries(entries)
-        .filter(([issueNumberStr]) => !isNaN(parseInt(issueNumberStr, 10)))
+        .filter(([issueNumberStr]) => {
+          const issueNumber = parseInt(issueNumberStr, 10);
+          return !isNaN(issueNumber) && existingIssueNumbers.has(issueNumber);
+        })
         .map(([issueNumberStr, entry]) => {
           const issueNumber = parseInt(issueNumberStr, 10);
           return prisma.issueEmbedding.upsert({
@@ -191,7 +211,12 @@ async function savePersistentCache(cache: PersistentEmbeddingCache): Promise<voi
       if (operations.length > 0) {
         await prisma.$transaction(operations);
       }
-      logProgress(`Saved ${Object.keys(entries).length} issue embeddings to database`);
+      
+      const skippedCount = issueNumbers.length - existingIssueNumbers.size;
+      if (skippedCount > 0) {
+        logProgress(`Skipped ${skippedCount} issue embeddings (issues not found in database)`);
+      }
+      logProgress(`Saved ${operations.length} issue embeddings to database`);
       return;
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);

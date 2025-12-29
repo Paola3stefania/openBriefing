@@ -1654,6 +1654,17 @@ export async function computeAndSaveIssueEmbeddings(
   onProgress?: (processed: number, total: number) => void,
   force: boolean = false
 ): Promise<{ computed: number; cached: number; total: number }> {
+  const model = getEmbeddingModel();
+
+  // If force=true, delete all existing embeddings first to ensure clean recomputation
+  if (force) {
+    console.error(`[Embeddings] Force mode: Deleting all existing issue embeddings...`);
+    const deletedCount = await prisma.issueEmbedding.deleteMany({
+      where: { model },
+    });
+    console.error(`[Embeddings] Deleted ${deletedCount.count} existing embeddings`);
+  }
+
   // Get all issues with full conversation data
   const allIssues = await prisma.gitHubIssue.findMany({
     select: {
@@ -1667,8 +1678,6 @@ export async function computeAndSaveIssueEmbeddings(
     },
     orderBy: { issueNumber: "asc" },
   });
-
-  const model = getEmbeddingModel();
 
   // Check which issues already have embeddings (skip if force=true)
   const existingHashes = new Map<number, string>();
