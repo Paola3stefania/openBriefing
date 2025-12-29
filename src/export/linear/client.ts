@@ -7,12 +7,43 @@ import { BasePMTool } from "../base.js";
 import { PMToolIssue, PMToolConfig, ExportResult } from "../types.js";
 import { log, logError } from "../../mcp/logger.js";
 
+// Standard labels for priority detection
+const STANDARD_LABELS = {
+  // Security labels - red color
+  security: { name: "security", color: "#DC2626", description: "Security vulnerability or concern" },
+  vulnerability: { name: "vulnerability", color: "#DC2626", description: "Security vulnerability" },
+  
+  // Bug labels - orange color  
+  bug: { name: "bug", color: "#EA580C", description: "Bug or defect" },
+  regression: { name: "regression", color: "#EA580C", description: "Regression - previously working functionality broken" },
+  crash: { name: "crash", color: "#EA580C", description: "Application crash" },
+  
+  // Priority labels - various colors
+  urgent: { name: "urgent", color: "#B91C1C", description: "Urgent - needs immediate attention" },
+  critical: { name: "critical", color: "#DC2626", description: "Critical issue" },
+  blocker: { name: "blocker", color: "#991B1B", description: "Blocker - prevents progress" },
+  
+  // Source labels - blue/purple colors
+  "discord-thread": { name: "discord-thread", color: "#5865F2", description: "Originated from Discord" },
+  "github-issue": { name: "github-issue", color: "#6E5494", description: "Related to GitHub issue" },
+  
+  // Grouping labels - gray colors
+  ungrouped: { name: "ungrouped", color: "#6B7280", description: "Not matched to existing issues" },
+  "cross-cutting": { name: "cross-cutting", color: "#7C3AED", description: "Affects multiple features" },
+  
+  // Feature request labels - green color (low priority)
+  enhancement: { name: "enhancement", color: "#16A34A", description: "Feature request or enhancement" },
+  "feature-request": { name: "feature-request", color: "#16A34A", description: "New feature request" },
+} as const;
+
 export class LinearIntegration extends BasePMTool {
   private apiUrl: string;
   private apiKey: string;
   public teamId?: string; // Make accessible for updating after auto-creation
   private projectCache: Map<string, string> = new Map(); // feature_id -> project_id
   private projectNameCache: Map<string, string> = new Map(); // project_name (lowercase) -> project_id
+  private labelCache: Map<string, string> = new Map(); // label_name (lowercase) -> label_id
+  private labelsInitialized: boolean = false;
 
   constructor(config: PMToolConfig) {
     super(config);
@@ -888,9 +919,11 @@ export class LinearIntegration extends BasePMTool {
     return description;
   }
 
-  private mapPriority(priority?: "high" | "medium" | "low"): number {
+  private mapPriority(priority?: "urgent" | "high" | "medium" | "low"): number {
     // Linear uses: 0 = No priority, 1 = Urgent, 2 = High, 3 = Medium, 4 = Low
     switch (priority) {
+      case "urgent":
+        return 1; // Urgent - highest priority
       case "high":
         return 2;
       case "medium":
@@ -902,11 +935,193 @@ export class LinearIntegration extends BasePMTool {
     }
   }
 
+  /**
+   * Initialize labels - fetch existing labels and create standard ones
+   * Should be called before exporting issues
+   */
+  async initializeLabels(): Promise<void> {
+    if (this.labelsInitialized) {
+      return;
+    }
+    
+    try {
+      // First, fetch all existing labels
+      await this.fetchExistingLabels();
+      
+      // Create standard labels that don't exist
+      for (const [key, labelDef] of Object.entries(STANDARD_LABELS)) {
+        const normalizedName = labelDef.name.toLowerCase();
+        if (!this.labelCache.has(normalizedName)) {
+          try {
+            const labelId = await this.createLabel(labelDef.name, labelDef.color, labelDef.description);
+            this.labelCache.set(normalizedName, labelId);
+            log(`Created Linear label: ${labelDef.name}`);
+          } catch (error) {
+            // Label might already exist with different casing, try to find it
+            logError(`Failed to create label ${labelDef.name}:`, error);
+          }
+        }
+      }
+      
+      this.labelsInitialized = true;
+      log(`Initialized ${this.labelCache.size} labels in Linear`);
+    } catch (error) {
+      logError("Failed to initialize labels:", error);
+      // Continue without labels - not critical
+    }
+  }
+
+  /**
+   * Fetch all existing labels from Linear workspace
+   */
+  private async fetchExistingLabels(): Promise<void> {
+    const query = `
+      query GetLabels {
+        issueLabels {
+          nodes {
+            id
+            name
+          }
+        }
+      }
+    `;
+    
+    try {
+      const response = await this.graphqlRequest<{
+        issueLabels?: {
+          nodes?: Array<{
+            id: string;
+            name: string;
+          }>;
+        };
+      }>(query, {});
+      
+      if (response.data?.issueLabels?.nodes) {
+        for (const label of response.data.issueLabels.nodes) {
+          const normalizedName = label.name.toLowerCase();
+          this.labelCache.set(normalizedName, label.id);
+        }
+        log(`Fetched ${response.data.issueLabels.nodes.length} existing labels from Linear`);
+      }
+    } catch (error) {
+      logError("Failed to fetch existing labels:", error);
+    }
+  }
+
+  /**
+   * Create a new label in Linear
+   */
+  private async createLabel(name: string, color: string, description?: string): Promise<string> {
+    const query = `
+      mutation CreateLabel($input: IssueLabelCreateInput!) {
+        issueLabelCreate(input: $input) {
+          success
+          issueLabel {
+            id
+            name
+          }
+        }
+      }
+    `;
+    
+    const variables = {
+      input: {
+        name,
+        color,
+        description,
+        // Associate with team if we have one
+        ...(this.teamId && { teamId: this.teamId }),
+      },
+    };
+    
+    const response = await this.graphqlRequest<{
+      issueLabelCreate?: {
+        success: boolean;
+        issueLabel?: {
+          id: string;
+          name: string;
+        };
+      };
+    }>(query, variables);
+    
+    if (!response.data?.issueLabelCreate?.success || !response.data.issueLabelCreate.issueLabel) {
+      throw new Error(`Failed to create label: ${JSON.stringify(response.errors)}`);
+    }
+    
+    return response.data.issueLabelCreate.issueLabel.id;
+  }
+
+  /**
+   * Get or create a label by name
+   * Returns the label ID
+   */
+  async getOrCreateLabel(name: string, color?: string, description?: string): Promise<string | null> {
+    const normalizedName = name.toLowerCase();
+    
+    // Check cache first
+    if (this.labelCache.has(normalizedName)) {
+      return this.labelCache.get(normalizedName)!;
+    }
+    
+    // Check if it's a standard label
+    const standardLabel = Object.values(STANDARD_LABELS).find(
+      l => l.name.toLowerCase() === normalizedName
+    );
+    
+    try {
+      const labelId = await this.createLabel(
+        name,
+        color || standardLabel?.color || "#6B7280", // Default gray
+        description || standardLabel?.description
+      );
+      this.labelCache.set(normalizedName, labelId);
+      return labelId;
+    } catch (error) {
+      logError(`Failed to create label ${name}:`, error);
+      return null;
+    }
+  }
+
+  /**
+   * Map label names to Linear label IDs
+   * Creates labels if they don't exist
+   */
   private mapLabels(labels: string[]): string[] {
-    // Linear uses label IDs, not names
-    // This would need to be implemented by fetching labels first
-    // For now, return empty array - labels would need to be pre-created in Linear
-    return [];
+    const labelIds: string[] = [];
+    
+    for (const label of labels) {
+      const normalizedName = label.toLowerCase();
+      const labelId = this.labelCache.get(normalizedName);
+      if (labelId) {
+        labelIds.push(labelId);
+      }
+    }
+    
+    return labelIds;
+  }
+
+  /**
+   * Map labels asynchronously - creates missing labels
+   * Use this when you need to ensure labels exist
+   */
+  async mapLabelsAsync(labels: string[]): Promise<string[]> {
+    const labelIds: string[] = [];
+    
+    for (const label of labels) {
+      const normalizedName = label.toLowerCase();
+      let labelId = this.labelCache.get(normalizedName);
+      
+      if (!labelId) {
+        // Try to create it
+        labelId = await this.getOrCreateLabel(label) || undefined;
+      }
+      
+      if (labelId) {
+        labelIds.push(labelId);
+      }
+    }
+    
+    return labelIds;
   }
 }
 

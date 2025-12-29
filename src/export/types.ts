@@ -10,7 +10,7 @@ export interface ProductFeature {
   category?: string;
   documentation_section?: string;
   related_keywords: string[];
-  priority?: "high" | "medium" | "low";
+  priority?: "urgent" | "high" | "medium" | "low";
 }
 
 export interface FeatureMapping {
@@ -43,7 +43,7 @@ export interface PMToolIssue {
   source_url: string;
   source_id: string;
   labels?: string[];
-  priority?: "high" | "medium" | "low";
+  priority?: "urgent" | "high" | "medium" | "low";
   metadata?: Record<string, unknown>;
   linear_issue_id?: string; // Store Linear issue ID for mapping
   linear_issue_identifier?: string; // Store Linear issue identifier (e.g., "LIN-123") for display

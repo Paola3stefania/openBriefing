@@ -529,6 +529,31 @@ const tools: Tool[] = [
     },
   },
   {
+    name: "label_linear_issues",
+    description: "Use LLM to detect and add missing labels (security, bug, regression, enhancement, urgent) to existing Linear issues. Analyzes issue titles and descriptions to automatically classify and label them. Requires PM_TOOL_API_KEY.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        team_name: {
+          type: "string",
+          description: "Linear team name to fetch issues from (default: 'UNMute')",
+          default: "UNMute",
+        },
+        limit: {
+          type: "number",
+          description: "Maximum number of issues to process (default: 100)",
+          default: 100,
+        },
+        dry_run: {
+          type: "boolean",
+          description: "If true, only show what labels would be added without actually updating Linear (default: false)",
+          default: false,
+        },
+      },
+      required: [],
+    },
+  },
+  {
     name: "compute_discord_embeddings",
     description: "Compute and update embeddings for Discord message threads. This pre-computes embeddings for all classified threads, which improves performance for classification and grouping operations. Only computes embeddings for threads that don't have embeddings or have changed content.",
     inputSchema: {
@@ -3834,10 +3859,18 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     case "export_to_pm_tool": {
-      const { classified_data_path, grouping_data_path, include_closed } = args as {
+      const { 
+        use_issue_centric = true, // Default to new issue-centric approach
+        channel_id,
+        include_closed,
+        classified_data_path, // Legacy
+        grouping_data_path, // Legacy
+      } = args as {
+        use_issue_centric?: boolean;
+        channel_id?: string;
+        include_closed?: boolean;
         classified_data_path?: string;
         grouping_data_path?: string;
-        include_closed?: boolean;
       };
 
       try {
@@ -3872,20 +3905,40 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           team_id: config.pmIntegration.pm_tool.team_id,
         };
 
-        let result: Awaited<ReturnType<typeof import("../export/groupingExporter.js").exportGroupingToPMTool>> | Awaited<ReturnType<typeof runExportWorkflow>> | undefined;
+        let result: Awaited<ReturnType<typeof import("../export/groupingExporter.js").exportGroupingToPMTool>> | Awaited<ReturnType<typeof import("../export/groupingExporter.js").exportIssuesToPMTool>> | Awaited<ReturnType<typeof runExportWorkflow>> | undefined;
         let sourceFile: string = "";
         let useDatabaseForStorage = false;
         
-        // Option 1: Export from grouping results (preferred - already mapped to features)
-        // First, try loading from database if available
-        // Import the export function to get the correct type
+        // NEW APPROACH: Issue-centric export (GitHub issues are primary, Discord threads attached)
+        if (use_issue_centric) {
+          const exportChannelId = channel_id || actualChannelId;
+          if (!exportChannelId) {
+            throw new Error("channel_id is required for issue-centric export. Provide channel_id or set DISCORD_DEFAULT_CHANNEL_ID in environment variables.");
+          }
+          
+          sourceFile = `database:issues:${exportChannelId}`;
+          console.error(`[Export] Using issue-centric export (GitHub issues primary, Discord context attached)`);
+          
+          const { exportIssuesToPMTool } = await import("../export/groupingExporter.js");
+          result = await exportIssuesToPMTool(pmToolConfig, {
+            include_closed: include_closed ?? false,
+            channelId: exportChannelId,
+          });
+          
+          // Update database with export status is handled inside exportIssuesToPMTool
+          useDatabaseForStorage = true;
+        } else {
+          // LEGACY APPROACH: Export from grouping results (Discord threads/groups are primary)
+          // Option 1: Export from grouping results (preferred - already mapped to features)
+          // First, try loading from database if available
+          // Import the export function to get the correct type
           const { exportGroupingToPMTool } = await import("../export/groupingExporter.js");
           type GroupingDataForExport = Parameters<typeof exportGroupingToPMTool>[0];
         
-        let groupingData: GroupingDataForExport | null = null;
+          let groupingData: GroupingDataForExport | null = null;
         
-        // Try loading from database first (if available and channel_id is known)
-        if (!grouping_data_path && actualChannelId) {
+          // Try loading from database first (if available and channel_id is known)
+          if (!grouping_data_path && actualChannelId) {
           try {
             const { hasDatabaseConfig, getStorage } = await import("../storage/factory.js");
             const useDatabase = hasDatabaseConfig() && await getStorage().isAvailable();
@@ -3995,10 +4048,10 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             // Fall through to JSON file loading
             console.error(`[Export] Failed to load from database, falling back to JSON:`, dbError);
           }
-        }
+          }
         
-        // Fall back to JSON file if database didn't have data or grouping_data_path was provided
-        if (!groupingData) {
+          // Fall back to JSON file if database didn't have data or grouping_data_path was provided
+          if (!groupingData) {
           let actualGroupingPath = grouping_data_path;
           if (!actualGroupingPath && actualChannelId) {
             // Try to find the latest grouping file for this channel
@@ -4024,15 +4077,15 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             const groupingContent = await readFile(actualGroupingPath, "utf-8");
             groupingData = safeJsonParse<GroupingDataForExport>(groupingContent, actualGroupingPath);
           }
-        }
+          }
         
-        // If we have grouping data (from DB or file), export it
-        if (groupingData) {
-          result = await exportGroupingToPMTool(groupingData, pmToolConfig, { include_closed: include_closed ?? false });
-          
-          // Update export status (in database or file)
-          if (result && result.success) {
-            if (useDatabaseForStorage) {
+          // If we have grouping data (from DB or file), export it
+          if (groupingData) {
+            result = await exportGroupingToPMTool(groupingData, pmToolConfig, { include_closed: include_closed ?? false });
+            
+            // Update export status (in database or file)
+            if (result && result.success) {
+              if (useDatabaseForStorage) {
               // Update database with export status
               const { getStorage } = await import("../storage/factory.js");
               const storage = getStorage();
@@ -4089,7 +4142,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
               console.error(`[Export] Updated database with export status`);
             } else if (sourceFile && sourceFile.startsWith('/')) {
               // Update JSON file with export status
-              if (result.group_export_mappings) {
+            if (result.group_export_mappings) {
               const exportMappings = new Map(result.group_export_mappings.map(m => [m.group_id, m]));
               
               for (const group of groupingData.groups || []) {
@@ -4131,9 +4184,8 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
               console.error(`[Export] Updated grouping file with export status: ${sourceFile}`);
             }
           }
-          
-        } else {
-          // Option 2: Export from classification results (requires feature extraction)
+          } else {
+            // Option 2: Export from classification results (requires feature extraction)
           
           // Get documentation URLs from config
           if (!config.pmIntegration.documentation_urls || config.pmIntegration.documentation_urls.length === 0) {
@@ -4157,12 +4209,12 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             classifiedPath,
             pmToolConfig
           );
-        }
+          } // End of legacy approach (else block)
 
         if (!result) {
           throw new Error("Export failed: No result returned from export operation");
         }
-        
+
         // Save export results to database and file
         const timestamp = Date.now();
         const exportResultId = `export-${pmToolConfig.type}-${timestamp}`;
@@ -6913,6 +6965,285 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       } catch (error) {
         logError("Linear issue classification failed:", error);
         throw new Error(`Linear issue classification failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    case "label_linear_issues": {
+      const { team_name = "UNMute", limit = 100, dry_run = false } = args as {
+        team_name?: string;
+        limit?: number;
+        dry_run?: boolean;
+      };
+
+      try {
+        const config = getConfig();
+        
+        // Check for required API keys
+        if (!config.pmIntegration?.enabled || config.pmIntegration.pm_tool?.type !== "linear") {
+          throw new Error("Linear integration requires PM_TOOL_TYPE=linear and PM_TOOL_API_KEY to be set in environment variables.");
+        }
+
+        if (!config.pmIntegration.pm_tool?.api_key) {
+          throw new Error("Linear API key is required. Set PM_TOOL_API_KEY in environment variables.");
+        }
+
+        if (!process.env.OPENAI_API_KEY) {
+          throw new Error("OPENAI_API_KEY is required for LLM-based label detection.");
+        }
+
+        // Build PM tool configuration
+        const pmToolConfig: PMToolConfig = {
+          type: "linear",
+          api_key: config.pmIntegration.pm_tool.api_key,
+          api_url: config.pmIntegration.pm_tool.api_url,
+          team_id: config.pmIntegration.pm_tool.team_id,
+        };
+
+        // Create Linear integration instance
+        const { LinearIntegration } = await import("../export/linear/client.js");
+        const linearTool = new LinearIntegration(pmToolConfig);
+
+        // Find the team
+        let teamId = pmToolConfig.team_id;
+        if (!teamId) {
+          const teams = await linearTool.listTeams();
+          const team = teams.find(t => t.name.toLowerCase() === team_name.toLowerCase() || t.key.toLowerCase() === team_name.toLowerCase());
+          if (!team) {
+            throw new Error(`Team "${team_name}" not found. Available teams: ${teams.map(t => t.name).join(", ")}`);
+          }
+          teamId = team.id;
+        }
+
+        // Initialize labels (create standard labels if they don't exist)
+        console.error(`[Label Linear Issues] Initializing labels...`);
+        await linearTool.initializeLabels();
+
+        // Fetch issues from the team
+        console.error(`[Label Linear Issues] Fetching issues from team "${team_name}"...`);
+        const issues = await linearTool.listTeamIssues(teamId, limit);
+        console.error(`[Label Linear Issues] Found ${issues.length} issues`);
+
+        // Prepare issues for LLM classification
+        const issuesToClassify = issues.map((issue, index) => ({
+          index,
+          linearId: issue.id,
+          identifier: issue.identifier,
+          title: issue.title,
+          description: issue.description || "",
+          existingLabels: issue.labels?.map(l => l.name) || [],
+        }));
+
+        // Use LLM to detect labels in batches
+        console.error(`[Label Linear Issues] Detecting labels using LLM...`);
+        
+        const results = {
+          total_issues: issues.length,
+          issues_updated: 0,
+          issues_skipped: 0,
+          labels_added: 0,
+          updates: [] as Array<{
+            identifier: string;
+            title: string;
+            added_labels: string[];
+            existing_labels: string[];
+          }>,
+          errors: [] as string[],
+        };
+
+        // Process in batches of 10
+        const batchSize = 10;
+        for (let i = 0; i < issuesToClassify.length; i += batchSize) {
+          const batch = issuesToClassify.slice(i, i + batchSize);
+          
+          // Build batch content for LLM
+          const batchContent = batch.map((issue, idx) => 
+            `[${idx + 1}] Title: ${issue.title}${issue.description ? `\nDescription: ${issue.description.substring(0, 200)}` : ""}`
+          ).join("\n\n---\n\n");
+
+          try {
+            const response = await fetch("https://api.openai.com/v1/chat/completions", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
+              },
+              body: JSON.stringify({
+                model: "gpt-4o-mini",
+                messages: [
+                  {
+                    role: "system",
+                    content: `You are a technical issue classifier. Analyze each issue and return applicable labels.
+
+Available labels:
+- security: Security vulnerabilities, auth issues, data leaks, XSS, CSRF, injection
+- bug: Software defects, errors, crashes, things not working
+- regression: Something that worked before but broke after update/release
+- urgent: Critical issues, production outages, blockers
+- enhancement: Feature requests, improvements, suggestions
+
+Rules:
+1. Return one line per issue: "[number] label1, label2" or "[number] none"
+2. If regression, also include bug
+3. Be conservative - only label if confident
+4. Questions/docs are "none"
+
+Example output:
+[1] bug
+[2] security
+[3] regression, bug
+[4] enhancement
+[5] none`
+                  },
+                  {
+                    role: "user",
+                    content: `Classify these ${batch.length} issues:\n\n${batchContent}`
+                  }
+                ],
+                temperature: 0.1,
+                max_tokens: 200,
+              }),
+            });
+
+            if (!response.ok) {
+              const errorText = await response.text();
+              console.error(`[Label Linear Issues] LLM API error: ${response.status} ${errorText}`);
+              results.errors.push(`LLM API error for batch ${Math.floor(i / batchSize) + 1}: ${response.status}`);
+              continue;
+            }
+
+            const data = await response.json();
+            const result = data.choices[0]?.message?.content?.trim() || "";
+
+            // Parse results
+            const validLabels = ["security", "bug", "regression", "urgent", "enhancement"];
+            const lines = result.split("\n").filter((l: string) => l.trim());
+
+            for (const line of lines) {
+              const match = line.match(/\[(\d+)\]\s*(.+)/);
+              if (match) {
+                const batchIdx = parseInt(match[1], 10) - 1;
+                const labelsStr = match[2].trim().toLowerCase();
+
+                if (batchIdx >= 0 && batchIdx < batch.length) {
+                  const issue = batch[batchIdx];
+
+                  if (labelsStr === "none" || !labelsStr) {
+                    results.issues_skipped++;
+                    continue;
+                  }
+
+                  const detectedLabels = labelsStr
+                    .split(",")
+                    .map((l: string) => l.trim())
+                    .filter((l: string) => validLabels.includes(l));
+
+                  // Filter out labels that already exist
+                  const existingLower = issue.existingLabels.map(l => l.toLowerCase());
+                  const newLabels = detectedLabels.filter((l: string) => !existingLower.includes(l));
+
+                  if (newLabels.length > 0) {
+                    if (!dry_run) {
+                      // Get label IDs and update the issue
+                      const labelIds = await linearTool.mapLabelsAsync(newLabels);
+                      
+                      if (labelIds.length > 0) {
+                        // Get existing label IDs
+                        const originalIssue = issues.find(iss => iss.id === issue.linearId);
+                        const existingLabelIds = originalIssue?.labels?.map(l => l.id) || [];
+                        
+                        // Combine existing and new label IDs
+                        const allLabelIds = [...existingLabelIds, ...labelIds];
+                        
+                        try {
+                          // Update issue with new labels using GraphQL directly
+                          const updateResponse = await fetch("https://api.linear.app/graphql", {
+                            method: "POST",
+                            headers: {
+                              "Content-Type": "application/json",
+                              "Authorization": config.pmIntegration.pm_tool.api_key!,
+                            },
+                            body: JSON.stringify({
+                              query: `
+                                mutation UpdateIssueLabels($id: String!, $labelIds: [String!]!) {
+                                  issueUpdate(id: $id, input: { labelIds: $labelIds }) {
+                                    success
+                                  }
+                                }
+                              `,
+                              variables: {
+                                id: issue.linearId,
+                                labelIds: allLabelIds,
+                              },
+                            }),
+                          });
+
+                          if (!updateResponse.ok) {
+                            throw new Error(`Failed to update issue: ${updateResponse.status}`);
+                          }
+
+                          const updateData = await updateResponse.json();
+                          if (!updateData.data?.issueUpdate?.success) {
+                            throw new Error(`Failed to update issue: ${JSON.stringify(updateData.errors)}`);
+                          }
+
+                          results.issues_updated++;
+                          results.labels_added += newLabels.length;
+                          results.updates.push({
+                            identifier: issue.identifier,
+                            title: issue.title,
+                            added_labels: newLabels,
+                            existing_labels: issue.existingLabels,
+                          });
+
+                          console.error(`[Label Linear Issues] ${issue.identifier}: Added labels [${newLabels.join(", ")}]`);
+                        } catch (updateError) {
+                          results.errors.push(`Failed to update ${issue.identifier}: ${updateError instanceof Error ? updateError.message : String(updateError)}`);
+                        }
+                      }
+                    } else {
+                      // Dry run - just record what would be done
+                      results.issues_updated++;
+                      results.labels_added += newLabels.length;
+                      results.updates.push({
+                        identifier: issue.identifier,
+                        title: issue.title,
+                        added_labels: newLabels,
+                        existing_labels: issue.existingLabels,
+                      });
+                      console.error(`[Label Linear Issues] [DRY RUN] ${issue.identifier}: Would add labels [${newLabels.join(", ")}]`);
+                    }
+                  } else {
+                    results.issues_skipped++;
+                  }
+                }
+              }
+            }
+          } catch (batchError) {
+            console.error(`[Label Linear Issues] Error processing batch:`, batchError);
+            results.errors.push(`Batch ${Math.floor(i / batchSize) + 1} failed: ${batchError instanceof Error ? batchError.message : String(batchError)}`);
+          }
+        }
+
+        console.error(`[Label Linear Issues] Complete: ${results.issues_updated} issues updated, ${results.labels_added} labels added`);
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                success: true,
+                dry_run,
+                message: dry_run 
+                  ? `[DRY RUN] Would update ${results.issues_updated} issues with ${results.labels_added} labels`
+                  : `Updated ${results.issues_updated} issues with ${results.labels_added} labels`,
+                results,
+              }, null, 2),
+            },
+          ],
+        };
+      } catch (error) {
+        logError("Linear issue labeling failed:", error);
+        throw new Error(`Linear issue labeling failed: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
 

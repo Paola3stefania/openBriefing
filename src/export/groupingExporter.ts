@@ -175,6 +175,552 @@ Return ONLY the title text, nothing else.`
 }
 
 /**
+ * Calculate priority based on labels, title, and other signals
+ * Returns "urgent" | "high" | "medium" | "low"
+ * Priority order: security > bugs > cross-cutting > regular
+ */
+function calculatePriority(options: {
+  labels?: string[];
+  title?: string;
+  is_cross_cutting?: boolean;
+  thread_count?: number;
+  is_ungrouped?: boolean;
+}): "urgent" | "high" | "medium" | "low" {
+  const { labels = [], title = "", is_cross_cutting = false, thread_count = 0, is_ungrouped = false } = options;
+  
+  // Normalize labels and title for matching
+  const normalizedLabels = labels.map(l => l.toLowerCase().trim());
+  const normalizedTitle = title.toLowerCase();
+  
+  // Security patterns - HIGHEST priority (urgent)
+  const securityPatterns = [
+    "security",
+    "vulnerability",
+    "cve",
+    "exploit",
+    "xss",
+    "csrf",
+    "injection",
+    "auth bypass",
+    "authentication bypass",
+    "authorization bypass",
+    "privilege escalation",
+    "data leak",
+    "data breach",
+    "sensitive data",
+    "credentials",
+    "password leak",
+    "token leak",
+    "api key",
+  ];
+  
+  // Regression patterns - HIGH priority (was working, now broken)
+  const regressionPatterns = [
+    "regression",
+    "regressed",
+    "broke after",
+    "broken after",
+    "stopped working",
+    "no longer works",
+    "used to work",
+    "was working",
+    "worked before",
+    "after update",
+    "after upgrade",
+    "after release",
+    "since update",
+    "since upgrade",
+    "since release",
+    "after deploy",
+    "since deploy",
+  ];
+  
+  // Bug patterns - HIGH priority
+  const bugPatterns = [
+    "bug",
+    "bug-report",
+    "defect",
+    "error",
+    "crash",
+    "broken",
+    "not working",
+    "doesn't work",
+    "does not work",
+    "fails",
+    "failing",
+    "failure",
+    "critical",
+    "blocker",
+    "p0",
+    "p1",
+    "severity-critical",
+    "severity-high",
+  ];
+  
+  // Urgent patterns - can elevate any issue
+  const urgentPatterns = [
+    "urgent",
+    "critical",
+    "blocker",
+    "production",
+    "outage",
+    "down",
+    "emergency",
+    "asap",
+    "p0",
+  ];
+  
+  // Enhancement/feature request patterns - LOW priority
+  const enhancementPatterns = [
+    "enhancement",
+    "feature request",
+    "feature-request",
+    "new feature",
+    "would be nice",
+    "would be great",
+    "suggestion",
+    "idea",
+    "proposal",
+    "rfc",
+    "wishlist",
+    "nice to have",
+    "nice-to-have",
+    "could we have",
+    "can we have",
+    "please add",
+    "requesting",
+    "request for",
+    "improvement",
+    "improve",
+  ];
+  
+  // Check for security issues (URGENT priority)
+  for (const pattern of securityPatterns) {
+    if (normalizedLabels.some(l => l.includes(pattern)) || normalizedTitle.includes(pattern)) {
+      return "urgent";
+    }
+  }
+  
+  // Check for urgent patterns
+  const isUrgent = urgentPatterns.some(pattern => 
+    normalizedLabels.some(l => l.includes(pattern)) || normalizedTitle.includes(pattern)
+  );
+  
+  // Check for regression patterns (HIGH priority - was working, now broken)
+  for (const pattern of regressionPatterns) {
+    if (normalizedLabels.some(l => l.includes(pattern)) || normalizedTitle.includes(pattern)) {
+      return isUrgent ? "urgent" : "high";
+    }
+  }
+  
+  // Check for bug patterns (HIGH priority, or URGENT if also marked urgent)
+  for (const pattern of bugPatterns) {
+    if (normalizedLabels.some(l => l.includes(pattern)) || normalizedTitle.includes(pattern)) {
+      return isUrgent ? "urgent" : "high";
+    }
+  }
+  
+  // Cross-cutting issues affect multiple features - HIGH priority
+  if (is_cross_cutting) {
+    return isUrgent ? "urgent" : "high";
+  }
+  
+  // Issues with many threads (3+) indicate widespread impact - elevate to HIGH
+  if (thread_count >= 3) {
+    return isUrgent ? "urgent" : "high";
+  }
+  
+  // Enhancement/feature requests - LOW priority (unless marked urgent)
+  for (const pattern of enhancementPatterns) {
+    if (normalizedLabels.some(l => l.includes(pattern)) || normalizedTitle.includes(pattern)) {
+      return isUrgent ? "medium" : "low";
+    }
+  }
+  
+  // Ungrouped items are lower priority (less clear impact)
+  if (is_ungrouped) {
+    return isUrgent ? "medium" : "low";
+  }
+  
+  // Default: medium priority
+  return isUrgent ? "high" : "medium";
+}
+
+/**
+ * Get auto-generated labels based on patterns detected in labels and title
+ * Returns labels like "security", "bug", "regression", "urgent" that should be added
+ * This is a fast fallback when LLM is not available
+ */
+function getAutoLabelsFromPatterns(options: {
+  labels?: string[];
+  title?: string;
+}): string[] {
+  const { labels = [], title = "" } = options;
+  const autoLabels: string[] = [];
+  
+  // Normalize for matching
+  const normalizedLabels = labels.map(l => l.toLowerCase().trim());
+  const normalizedTitle = title.toLowerCase();
+  
+  // Security patterns
+  const securityPatterns = [
+    "security", "vulnerability", "cve", "exploit", "xss", "csrf", "injection",
+    "auth bypass", "authentication bypass", "authorization bypass",
+    "privilege escalation", "data leak", "data breach", "sensitive data",
+    "credentials", "password leak", "token leak", "api key",
+  ];
+  
+  // Regression patterns (was working, now broken after release/update)
+  const regressionPatterns = [
+    "regression", "regressed", "broke after", "broken after", "stopped working",
+    "no longer works", "used to work", "was working", "worked before",
+    "after update", "after upgrade", "after release", "since update",
+    "since upgrade", "since release", "after deploy", "since deploy",
+  ];
+  
+  // Bug patterns
+  const bugPatterns = [
+    "bug", "bug-report", "defect", "crash", "broken",
+  ];
+  
+  // Urgent patterns  
+  const urgentPatterns = [
+    "urgent", "critical", "blocker", "production", "outage", "emergency",
+  ];
+  
+  // Enhancement/feature request patterns
+  const enhancementPatterns = [
+    "enhancement", "feature request", "feature-request", "new feature",
+    "would be nice", "would be great", "suggestion", "idea", "proposal",
+    "rfc", "wishlist", "nice to have", "nice-to-have", "improvement",
+  ];
+  
+  // Check for security
+  if (securityPatterns.some(p => normalizedLabels.some(l => l.includes(p)) || normalizedTitle.includes(p))) {
+    if (!normalizedLabels.includes("security")) {
+      autoLabels.push("security");
+    }
+  }
+  
+  // Check for regression (was working, now broken)
+  if (regressionPatterns.some(p => normalizedLabels.some(l => l.includes(p)) || normalizedTitle.includes(p))) {
+    if (!normalizedLabels.includes("regression")) {
+      autoLabels.push("regression");
+    }
+    // Regressions are also bugs
+    if (!normalizedLabels.includes("bug")) {
+      autoLabels.push("bug");
+    }
+  }
+  
+  // Check for bug
+  if (bugPatterns.some(p => normalizedLabels.some(l => l.includes(p)) || normalizedTitle.includes(p))) {
+    if (!normalizedLabels.includes("bug") && !autoLabels.includes("bug")) {
+      autoLabels.push("bug");
+    }
+  }
+  
+  // Check for urgent
+  if (urgentPatterns.some(p => normalizedLabels.some(l => l.includes(p)) || normalizedTitle.includes(p))) {
+    if (!normalizedLabels.includes("urgent")) {
+      autoLabels.push("urgent");
+    }
+  }
+  
+  // Check for enhancement/feature request
+  if (enhancementPatterns.some(p => normalizedLabels.some(l => l.includes(p)) || normalizedTitle.includes(p))) {
+    if (!normalizedLabels.includes("enhancement")) {
+      autoLabels.push("enhancement");
+    }
+  }
+  
+  return autoLabels;
+}
+
+/**
+ * Use LLM to detect which labels should be added to an issue
+ * Analyzes title and content to determine: security, bug, regression, enhancement, urgent
+ */
+async function getAutoLabelsWithLLM(options: {
+  labels?: string[];
+  title?: string;
+  description?: string;
+  threadContent?: string;
+}): Promise<string[]> {
+  const { labels = [], title = "", description = "", threadContent = "" } = options;
+  
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    // Fallback to pattern matching if no API key
+    return getAutoLabelsFromPatterns({ labels, title });
+  }
+  
+  // Build content to analyze
+  const contentParts: string[] = [];
+  if (title) contentParts.push(`Title: ${title}`);
+  if (description) contentParts.push(`Description: ${description.substring(0, 500)}`);
+  if (threadContent) contentParts.push(`Discussion: ${threadContent.substring(0, 1000)}`);
+  if (labels.length > 0) contentParts.push(`Existing labels: ${labels.join(", ")}`);
+  
+  const contentToAnalyze = contentParts.join("\n\n");
+  
+  if (!contentToAnalyze.trim()) {
+    return getAutoLabelsFromPatterns({ labels, title });
+  }
+  
+  try {
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [
+          {
+            role: "system",
+            content: `You are a technical issue classifier. Analyze the issue and return applicable labels.
+
+Available labels (return ONLY these, comma-separated):
+- security: Security vulnerabilities, auth issues, data leaks, XSS, CSRF, injection attacks
+- bug: Software defects, errors, crashes, things not working as expected
+- regression: Something that was working before but broke after an update/release/deploy
+- urgent: Critical issues needing immediate attention, production outages, blockers
+- enhancement: Feature requests, improvements, new functionality suggestions
+
+Rules:
+1. Return ONLY applicable labels from the list above, comma-separated
+2. If regression, also include bug (regressions are bugs)
+3. If nothing clearly matches, return "none"
+4. Be conservative - only label if confident
+5. Security issues are always high priority
+6. "Would be nice", "could we add", "feature request" = enhancement
+
+Examples:
+- "Login page crashes after clicking submit" -> bug
+- "XSS vulnerability in user profile" -> security
+- "Authentication stopped working after v2.0 release" -> regression, bug
+- "Would be nice to have dark mode" -> enhancement
+- "URGENT: Production database is down" -> urgent, bug
+- "How do I configure OAuth?" -> none (this is a question, not an issue)
+
+Return ONLY the labels, nothing else.`
+          },
+          {
+            role: "user",
+            content: contentToAnalyze
+          }
+        ],
+        temperature: 0.1,
+        max_tokens: 50,
+      }),
+    });
+    
+    if (!response.ok) {
+      logError(`OpenAI API error for label detection: ${response.status}`);
+      return getAutoLabelsFromPatterns({ labels, title });
+    }
+    
+    const data = await response.json();
+    const result = data.choices[0]?.message?.content?.trim().toLowerCase() || "";
+    
+    if (result === "none" || !result) {
+      return [];
+    }
+    
+    // Parse the comma-separated labels
+    const validLabels = ["security", "bug", "regression", "urgent", "enhancement"];
+    const detectedLabels = result
+      .split(",")
+      .map((l: string) => l.trim())
+      .filter((l: string) => validLabels.includes(l));
+    
+    // Filter out labels that already exist
+    const normalizedExisting = labels.map(l => l.toLowerCase());
+    const newLabels = detectedLabels.filter((l: string) => !normalizedExisting.includes(l));
+    
+    return newLabels;
+  } catch (error) {
+    logError("Error using LLM for label detection:", error);
+    return getAutoLabelsFromPatterns({ labels, title });
+  }
+}
+
+/**
+ * Get auto-generated labels - uses LLM if available, falls back to pattern matching
+ * Wrapper function for backward compatibility
+ */
+function getAutoLabels(options: {
+  labels?: string[];
+  title?: string;
+}): string[] {
+  // Synchronous version uses pattern matching only
+  return getAutoLabelsFromPatterns(options);
+}
+
+/**
+ * Batch process label detection using LLM for multiple issues
+ * More efficient than calling LLM for each issue individually
+ */
+async function batchDetectLabelsWithLLM(issues: Array<{
+  index: number;
+  title: string;
+  description?: string;
+  existingLabels: string[];
+}>): Promise<Map<number, string[]>> {
+  const results = new Map<number, string[]>();
+  
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    // Fallback to pattern matching for all
+    for (const issue of issues) {
+      results.set(issue.index, getAutoLabelsFromPatterns({ 
+        labels: issue.existingLabels, 
+        title: issue.title 
+      }));
+    }
+    return results;
+  }
+  
+  // Process in batches of 10 to avoid token limits
+  const batchSize = 10;
+  for (let i = 0; i < issues.length; i += batchSize) {
+    const batch = issues.slice(i, i + batchSize);
+    
+    // Build batch content
+    const batchContent = batch.map((issue, idx) => 
+      `[${idx + 1}] Title: ${issue.title}${issue.description ? `\nDescription: ${issue.description.substring(0, 200)}` : ""}`
+    ).join("\n\n---\n\n");
+    
+    try {
+      const response = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model: "gpt-4o-mini",
+          messages: [
+            {
+              role: "system",
+              content: `You are a technical issue classifier. Analyze each issue and return applicable labels.
+
+Available labels:
+- security: Security vulnerabilities, auth issues, data leaks, XSS, CSRF, injection
+- bug: Software defects, errors, crashes, things not working
+- regression: Something that worked before but broke after update/release
+- urgent: Critical issues, production outages, blockers
+- enhancement: Feature requests, improvements, suggestions
+
+Rules:
+1. Return one line per issue: "[number] label1, label2" or "[number] none"
+2. If regression, also include bug
+3. Be conservative - only label if confident
+4. Questions/docs are "none"
+
+Example output:
+[1] bug
+[2] security
+[3] regression, bug
+[4] enhancement
+[5] none`
+            },
+            {
+              role: "user",
+              content: `Classify these ${batch.length} issues:\n\n${batchContent}`
+            }
+          ],
+          temperature: 0.1,
+          max_tokens: 200,
+        }),
+      });
+      
+      if (!response.ok) {
+        // Fallback for this batch
+        for (const issue of batch) {
+          results.set(issue.index, getAutoLabelsFromPatterns({ 
+            labels: issue.existingLabels, 
+            title: issue.title 
+          }));
+        }
+        continue;
+      }
+      
+      const data = await response.json();
+      const result = data.choices[0]?.message?.content?.trim() || "";
+      
+      // Parse results
+      const validLabels = ["security", "bug", "regression", "urgent", "enhancement"];
+      const lines = result.split("\n").filter((l: string) => l.trim());
+      
+      for (const line of lines) {
+        const match = line.match(/\[(\d+)\]\s*(.+)/);
+        if (match) {
+          const batchIdx = parseInt(match[1], 10) - 1;
+          const labelsStr = match[2].trim().toLowerCase();
+          
+          if (batchIdx >= 0 && batchIdx < batch.length) {
+            const issue = batch[batchIdx];
+            
+            if (labelsStr === "none" || !labelsStr) {
+              results.set(issue.index, []);
+            } else {
+              const detectedLabels = labelsStr
+                .split(",")
+                .map((l: string) => l.trim())
+                .filter((l: string) => validLabels.includes(l));
+              
+              // Filter out existing labels
+              const normalizedExisting = issue.existingLabels.map(l => l.toLowerCase());
+              const newLabels = detectedLabels.filter((l: string) => !normalizedExisting.includes(l));
+              
+              results.set(issue.index, newLabels);
+            }
+          }
+        }
+      }
+      
+      // Fill in any missing with pattern matching
+      for (const issue of batch) {
+        if (!results.has(issue.index)) {
+          results.set(issue.index, getAutoLabelsFromPatterns({ 
+            labels: issue.existingLabels, 
+            title: issue.title 
+          }));
+        }
+      }
+      
+    } catch (error) {
+      logError("Error in batch label detection:", error);
+      // Fallback for this batch
+      for (const issue of batch) {
+        results.set(issue.index, getAutoLabelsFromPatterns({ 
+          labels: issue.existingLabels, 
+          title: issue.title 
+        }));
+      }
+    }
+  }
+  
+  return results;
+}
+
+/**
+ * Get numeric priority for sorting (lower = higher priority)
+ */
+function getPriorityOrder(priority?: "urgent" | "high" | "medium" | "low"): number {
+  switch (priority) {
+    case "urgent": return 0;
+    case "high": return 1;
+    case "medium": return 2;
+    case "low": return 3;
+    default: return 2; // Default to medium
+  }
+}
+
+/**
  * Generate a fallback title when LLM is unavailable or fails
  */
 function generateFallbackTitle(group: GroupingGroup): string {
@@ -232,6 +778,10 @@ export async function exportGroupingToPMTool(
         if (linearTool.teamId && !pmToolConfig.team_id) {
           pmToolConfig.team_id = linearTool.teamId;
         }
+      }
+      // Initialize labels for Linear (creates security, bug, etc. labels)
+      if (linearTool.initializeLabels) {
+        await linearTool.initializeLabels();
       }
     }
 
@@ -507,6 +1057,19 @@ export async function exportGroupingToPMTool(
         labels.push(...group.github_issue.labels);
       }
 
+      // Calculate priority based on labels, title, and cross-cutting status
+      const calculatedPriority = calculatePriority({
+        labels,
+        title,
+        is_cross_cutting: group.is_cross_cutting,
+        thread_count: (group.threads?.length || 0) + (group.signals?.length || 0),
+        is_ungrouped: false,
+      });
+      
+      // Add auto-generated labels (security, bug, urgent)
+      const autoLabels = getAutoLabels({ labels, title });
+      const allLabels = [...labels, ...autoLabels];
+
       const issueIndex = pmIssues.length;
       pmIssues.push({
         title,
@@ -517,8 +1080,8 @@ export async function exportGroupingToPMTool(
         source: group.github_issue ? "github" : (group.canonical_issue?.source === "github" ? "github" : "discord"),
         source_url: group.github_issue?.url || group.canonical_issue?.url || signals[0]?.url || "",
         source_id: group.id,
-        labels,
-        priority: group.is_cross_cutting ? "high" : "medium", // Cross-cutting issues get higher priority
+        labels: allLabels, // Includes auto-detected security/bug/urgent labels
+        priority: calculatedPriority, // Priority based on bugs, security, cross-cutting, thread count
         // Pass existing Linear issue ID if group already has one (from previous export)
         linear_issue_id: group.linear_issue_id,
         linear_issue_identifier: group.linear_issue_identifier,
@@ -624,11 +1187,36 @@ export async function exportGroupingToPMTool(
         continue;
       }
       
-      // No top_issue and not resolved - export it (unresolved discussion)
+      // No top_issue and not resolved - check if it's actually an issue vs just a question
+      // Only export if it's a real issue, not just a question
+      let isActualIssue = true; // Default to exporting (conservative approach)
+      
+      if (discordCache) {
+        try {
+          const { getThreadMessages } = await import("../storage/cache/discordCache.js");
+          const threadMessages = getThreadMessages(discordCache, thread.thread_id);
+          
+          if (threadMessages && threadMessages.length > 0) {
+            // Check if this is actually an issue vs just a question
+            const issueCheck = await isThreadAnIssue(threadMessages);
+            if (issueCheck === false) {
+              // It's just a question, not an issue - skip it
+              log(`Skipping thread ${thread.thread_id}: identified as question, not an issue`);
+              continue;
+            }
+            // If issueCheck is null (LLM failed), continue (err on side of exporting)
+          }
+        } catch (error) {
+          // If we can't check, continue (don't filter out - err on side of exporting)
+          logError(`Error checking if thread ${thread.thread_id} is an issue:`, error);
+        }
+      }
+      
+      // No top_issue, not resolved, and is an actual issue - export it
       ungroupedThreads.push(thread);
     }
     
-    log(`Preparing ${ungroupedThreads.length} ungrouped threads for export (filtered from ${allUngroupedThreads.length} total)...`);
+    log(`Preparing ${ungroupedThreads.length} ungrouped threads for export (filtered from ${allUngroupedThreads.length} total, excluding questions)...`);
     
     // Save closed/resolved ungrouped threads resolution status to database (batch update)
     if (closedUngroupedThreads.length > 0 || resolvedUngroupedThreads.length > 0) {
@@ -735,6 +1323,17 @@ export async function exportGroupingToPMTool(
         }
       }
       
+      // Calculate priority - ungrouped threads can still be bugs/security issues
+      const ungroupedThreadPriority = calculatePriority({
+        labels,
+        title,
+        is_ungrouped: true,
+      });
+      
+      // Add auto-generated labels (security, bug, urgent)
+      const autoLabels = getAutoLabels({ labels, title });
+      const allLabels = [...labels, ...autoLabels];
+
       const ungroupedThreadIssueIndex = pmIssues.length;
       pmIssues.push({
         title,
@@ -745,8 +1344,8 @@ export async function exportGroupingToPMTool(
         source: "discord",
         source_url: ungroupedThread.url || "",
         source_id: `ungrouped-thread-${ungroupedThread.thread_id}`,
-        labels: labels,
-        priority: "low",
+        labels: allLabels, // Includes auto-detected security/bug/urgent labels
+        priority: ungroupedThreadPriority, // Priority based on bugs, security detection
         metadata: {
           thread_id: ungroupedThread.thread_id,
           reason: ungroupedThread.reason,
@@ -880,6 +1479,22 @@ export async function exportGroupingToPMTool(
               }
             }
             
+            // Calculate priority based on labels and title
+            const issueLabels = ["ungrouped", "github-issue", ...(issue.labels || [])];
+            const ungroupedIssuePriority = calculatePriority({
+              labels: issueLabels,
+              title: issue.title || "",
+              is_ungrouped: true,
+            });
+            // Closed issues get lower priority unless they're security/bugs
+            const finalPriority = issue.state === "closed" && ungroupedIssuePriority === "medium" 
+              ? "low" 
+              : ungroupedIssuePriority;
+            
+            // Add auto-generated labels (security, bug, urgent)
+            const autoLabels = getAutoLabels({ labels: issueLabels, title: issue.title || "" });
+            const allLabels = [...issueLabels, ...autoLabels];
+
             ungroupedIssues.push({
               title,
               description: descriptionParts.join("\n"),
@@ -889,8 +1504,8 @@ export async function exportGroupingToPMTool(
               source: "github",
               source_url: issue.url || `https://github.com/issues/${issue.number}`,
               source_id: `ungrouped-issue-${issue.number}`,
-              labels: ["ungrouped", "github-issue", ...(issue.labels || [])],
-              priority: issue.state === "closed" ? "low" : "medium",
+              labels: allLabels, // Includes auto-detected security/bug/urgent labels
+              priority: finalPriority, // Priority based on bugs, security detection
               metadata: {
                 issue_number: issue.number,
                 issue_state: issue.state,
@@ -1034,6 +1649,63 @@ export async function exportGroupingToPMTool(
       // Continue even if file save fails
     }
     
+    // Use LLM to detect labels for all issues in batch
+    log(`Detecting labels for ${pmIssues.length} issues using LLM...`);
+    const issuesToClassify = pmIssues.map((issue, index) => ({
+      index,
+      title: issue.title,
+      description: issue.description?.substring(0, 300),
+      existingLabels: issue.labels || [],
+    }));
+    
+    const detectedLabelsMap = await batchDetectLabelsWithLLM(issuesToClassify);
+    
+    // Add detected labels to issues and recalculate priority based on labels
+    let labelsAdded = 0;
+    for (let i = 0; i < pmIssues.length; i++) {
+      const detectedLabels = detectedLabelsMap.get(i) || [];
+      if (detectedLabels.length > 0) {
+        pmIssues[i].labels = [...(pmIssues[i].labels || []), ...detectedLabels];
+        labelsAdded += detectedLabels.length;
+        
+        // Recalculate priority based on new labels
+        const newPriority = calculatePriority({
+          labels: pmIssues[i].labels,
+          title: pmIssues[i].title,
+          is_cross_cutting: pmIssues[i].metadata?.is_cross_cutting as boolean,
+          thread_count: pmIssues[i].metadata?.signal_count as number,
+          is_ungrouped: pmIssues[i].source_id?.startsWith("ungrouped-"),
+        });
+        pmIssues[i].priority = newPriority;
+      }
+    }
+    log(`Added ${labelsAdded} labels via LLM detection`);
+
+    // Sort issues by priority before export (urgent > high > medium > low)
+    // Within same priority, sort by signal count (more signals = more important)
+    pmIssues.sort((a, b) => {
+      const priorityA = getPriorityOrder(a.priority as "urgent" | "high" | "medium" | "low");
+      const priorityB = getPriorityOrder(b.priority as "urgent" | "high" | "medium" | "low");
+      
+      if (priorityA !== priorityB) {
+        return priorityA - priorityB; // Lower order = higher priority
+      }
+      
+      // Secondary sort: by signal/thread count (more = higher priority)
+      const signalsA = (a.metadata?.signal_count as number) || 0;
+      const signalsB = (b.metadata?.signal_count as number) || 0;
+      return signalsB - signalsA;
+    });
+    
+    // Log priority breakdown
+    const priorityCounts = {
+      urgent: pmIssues.filter(i => i.priority === "urgent").length,
+      high: pmIssues.filter(i => i.priority === "high").length,
+      medium: pmIssues.filter(i => i.priority === "medium").length,
+      low: pmIssues.filter(i => i.priority === "low").length,
+    };
+    log(`Priority breakdown: ${priorityCounts.urgent} urgent, ${priorityCounts.high} high, ${priorityCounts.medium} medium, ${priorityCounts.low} low`);
+
     // Export to PM tool
     log(`Exporting ${pmIssues.length} issues to ${pmToolConfig.type} (${groupsWithFeatures.length} groups, ${ungroupedThreads.length} ungrouped threads, ${ungroupedIssues.length} ungrouped issues)...`);
     const exportResult = await pmTool.exportIssues(pmIssues);
@@ -1288,9 +1960,40 @@ export async function exportGroupingToPMTool(
  * Looks for resolution signals like "thank you", "got it", "resolved", etc.
  * @param messages Discord messages from the thread
  */
-function hasObviousResolutionSignals(messages: Array<{ content: string }>): boolean {
+function hasObviousResolutionSignals(messages: Array<{ content: string; author?: { username: string } }>): boolean {
   if (!messages || messages.length === 0) {
     return false;
+  }
+  
+  // Check if a maintainer answered (if author info is available)
+  const maintainers = getMaintainerUsernames();
+  const firstMessage = messages[0];
+  if (firstMessage?.author) {
+    const maintainerAnswered = messages.some(m => 
+      m.author && maintainers.includes(m.author.username.toLowerCase())
+    );
+    
+    // If maintainer answered and conversation seems to conclude, likely resolved
+    if (maintainerAnswered) {
+      const lastMessages = messages.slice(-3);
+      const lastMessagesText = lastMessages
+        .map(m => m.content.toLowerCase().trim())
+        .join(" ");
+      
+      // Check for acknowledgment after maintainer answer
+      const acknowledgmentPatterns = [
+        /\b(thank you|thanks|thx|ty)\b/i,
+        /\b(got it|gotcha|understand|understood)\b/i,
+        /\b(perfect|great|awesome|cool)\b/i,
+        /\b(works|working|fixed|solved)\b/i,
+      ];
+      
+      for (const pattern of acknowledgmentPatterns) {
+        if (pattern.test(lastMessagesText)) {
+          return true; // Maintainer answered + acknowledgment = resolved
+        }
+      }
+    }
   }
   
   // Check the last 3-5 messages for resolution signals
@@ -1322,8 +2025,24 @@ function hasObviousResolutionSignals(messages: Array<{ content: string }>): bool
 }
 
 /**
+ * Get list of maintainer/expert usernames who typically answer questions
+ * These are people who, if they answer, likely resolved the issue
+ */
+function getMaintainerUsernames(): string[] {
+  // Default maintainers for Better Auth (can be overridden via env var)
+  const envMaintainers = process.env.MAINTAINER_USERNAMES;
+  if (envMaintainers) {
+    return envMaintainers.split(',').map(u => u.trim().toLowerCase());
+  }
+  
+  // Default Better Auth maintainers
+  return ['bekaru', 'alex', 'taesu', 'max'].map(u => u.toLowerCase());
+}
+
+/**
  * Use LLM to analyze if a Discord thread conversation indicates the issue was resolved
  * Analyzes Discord messages from the thread to determine if the discussion reached a resolution
+ * Reads ALL messages to understand full context, especially if maintainers answered
  * Returns true if resolved, false if not, or null if analysis failed
  * @param messages Discord messages from the thread (DiscordMessage[] from discordCache)
  */
@@ -1338,16 +2057,33 @@ async function isThreadResolvedWithLLM(messages: Array<{ content: string; author
     return null;
   }
   
-  // Get the last 10-15 messages for context (or all if fewer)
-  const messagesToAnalyze = messages.slice(-15);
-  const conversationText = messagesToAnalyze
-    .map(m => `${m.author.username}: ${m.content}`)
+  // Read ALL messages to understand full context
+  const maintainers = getMaintainerUsernames();
+  const conversationText = messages
+    .map((m, index) => {
+      const username = m.author.username.toLowerCase();
+      const isMaintainer = maintainers.includes(username);
+      const maintainerTag = isMaintainer ? ' [MAINTAINER]' : '';
+      return `[${index + 1}] ${m.author.username}${maintainerTag}: ${m.content}`;
+    })
     .join("\n\n");
   
-  // Limit conversation text to reasonable size (about 2000 chars)
-  const conversationPreview = conversationText.length > 2000 
-    ? conversationText.substring(conversationText.length - 2000)
-    : conversationText;
+  // Check if any maintainer participated
+  const maintainerParticipated = messages.some(m => 
+    maintainers.includes(m.author.username.toLowerCase())
+  );
+  
+  // Limit conversation text to reasonable size (about 4000 chars)
+  // But prioritize recent messages if thread is very long
+  let conversationPreview: string;
+  if (conversationText.length > 4000) {
+    // Take first 1000 chars (initial problem/question) + last 3000 chars (ongoing discussion/resolution)
+    const start = conversationText.substring(0, 1000);
+    const end = conversationText.substring(conversationText.length - 3000);
+    conversationPreview = `${start}\n\n[... ${messages.length - Math.floor(messages.length * 0.3)} messages in between ...]\n\n${end}`;
+  } else {
+    conversationPreview = conversationText;
+  }
   
   try {
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -1361,25 +2097,37 @@ async function isThreadResolvedWithLLM(messages: Array<{ content: string; author
         messages: [
           {
             role: "system",
-            content: `You are analyzing a Discord thread conversation to determine if the issue or question discussed has been resolved.
+            content: `You are analyzing a COMPLETE Discord thread conversation to determine if the issue or question discussed has been resolved.
+
+Read the ENTIRE conversation to understand:
+- Did a maintainer/expert (marked with [MAINTAINER]) answer the question?
+- If a maintainer answered, the issue is likely RESOLVED (they typically provide correct solutions)
+- Is the original question/problem answered or solved?
+- Do participants express satisfaction (thanks, got it, works now, etc.)?
+- Does the conversation naturally conclude with resolution?
 
 A thread is considered RESOLVED if:
+- A maintainer/expert (marked [MAINTAINER]) answered and the conversation seems concluded
 - The original question/problem has been answered or solved
 - Participants express satisfaction (thanks, got it, works now, etc.)
 - The conversation naturally concludes with resolution
 - It was just a simple question that got answered
+- Multiple people confirm the solution works
 
 A thread is NOT resolved if:
-- The question remains unanswered
+- The question remains unanswered (even if maintainer participated but didn't answer)
 - There are still ongoing problems or errors
 - The conversation ends without clear resolution
 - The issue is deferred or postponed
+- People are still asking follow-up questions about the same problem
+
+IMPORTANT: If a maintainer (marked [MAINTAINER]) provided an answer and the conversation seems to conclude, it's likely RESOLVED. Maintainers are experts who typically provide correct solutions.
 
 Respond with ONLY "RESOLVED" or "NOT_RESOLVED" (no other text).`
           },
           {
             role: "user",
-            content: `Analyze this Discord thread conversation and determine if the issue is resolved:\n\n${conversationPreview}`
+            content: `Analyze this COMPLETE Discord thread conversation (${messages.length} messages${maintainerParticipated ? ', maintainer participated' : ''}) and determine if the issue is resolved. Read all messages to understand the full context:\n\n${conversationPreview}`
           }
         ],
         temperature: 0.3,
@@ -1400,6 +2148,127 @@ Respond with ONLY "RESOLVED" or "NOT_RESOLVED" (no other text).`
   } catch (error) {
     logError("Error using LLM for resolution detection:", error);
     return null;
+  }
+}
+
+/**
+ * Use LLM to determine if a Discord thread is actually an issue (bug/problem/feature request) 
+ * vs just a question that doesn't need to be tracked as an issue
+ * 
+ * Analyzes the full conversation to understand context, ongoing problems, and whether
+ * there's an actual bug or issue that needs tracking.
+ * 
+ * Returns:
+ * - true: It's an actual issue that should be exported
+ * - false: It's just a question, don't export
+ * - null: LLM check failed, err on side of exporting
+ */
+async function isThreadAnIssue(messages: Array<{ content: string; author: { username: string } }>): Promise<boolean | null> {
+  if (!messages || messages.length === 0) {
+    return true; // Default to exporting if no messages
+  }
+  
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    log("OpenAI API key not available, defaulting to export (conservative approach)");
+    return true; // Default to exporting if no API key
+  }
+  
+  // Read ALL messages to understand the full context of the conversation
+  // This helps identify ongoing bugs, problems that persist, or actual issues vs simple questions
+  const conversationText = messages
+    .map((m, index) => `[${index + 1}] ${m.author.username}: ${m.content}`)
+    .join("\n\n");
+  
+  // Limit conversation text to reasonable size (about 4000 chars to get more context)
+  // But prioritize recent messages if thread is very long
+  let conversationPreview: string;
+  if (conversationText.length > 4000) {
+    // Take first 1000 chars (initial problem/question) + last 3000 chars (ongoing discussion/resolution)
+    const start = conversationText.substring(0, 1000);
+    const end = conversationText.substring(conversationText.length - 3000);
+    conversationPreview = `${start}\n\n[... ${messages.length - Math.floor(messages.length * 0.3)} messages in between ...]\n\n${end}`;
+  } else {
+    conversationPreview = conversationText;
+  }
+  
+  try {
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [
+          {
+            role: "system",
+            content: `You are analyzing a complete Discord thread conversation to determine if it's an actual ISSUE that needs tracking vs just a QUESTION or casual discussion.
+
+Read the ENTIRE conversation to understand:
+- Is there an ongoing bug or problem that persists?
+- Are people reporting errors, crashes, or broken functionality?
+- Is there a feature request or improvement that needs implementation?
+- Is this an active problem that requires tracking and resolution?
+
+An ISSUE (export it) is:
+- A bug report or error that needs fixing ("I'm getting error X", "This is broken", "It crashes when...")
+- An ongoing problem that persists across multiple messages
+- A feature request that needs implementation ("We should add...", "It would be great if...")
+- A security concern or vulnerability
+- A problem that requires action, tracking, or resolution
+- Multiple people discussing the same problem
+- A conversation where the problem is not resolved
+
+A QUESTION (don't export) is:
+- Just asking "how do I..." or "what is..." or "is there..." without reporting a problem
+- Asking for clarification or information ("Or was there any critical bugs I should update to?")
+- Simple questions that get answered quickly
+- Questions that don't require tracking or action items
+- General discussion or help requests
+- Questions where the answer is provided and conversation ends
+
+Examples:
+- "How do I configure OAuth?" -> QUESTION (don't export)
+- "I'm getting an error when I try to login" -> ISSUE (export it)
+- "Or was there any critical bugs I should definitely update to?" -> QUESTION (don't export)
+- "The login is broken for me too" -> ISSUE (export it)
+- "Can you explain how X works?" -> QUESTION (don't export)
+- Multiple messages discussing the same error -> ISSUE (export it)
+
+Analyze the FULL conversation context, not just the first message. Look for:
+- Ongoing problems that persist
+- Multiple people experiencing the same issue
+- Unresolved bugs or errors
+- Active discussions about problems
+
+Respond with ONLY "ISSUE" or "QUESTION" (no other text).`
+          },
+          {
+            role: "user",
+            content: `Analyze this COMPLETE Discord thread conversation (${messages.length} messages) and determine if it's an ISSUE that needs tracking or just a QUESTION. Read all messages to understand the full context:\n\n${conversationPreview}`
+          }
+        ],
+        temperature: 0.3,
+        max_tokens: 10,
+      }),
+    });
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      logError(`OpenAI API error for issue classification: ${response.status} ${errorText}`);
+      return null; // Default to exporting if API fails
+    }
+    
+    const data = await response.json();
+    const result = data.choices[0]?.message?.content?.trim().toUpperCase();
+    
+    // Return true if it's an ISSUE, false if it's a QUESTION
+    return result === "ISSUE";
+  } catch (error) {
+    logError("Error using LLM for issue classification:", error);
+    return null; // Default to exporting if check fails
   }
 }
 
@@ -1609,5 +2478,685 @@ function buildGroupDescription(group: {
   }
   
   return parts.join("\n");
+}
+
+/**
+ * Classify a GitHub issue by analyzing its content
+ * Returns category, type, and other classification metadata
+ */
+async function classifyGitHubIssue(issue: {
+  issueNumber: number;
+  issueTitle: string;
+  issueBody?: string | null;
+  issueLabels?: string[];
+}): Promise<{
+  category: string;
+  type: "bug" | "feature" | "question" | "documentation" | "enhancement" | "other";
+  severity?: "critical" | "high" | "medium" | "low";
+  requiresAction: boolean;
+}> {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    // Fallback classification based on labels
+    const labels = issue.issueLabels || [];
+    const isBug = labels.some(l => l.toLowerCase().includes("bug"));
+    const isFeature = labels.some(l => l.toLowerCase().includes("feature") || l.toLowerCase().includes("enhancement"));
+    const isQuestion = labels.some(l => l.toLowerCase().includes("question"));
+    
+    return {
+      category: isBug ? "bug" : isFeature ? "feature" : isQuestion ? "question" : "other",
+      type: isBug ? "bug" : isFeature ? "feature" : isQuestion ? "question" : "other",
+      severity: labels.some(l => l.toLowerCase().includes("critical")) ? "critical" : 
+                labels.some(l => l.toLowerCase().includes("high")) ? "high" : 
+                labels.some(l => l.toLowerCase().includes("low")) ? "low" : "medium",
+      requiresAction: isBug || isFeature,
+    };
+  }
+
+  const content = `${issue.issueTitle}\n\n${issue.issueBody || ""}`.substring(0, 3000);
+  
+  try {
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [
+          {
+            role: "system",
+            content: `Classify this GitHub issue. Respond with JSON only:
+{
+  "category": "bug" | "feature" | "question" | "documentation" | "enhancement" | "other",
+  "type": "bug" | "feature" | "question" | "documentation" | "enhancement" | "other",
+  "severity": "critical" | "high" | "medium" | "low" (only for bugs),
+  "requiresAction": boolean
+}`
+          },
+          {
+            role: "user",
+            content: `Classify this GitHub issue:\n\n${content}`
+          }
+        ],
+        temperature: 0.3,
+        max_tokens: 200,
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`OpenAI API error: ${response.status}`);
+    }
+
+    const data = await response.json();
+    const result = JSON.parse(data.choices[0].message.content);
+    return result;
+  } catch (error) {
+    logError("Error classifying issue with LLM:", error);
+    // Fallback to label-based classification
+    const labels = issue.issueLabels || [];
+    return {
+      category: "other",
+      type: "other",
+      severity: "medium",
+      requiresAction: true,
+    };
+  }
+}
+
+/**
+ * Group similar GitHub issues together based on semantic similarity
+ */
+async function groupGitHubIssues(
+  issues: Array<{
+    issueNumber: number;
+    issueTitle: string;
+    issueBody?: string | null;
+    issueLabels?: string[];
+    classification?: {
+      category: string;
+      type: string;
+      severity?: string;
+    };
+  }>,
+  similarityThreshold: number = 0.7
+): Promise<{
+  groups: Array<{
+    id: string;
+    issues: number[];
+    title: string;
+    category: string;
+    type: string;
+  }>;
+  ungrouped: number[];
+}> {
+  // Simple grouping based on classification and title similarity
+  // For production, use embeddings for semantic similarity
+  const groups: Array<{
+    id: string;
+    issues: number[];
+    title: string;
+    category: string;
+    type: string;
+  }> = [];
+  const groupedIssueNumbers = new Set<number>();
+  const ungrouped: number[] = [];
+
+  // Group by category and type first
+  const categoryGroups = new Map<string, number[]>();
+  
+  for (const issue of issues) {
+    const category = issue.classification?.category || "other";
+    const type = issue.classification?.type || "other";
+    const key = `${category}:${type}`;
+    
+    if (!categoryGroups.has(key)) {
+      categoryGroups.set(key, []);
+    }
+    categoryGroups.get(key)!.push(issue.issueNumber);
+  }
+
+  // Create groups from category groupings
+  for (const [key, issueNumbers] of categoryGroups.entries()) {
+    if (issueNumbers.length > 1) {
+      const [category, type] = key.split(":");
+      const groupId = `group-${category}-${type}-${Date.now()}`;
+      groups.push({
+        id: groupId,
+        issues: issueNumbers,
+        title: `${category} - ${type}`,
+        category,
+        type,
+      });
+      issueNumbers.forEach(num => groupedIssueNumbers.add(num));
+    } else {
+      ungrouped.push(issueNumbers[0]);
+    }
+  }
+
+  // Add remaining ungrouped issues
+  for (const issue of issues) {
+    if (!groupedIssueNumbers.has(issue.issueNumber)) {
+      ungrouped.push(issue.issueNumber);
+    }
+  }
+
+  return { groups, ungrouped };
+}
+
+/**
+ * Match ungrouped issues to product features using documentation/code context
+ */
+async function matchUngroupedIssuesToFeatures(
+  issueNumbers: number[],
+  features: Array<{ id: string; name: string; description?: string; related_keywords?: string[] }>,
+  issues: Map<number, { issueTitle: string; issueBody?: string | null }>
+): Promise<Map<number, { featureId: string; featureName: string; similarity: number }>> {
+  const matches = new Map<number, { featureId: string; featureName: string; similarity: number }>();
+  
+  // Simple keyword-based matching
+  // For production, use embeddings for semantic matching
+  for (const issueNumber of issueNumbers) {
+    const issue = issues.get(issueNumber);
+    if (!issue) continue;
+
+    const issueText = `${issue.issueTitle} ${issue.issueBody || ""}`.toLowerCase();
+    let bestMatch: { featureId: string; featureName: string; similarity: number } | null = null;
+    let bestScore = 0;
+
+    for (const feature of features) {
+      let score = 0;
+      const featureText = `${feature.name} ${feature.description || ""} ${(feature.related_keywords || []).join(" ")}`.toLowerCase();
+      
+      // Check for keyword matches
+      const keywords = feature.related_keywords || [];
+      for (const keyword of keywords) {
+        if (issueText.includes(keyword.toLowerCase())) {
+          score += 0.3;
+        }
+      }
+      
+      // Check for feature name match
+      if (issueText.includes(feature.name.toLowerCase())) {
+        score += 0.5;
+      }
+
+      if (score > bestScore && score > 0.3) {
+        bestScore = score;
+        bestMatch = {
+          featureId: feature.id,
+          featureName: feature.name,
+          similarity: Math.min(score, 1.0),
+        };
+      }
+    }
+
+    if (bestMatch) {
+      matches.set(issueNumber, bestMatch);
+    }
+  }
+
+  return matches;
+}
+
+/**
+ * Assign priority to an issue based on classification, labels, and context
+ */
+function assignIssuePriority(
+  issue: {
+    issueLabels?: string[];
+    classification?: {
+      type: string;
+      severity?: string;
+    };
+    hasDiscordContext?: boolean;
+    isInGroup?: boolean;
+  }
+): "urgent" | "high" | "medium" | "low" {
+  const labels = issue.issueLabels || [];
+  const classification = issue.classification;
+  
+  // Critical/urgent indicators
+  if (labels.some(l => l.toLowerCase().includes("critical") || l.toLowerCase().includes("security"))) {
+    return "urgent";
+  }
+  
+  if (classification?.severity === "critical") {
+    return "urgent";
+  }
+  
+  // High priority indicators
+  if (labels.some(l => l.toLowerCase().includes("bug") && !l.toLowerCase().includes("low"))) {
+    return "high";
+  }
+  
+  if (classification?.type === "bug" && classification.severity === "high") {
+    return "high";
+  }
+  
+  // Medium priority (default)
+  if (classification?.type === "feature" || classification?.type === "enhancement") {
+    return "medium";
+  }
+  
+  if (issue.hasDiscordContext || issue.isInGroup) {
+    return "medium";
+  }
+  
+  // Low priority
+  if (labels.some(l => l.toLowerCase().includes("low") || l.toLowerCase().includes("nice-to-have"))) {
+    return "low";
+  }
+  
+  return "medium";
+}
+
+/**
+ * Find relevant Discord messages for an issue using similarity matching
+ */
+async function findRelevantDiscordMessages(
+  issue: {
+    issueNumber: number;
+    issueTitle: string;
+    issueBody?: string | null;
+  },
+  discordCache: import("../storage/cache/discordCache.js").DiscordCache | null,
+  existingMatches: Array<{ threadId: string; similarityScore: number }>
+): Promise<Array<{
+  threadId: string;
+  threadName: string;
+  messages: Array<{ content: string; author: string; timestamp: string }>;
+  similarity: number;
+}>> {
+  const results: Array<{
+    threadId: string;
+    threadName: string;
+    messages: Array<{ content: string; author: string; timestamp: string }>;
+    similarity: number;
+  }> = [];
+
+  if (!discordCache) {
+    return results;
+  }
+
+  // Use existing matches if available
+  if (existingMatches.length > 0) {
+    const { getThreadMessages } = await import("../storage/cache/discordCache.js");
+    
+    for (const match of existingMatches.slice(0, 5)) {
+      const threadMessages = getThreadMessages(discordCache, match.threadId);
+      if (threadMessages && threadMessages.length > 0) {
+        const threadData = discordCache.threads?.[match.threadId];
+        const threadName = threadData && typeof threadData === 'object' && 'name' in threadData 
+          ? (threadData as any).name 
+          : `Thread ${match.threadId}`;
+        results.push({
+          threadId: match.threadId,
+          threadName,
+          messages: threadMessages.map(m => ({
+            content: m.content,
+            author: m.author.username,
+            timestamp: m.timestamp || "",
+          })),
+          similarity: Number(match.similarityScore),
+        });
+      }
+    }
+  }
+
+  return results;
+}
+
+/**
+ * Export GitHub issues to PM tool (issue-centric approach)
+ * Issues are primary - Discord threads/messages are attached as context
+ * 
+ * This is the new approach where:
+ * 1. GitHub issues are the main items to export
+ * 2. Discord threads/messages are attached to issues if they match
+ * 3. Only open issues are exported (unless include_closed is true)
+ * 
+ * NEW WORKFLOW:
+ * 1. Classify issues
+ * 2. Group similar issues
+ * 3. Match ungrouped issues to features
+ * 4. Assign priority
+ * 5. Attach Discord messages
+ */
+export async function exportIssuesToPMTool(
+  pmToolConfig: PMToolConfig,
+  options?: { 
+    include_closed?: boolean;
+    channelId?: string;
+  }
+): Promise<ExportWorkflowResult> {
+  const includeClosed = options?.include_closed ?? false;
+  const channelId = options?.channelId;
+  const result: ExportWorkflowResult = {
+    success: false,
+    features_extracted: 0,
+    features_mapped: 0,
+    errors: [],
+  };
+
+  try {
+    const pmTool = createPMTool(pmToolConfig);
+    
+    // Validate team for Linear
+    if (pmToolConfig.type === "linear") {
+      const linearTool = pmTool as import("./base.js").LinearPMTool;
+      if (linearTool.validateTeam) {
+        await linearTool.validateTeam(true, "UNMute");
+        if (linearTool.teamId && !pmToolConfig.team_id) {
+          pmToolConfig.team_id = linearTool.teamId;
+        }
+      }
+      // Initialize labels for Linear
+      if (linearTool.initializeLabels) {
+        await linearTool.initializeLabels();
+      }
+    }
+
+    // STEP 1: Get all open GitHub issues from database
+    const { hasDatabaseConfig, getStorage } = await import("../storage/factory.js");
+    const useDatabase = hasDatabaseConfig() && await getStorage().isAvailable();
+    
+    if (!useDatabase) {
+      throw new Error("Database is required for issue-centric export. Please configure DATABASE_URL.");
+    }
+
+    // Get issues directly from database to get all fields including export status
+    const { prisma } = await import("../storage/db/prisma.js");
+    const allIssues = await prisma.gitHubIssue.findMany({
+      where: includeClosed ? {} : { issueState: "open" },
+      orderBy: { issueNumber: 'desc' },
+    });
+
+    log(`Found ${allIssues.length} GitHub issues to export (${includeClosed ? 'including closed' : 'open only'})`);
+
+    // STEP 2: Load Discord cache to get thread messages
+    let discordCache: import("../storage/cache/discordCache.js").DiscordCache | null = null;
+    if (channelId) {
+      try {
+        const { loadDiscordCache } = await import("../storage/cache/discordCache.js");
+        const { join } = await import("path");
+        const { existsSync } = await import("fs");
+        const config = getConfig();
+        const cacheDir = join(process.cwd(), config.paths.cacheDir);
+        const cacheFileName = `discord-messages-${channelId}.json`;
+        const cachePath = join(cacheDir, cacheFileName);
+        
+        if (existsSync(cachePath)) {
+          discordCache = await loadDiscordCache(cachePath);
+          log(`Loaded Discord cache with ${Object.keys(discordCache.threads || {}).length} threads`);
+        } else {
+          log(`Discord cache not found at ${cachePath}, continuing without Discord context`);
+        }
+      } catch (error) {
+        logError("Error loading Discord cache:", error);
+        // Continue without Discord context
+      }
+    }
+
+    // STEP 3: Classify all issues
+    log("Classifying GitHub issues...");
+    const issuesWithClassification = await Promise.all(
+      allIssues.map(async (issue) => {
+        const classification = await classifyGitHubIssue({
+          issueNumber: issue.issueNumber,
+          issueTitle: issue.issueTitle,
+          issueBody: issue.issueBody,
+          issueLabels: issue.issueLabels,
+        });
+        return { ...issue, classification };
+      })
+    );
+    log(`Classified ${issuesWithClassification.length} issues`);
+
+    // STEP 4: Group similar issues
+    log("Grouping similar issues...");
+    const groupingResult = await groupGitHubIssues(issuesWithClassification);
+    log(`Created ${groupingResult.groups.length} groups, ${groupingResult.ungrouped.length} ungrouped issues`);
+
+    // STEP 5: Load features for matching ungrouped issues
+    let features: Array<{ id: string; name: string; description?: string; related_keywords?: string[] }> = [];
+    try {
+      const storage = getStorage();
+      // Try to get features from database or config
+      // For now, use a default "General" feature
+      features = [{ id: "general", name: "General", description: "General issues", related_keywords: [] }];
+    } catch (error) {
+      logError("Error loading features:", error);
+    }
+
+    // STEP 6: Match ungrouped issues to features
+    log("Matching ungrouped issues to features...");
+    const issuesMap = new Map(
+      issuesWithClassification.map(issue => [
+        issue.issueNumber,
+        { issueTitle: issue.issueTitle, issueBody: issue.issueBody }
+      ])
+    );
+    const featureMatches = await matchUngroupedIssuesToFeatures(
+      groupingResult.ungrouped,
+      features,
+      issuesMap
+    );
+    log(`Matched ${featureMatches.size} ungrouped issues to features`);
+
+    // STEP 7: Build export data with classification, grouping, features, priority, and Discord context
+    const pmIssues: PMToolIssue[] = [];
+    const issueGroupMap = new Map<number, string>();
+    
+    // Map issues to their groups
+    for (const group of groupingResult.groups) {
+      for (const issueNumber of group.issues) {
+        issueGroupMap.set(issueNumber, group.id);
+      }
+    }
+
+    for (const issue of issuesWithClassification) {
+      try {
+        // Find Discord threads that match this issue
+        const threadMatches = await prisma.threadIssueMatch.findMany({
+          where: {
+            issueNumber: issue.issueNumber,
+          },
+          include: {
+            thread: {
+              include: {
+                channel: true,
+              },
+            },
+          },
+          orderBy: {
+            similarityScore: 'desc',
+          },
+        });
+
+        // Find relevant Discord messages
+        const discordMessages = await findRelevantDiscordMessages(
+          {
+            issueNumber: issue.issueNumber,
+            issueTitle: issue.issueTitle,
+            issueBody: issue.issueBody,
+          },
+          discordCache,
+          threadMatches.map(m => ({ threadId: m.threadId, similarityScore: Number(m.similarityScore) }))
+        );
+
+        // Determine feature
+        let featureId = "general";
+        let featureName = "General";
+        const groupId = issueGroupMap.get(issue.issueNumber);
+        
+        if (groupId) {
+          // Issue is in a group - could assign group-level feature
+          featureId = "general";
+        } else {
+          // Ungrouped issue - use feature match if available
+          const featureMatch = featureMatches.get(issue.issueNumber);
+          if (featureMatch) {
+            featureId = featureMatch.featureId;
+            featureName = featureMatch.featureName;
+          }
+        }
+
+        // Build description with GitHub issue + classification + Discord context
+        const descriptionParts: string[] = [];
+        
+        // GitHub issue content
+        descriptionParts.push("## GitHub Issue");
+        descriptionParts.push("");
+        descriptionParts.push(`**Issue:** [#${issue.issueNumber}](${issue.issueUrl}) - ${issue.issueTitle}`);
+        
+        // Classification info
+        if (issue.classification) {
+          descriptionParts.push("");
+          descriptionParts.push("### Classification");
+          descriptionParts.push(`- **Category:** ${issue.classification.category}`);
+          descriptionParts.push(`- **Type:** ${issue.classification.type}`);
+          if (issue.classification.severity) {
+            descriptionParts.push(`- **Severity:** ${issue.classification.severity}`);
+          }
+          descriptionParts.push(`- **Requires Action:** ${issue.classification.requiresAction ? "Yes" : "No"}`);
+        }
+        
+        // Grouping info
+        if (groupId) {
+          const group = groupingResult.groups.find(g => g.id === groupId);
+          if (group) {
+            descriptionParts.push("");
+            descriptionParts.push("### Grouping");
+            descriptionParts.push(`- **Group:** ${group.title}`);
+            descriptionParts.push(`- **Related Issues:** ${group.issues.length} issues in this group`);
+          }
+        }
+        
+        if (issue.issueBody) {
+          descriptionParts.push("");
+          descriptionParts.push("### Description");
+          descriptionParts.push(issue.issueBody.substring(0, 2000)); // Limit body length
+        }
+        descriptionParts.push("");
+
+        // Discord context (if any threads match)
+        if (discordMessages.length > 0) {
+          descriptionParts.push("## Related Discord Discussions");
+          descriptionParts.push("");
+          
+          for (const discordData of discordMessages.slice(0, 3)) { // Limit to top 3 matches
+            descriptionParts.push(`### ${discordData.threadName}`);
+            descriptionParts.push("");
+            descriptionParts.push(`- **Similarity:** ${Math.round(discordData.similarity * 100)}%`);
+            descriptionParts.push(`- **Messages:** ${discordData.messages.length}`);
+            
+            // Add key messages
+            if (discordData.messages.length > 0) {
+              const firstMessage = discordData.messages[0];
+              descriptionParts.push(`- **First message:** ${firstMessage.author}: ${firstMessage.content.substring(0, 200)}`);
+              
+              if (discordData.messages.length > 1) {
+                const lastMessage = discordData.messages[discordData.messages.length - 1];
+                descriptionParts.push(`- **Last message:** ${lastMessage.author}: ${lastMessage.content.substring(0, 200)}`);
+              }
+            }
+            
+            descriptionParts.push("");
+          }
+        }
+
+        // Create PM tool issue
+        const labels = [...(issue.issueLabels || [])];
+        if (discordMessages.length > 0) {
+          labels.push("discord-discussion");
+        }
+        if (issue.classification) {
+          labels.push(`classification:${issue.classification.category}`);
+          labels.push(`type:${issue.classification.type}`);
+        }
+
+        // Assign priority
+        const priority = assignIssuePriority({
+          issueLabels: issue.issueLabels,
+          classification: issue.classification,
+          hasDiscordContext: discordMessages.length > 0,
+          isInGroup: !!groupId,
+        });
+
+        pmIssues.push({
+          title: issue.issueTitle || `GitHub Issue #${issue.issueNumber}`,
+          description: descriptionParts.join("\n"),
+          feature_id: featureId,
+          feature_name: featureName,
+          source: "github",
+          source_url: issue.issueUrl,
+          source_id: `github-issue-${issue.issueNumber}`,
+          labels,
+          priority,
+          metadata: {
+            issue_number: issue.issueNumber,
+            issue_state: issue.issueState,
+            classification: issue.classification,
+            group_id: groupId,
+            discord_threads_count: discordMessages.length,
+            discord_thread_ids: discordMessages.map(m => m.threadId),
+            feature_match: featureMatches.get(issue.issueNumber),
+          },
+          // Pass existing Linear issue ID if issue already has one (from previous export)
+          linear_issue_id: issue.linearIssueId || undefined,
+          linear_issue_identifier: issue.linearIssueIdentifier || undefined,
+        });
+
+      } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        logError(`Error processing issue #${issue.issueNumber}:`, error);
+        result.errors?.push(`Issue #${issue.issueNumber}: ${errorMsg}`);
+      }
+    }
+
+    log(`Prepared ${pmIssues.length} issues for export`);
+
+    // STEP 4: Export issues to PM tool
+    const exportResult = await pmTool.exportIssues(pmIssues);
+
+    // STEP 5: Update database with export status
+    if (exportResult.success) {
+      try {
+        for (const issue of pmIssues) {
+          if (issue.linear_issue_id && issue.source_id.startsWith("github-issue-")) {
+            const issueNumber = parseInt(issue.source_id.replace("github-issue-", ""), 10);
+            if (!isNaN(issueNumber)) {
+              await prisma.gitHubIssue.update({
+                where: { issueNumber },
+                data: {
+                  exportStatus: "exported",
+                  exportedAt: new Date(),
+                  linearIssueId: issue.linear_issue_id,
+                  linearIssueUrl: issue.linear_issue_url || null,
+                  linearIssueIdentifier: issue.linear_issue_identifier || null,
+                },
+              });
+            }
+          }
+        }
+        log(`Updated ${pmIssues.length} issues with export status in database`);
+      } catch (error) {
+        logError("Error updating database with export status:", error);
+      }
+    }
+
+    result.success = exportResult.success;
+    result.issues_exported = {
+      created: exportResult.created_issues,
+      updated: exportResult.updated_issues,
+      skipped: exportResult.skipped_issues,
+    };
+    result.errors = exportResult.errors?.map(e => e.error) || [];
+
+    return result;
+  } catch (error) {
+    logError("Export issues to PM tool failed:", error);
+    result.errors = [error instanceof Error ? error.message : String(error)];
+    return result;
+  }
 }
 
