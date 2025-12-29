@@ -210,8 +210,10 @@ function generateFallbackTitle(group: GroupingGroup): string {
  */
 export async function exportGroupingToPMTool(
   groupingData: GroupingData,
-  pmToolConfig: PMToolConfig
+  pmToolConfig: PMToolConfig,
+  options?: { include_closed?: boolean }
 ): Promise<ExportWorkflowResult> {
+  const includeClosed = options?.include_closed ?? false;
   const result: ExportWorkflowResult = {
     success: false,
     features_extracted: groupingData.features?.length || 0,
@@ -238,17 +240,18 @@ export async function exportGroupingToPMTool(
     
     // Use groups from grouping data (already matched to features)
     // Filter: Only export groups with open GitHub issues or unresolved messages (no GitHub issue)
-    // This ensures we don't export groups for closed/resolved issues
+    // This ensures we don't export groups for closed/resolved issues (unless include_closed is true)
     // Also collect closed groups for statistics tracking
     const closedGroups: GroupingGroup[] = [];
     const groupsWithFeatures = groupingData.groups.filter(group => {
-      // If group has a GitHub issue, only export if it's open
+      // If group has a GitHub issue, check if it's open or closed
       if (group.github_issue) {
         // State should be "open" or "closed" - default to "open" if missing (conservative approach)
         const state = group.github_issue.state?.toLowerCase() || "open";
         if (state === "closed") {
           closedGroups.push(group);
-          return false;
+          // Include closed groups if include_closed is true
+          return includeClosed;
         }
         return true;
       }
@@ -595,9 +598,12 @@ export async function exportGroupingToPMTool(
       // Check if top_issue is closed
       if (thread.top_issue?.number) {
         const issueState = topIssuesStateMap.get(thread.top_issue.number)?.toLowerCase() || "open";
-        // Only export if top_issue is open
         if (issueState === "closed") {
           closedUngroupedThreads.push(thread);
+          // Include closed threads if include_closed is true
+          if (includeClosed) {
+            ungroupedThreads.push(thread);
+          }
           continue;
         }
       }
@@ -630,6 +636,10 @@ export async function exportGroupingToPMTool(
       
       if (isResolved) {
         resolvedUngroupedThreads.push(thread);
+        // Include resolved threads if include_closed is true
+        if (includeClosed) {
+          ungroupedThreads.push(thread);
+        }
         continue;
       }
       
@@ -815,11 +825,25 @@ export async function exportGroupingToPMTool(
         
         // Find issues in cache that are NOT matched to any thread
         // These are our ungrouped issues
-        // Only export open issues (unresolved)
+        // Only export open issues (unresolved) unless include_closed is true
         // Also collect closed ungrouped issues for statistics tracking
         for (const issue of allCachedIssues) {
           if (!matchedIssueNumbers.has(issue.number)) {
-            if (issue.state === "open") {
+            // Track closed issues for statistics (even if they'll be exported)
+            if (issue.state === "closed") {
+              closedUngroupedIssues.push({
+                number: issue.number,
+                title: issue.title || `GitHub Issue #${issue.number}`,
+                url: issue.url,
+                state: issue.state,
+                body: issue.body,
+                labels: issue.labels,
+                author: issue.author,
+                created_at: issue.created_at,
+              });
+            }
+            
+            if (issue.state === "open" || (includeClosed && issue.state === "closed")) {
             // This issue doesn't have any thread matches - it's ungrouped
             const issueTitle = issue.title || `GitHub Issue #${issue.number}`;
             const title = `[Ungrouped Issue] ${issueTitle}`;
@@ -955,18 +979,6 @@ export async function exportGroupingToPMTool(
               logError(`Error saving ungrouped issue ${issue.number} to database:`, dbError);
               // Continue even if database save fails
             }
-            } else if (issue.state === "closed") {
-              // Collect closed ungrouped issues for statistics
-              closedUngroupedIssues.push({
-                number: issue.number,
-                title: issue.title || `GitHub Issue #${issue.number}`,
-                url: issue.url,
-                state: issue.state,
-                body: issue.body,
-                labels: issue.labels,
-                author: issue.author,
-                created_at: issue.created_at,
-              });
             }
           }
         }

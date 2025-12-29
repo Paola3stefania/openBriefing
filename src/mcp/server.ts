@@ -412,6 +412,11 @@ const tools: Tool[] = [
           type: "string",
           description: "Path to the grouping results JSON file (from suggest_grouping). Groups should be matched to features first using match_groups_to_features.",
         },
+        include_closed: {
+          type: "boolean",
+          description: "If true, exports closed/resolved issues and threads. If false (default), only exports open/unresolved items.",
+          default: false,
+        },
       },
       required: [],
     },
@@ -3821,9 +3826,10 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     case "export_to_pm_tool": {
-      const { classified_data_path, grouping_data_path } = args as {
+      const { classified_data_path, grouping_data_path, include_closed } = args as {
         classified_data_path?: string;
         grouping_data_path?: string;
+        include_closed?: boolean;
       };
 
       try {
@@ -3874,7 +3880,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const { exportGroupingToPMTool } = await import("../export/groupingExporter.js");
           type GroupingDataForExport = Parameters<typeof exportGroupingToPMTool>[0];
           const groupingData = safeJsonParse<GroupingDataForExport>(groupingContent, grouping_data_path);
-          result = await exportGroupingToPMTool(groupingData, pmToolConfig);
+          result = await exportGroupingToPMTool(groupingData, pmToolConfig, { include_closed: include_closed ?? false });
           
           // Update grouping JSON file with export status and suggested titles
           if (result.success) {
