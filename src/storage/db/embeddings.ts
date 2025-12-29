@@ -457,6 +457,12 @@ export async function computeAndSaveFeatureEmbeddings(
   apiKey: string,
   onProgress?: (processed: number, total: number) => void
 ): Promise<void> {
+  if (!apiKey) {
+    throw new Error("OPENAI_API_KEY is required to compute feature embeddings");
+  }
+
+  console.error(`[Embeddings] Starting feature embedding computation...`);
+  
   // Get all features that need embeddings
   const allFeatures = await prisma.feature.findMany({
     orderBy: { id: "asc" },
@@ -468,7 +474,15 @@ export async function computeAndSaveFeatureEmbeddings(
     },
   });
 
+  if (allFeatures.length === 0) {
+    console.error(`[Embeddings] No features found in database. Make sure features are saved to the database first by calling getFeaturesFromCacheOrExtract().`);
+    return;
+  }
+
+  console.error(`[Embeddings] Found ${allFeatures.length} features in database`);
+
   const model = getEmbeddingModel();
+  console.error(`[Embeddings] Using embedding model: ${model}`);
 
   // Check which features already have embeddings
   const existingEmbeddings = await prisma.featureEmbedding.findMany({
@@ -478,6 +492,8 @@ export async function computeAndSaveFeatureEmbeddings(
       contentHash: true,
     },
   });
+
+  console.error(`[Embeddings] Found ${existingEmbeddings.length} existing embeddings in database for model ${model}`);
 
   const existingHashes = new Map<string, string>();
   for (const row of existingEmbeddings) {
@@ -499,10 +515,20 @@ export async function computeAndSaveFeatureEmbeddings(
         description: feature.description || "",
         keywords: keywords,
       });
+      if (!existingHash) {
+        console.error(`[Embeddings] Feature "${feature.name}" (${feature.id}) has no embedding - will compute`);
+      } else {
+        console.error(`[Embeddings] Feature "${feature.name}" (${feature.id}) content changed - will recompute (old hash: ${existingHash.substring(0, 8)}..., new hash: ${currentHash.substring(0, 8)}...)`);
+      }
     }
   }
 
   console.error(`[Embeddings] Found ${allFeatures.length} features, ${featuresToEmbed.length} need embeddings`);
+  
+  if (featuresToEmbed.length === 0) {
+    console.error(`[Embeddings] All features already have embeddings. Skipping computation.`);
+    return;
+  }
 
   // Process in batches using batch embedding API
   // Features are shorter than documentation (name + description + keywords), so can use larger batches
@@ -522,10 +548,13 @@ export async function computeAndSaveFeatureEmbeddings(
       });
 
       // Batch create embeddings
+      console.error(`[Embeddings] Computing embeddings for batch ${Math.floor(i / batchSize) + 1} (${batch.length} features)...`);
       const embeddings = await createEmbeddings(textsToEmbed, apiKey);
+      console.error(`[Embeddings] Successfully computed ${embeddings.length} embeddings`);
 
       // Batch save all embeddings in a single transaction
       const model = getEmbeddingModel();
+      console.error(`[Embeddings] Saving ${embeddings.length} embeddings to database...`);
       await prisma.$transaction(async (tx: Omit<typeof prisma, "$connect" | "$disconnect" | "$on" | "$transaction" | "$use" | "$extends">) => {
         await Promise.all(
           embeddings.map((embedding, j) => {
@@ -549,6 +578,7 @@ export async function computeAndSaveFeatureEmbeddings(
           })
         );
       });
+      console.error(`[Embeddings] Successfully saved ${embeddings.length} embeddings to database`);
 
       processed += batch.length;
       retryCount = 0; // Reset retry count on successful batch
@@ -601,6 +631,12 @@ export async function computeAndSaveFeatureEmbeddings(
   }
 
   console.error(`[Embeddings] Completed feature embeddings: ${processed}/${featuresToEmbed.length}`);
+  
+  if (processed < featuresToEmbed.length) {
+    console.error(`[Embeddings] Warning: Only processed ${processed} out of ${featuresToEmbed.length} features. Some embeddings may be missing.`);
+  } else {
+    console.error(`[Embeddings] Successfully computed and saved embeddings for all ${processed} features.`);
+  }
 }
 
 /**
@@ -937,6 +973,45 @@ export async function computeAndSaveThreadEmbeddings(
 
   console.error(`[Embeddings] Completed thread embeddings: ${processed}/${threadsToEmbed.length} computed, ${cached} cached`);
   return { computed: processed, cached, total: totalItems };
+}
+
+/**
+ * Get issue embedding
+ */
+export async function saveIssueEmbedding(
+  issueNumber: number,
+  embedding: Embedding,
+  contentHash: string
+): Promise<void> {
+  const model = getEmbeddingModel();
+  await prisma.issueEmbedding.upsert({
+    where: { issueNumber },
+    update: {
+      embedding: embedding as Prisma.InputJsonValue,
+      contentHash,
+      model,
+    },
+    create: {
+      issueNumber,
+      embedding: embedding as Prisma.InputJsonValue,
+      contentHash,
+      model,
+    },
+  });
+}
+
+export async function getIssueEmbedding(issueNumber: number): Promise<Embedding | null> {
+  const model = getEmbeddingModel();
+  const result = await prisma.issueEmbedding.findUnique({
+    where: { issueNumber },
+    select: { embedding: true, model: true },
+  });
+
+  if (!result || result.model !== model) {
+    return null;
+  }
+
+  return result.embedding as Embedding;
 }
 
 /**

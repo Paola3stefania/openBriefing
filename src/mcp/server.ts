@@ -3871,6 +3871,79 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             console.error(`[Grouping] Saving ${mergedGroups.length} groups and ${mergedUngrouped.length} ungrouped threads to database...`);
             await storage.saveGroups(mergedGroups);
             await storage.saveUngroupedThreads(mergedUngrouped);
+            
+            // Calculate and save ungrouped issues (GitHub issues not matched to any thread)
+            try {
+              console.error(`[Grouping] Finding ungrouped GitHub issues...`);
+              const { prisma } = await import("../storage/db/prisma.js");
+              
+              // Get all issue numbers that have been matched to threads
+              const matchedIssues = await prisma.threadIssueMatch.findMany({
+                select: {
+                  issueNumber: true,
+                },
+                distinct: ["issueNumber"],
+              });
+              
+              const matchedIssueNumbers = new Set(matchedIssues.map(i => i.issueNumber));
+              
+              // Get all GitHub issues from database
+              const allIssues = await prisma.gitHubIssue.findMany({
+                select: {
+                  issueNumber: true,
+                  issueTitle: true,
+                  issueUrl: true,
+                  issueState: true,
+                  issueBody: true,
+                  issueLabels: true,
+                  issueAuthor: true,
+                  issueCreatedAt: true,
+                },
+              });
+              
+              // Find issues that are NOT matched to any thread
+              const ungroupedIssues = allIssues.filter(issue => !matchedIssueNumbers.has(issue.issueNumber));
+              
+              if (ungroupedIssues.length > 0) {
+                console.error(`[Grouping] Found ${ungroupedIssues.length} ungrouped GitHub issues, saving to database...`);
+                
+                // Save ungrouped issues to database
+                for (const issue of ungroupedIssues) {
+                  await prisma.ungroupedIssue.upsert({
+                    where: { issueNumber: issue.issueNumber },
+                    update: {
+                      issueTitle: issue.issueTitle || `Issue #${issue.issueNumber}`,
+                      issueUrl: issue.issueUrl || `https://github.com/issues/${issue.issueNumber}`,
+                      issueState: issue.issueState || null,
+                      issueBody: issue.issueBody || null,
+                      issueLabels: issue.issueLabels || [],
+                      issueAuthor: issue.issueAuthor || null,
+                      issueCreatedAt: issue.issueCreatedAt || null,
+                      affectsFeatures: [], // Will be populated when matched to features
+                    },
+                    create: {
+                      issueNumber: issue.issueNumber,
+                      issueTitle: issue.issueTitle || `Issue #${issue.issueNumber}`,
+                      issueUrl: issue.issueUrl || `https://github.com/issues/${issue.issueNumber}`,
+                      issueState: issue.issueState || null,
+                      issueBody: issue.issueBody || null,
+                      issueLabels: issue.issueLabels || [],
+                      issueAuthor: issue.issueAuthor || null,
+                      issueCreatedAt: issue.issueCreatedAt || null,
+                      affectsFeatures: [], // Will be populated when matched to features
+                    },
+                  });
+                }
+                
+                console.error(`[Grouping] Saved ${ungroupedIssues.length} ungrouped issues to database.`);
+              } else {
+                console.error(`[Grouping] No ungrouped issues found.`);
+              }
+            } catch (ungroupedIssuesError) {
+              console.error(`[Grouping] Warning: Failed to calculate/save ungrouped issues:`, ungroupedIssuesError);
+              // Continue even if this fails
+            }
+            
             console.error(`[Grouping] Successfully saved to database.`);
           } else {
             await writeFile(outputPath, JSON.stringify(outputData, null, 2), "utf-8");
@@ -4219,34 +4292,17 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const config = getConfig();
         const resultsDir = join(process.cwd(), config.paths.resultsDir || "results");
         
-        // Find grouping file
-        let groupingPath: string;
-        if (grouping_data_path) {
-          groupingPath = grouping_data_path;
-        } else {
-          const actualChannelId = channel_id || config.discord.defaultChannelId;
-          if (!actualChannelId) {
-            throw new Error("Either grouping_data_path or channel_id must be provided");
-          }
-          
-          const existingGroupingFiles = await readdir(resultsDir).catch(() => []);
-          const existingGroupingFile = existingGroupingFiles
-            .filter(f => f.startsWith(`grouping-`) && f.includes(actualChannelId) && f.endsWith('.json'))
-            .sort()
-            .reverse()[0];
-          
-          if (!existingGroupingFile) {
-            throw new Error(`No grouping file found for channel ${actualChannelId}. Run suggest_grouping first.`);
-          }
-          
-          groupingPath = join(resultsDir, existingGroupingFile);
+        // Determine channel ID
+        const actualChannelId = grouping_data_path 
+          ? undefined // Will be determined from file if provided
+          : (channel_id || config.discord.defaultChannelId);
+        
+        if (!grouping_data_path && !actualChannelId) {
+          throw new Error("Either grouping_data_path or channel_id must be provided");
         }
 
-        // Load grouping data
-        // Log removed to avoid interfering with MCP JSON protocol
-        // console.error(`[Feature Matching] Loading grouping data from ${groupingPath}...`);
-        const groupingContent = await readFile(groupingPath, "utf-8");
-        const groupingData = safeJsonParse<{
+        // Try to load grouping data from database first (if available), then fall back to JSON file
+        let groupingData: {
           timestamp: string;
           updated_at?: string;
           channel_id: string;
@@ -4274,11 +4330,114 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             embeddingsFromCache?: number;
             ungrouped_count?: number;
             ungrouped_threads_matched?: number;
+            ungrouped_issues_matched?: number;
           };
           groups: Group[];
           ungrouped_threads?: Array<UngroupedThread & { channel_id?: string }>;
           features?: Array<{ id: string; name: string }>;
-        }>(groupingContent, groupingPath);
+        } | null = null;
+
+        let groupingPath: string | null = null;
+        let useDatabaseForStorage = false;
+
+        // First, try loading from database if available and channel_id is known
+        if (!grouping_data_path && actualChannelId) {
+          try {
+            const { hasDatabaseConfig, getStorage } = await import("../storage/factory.js");
+            const useDatabase = hasDatabaseConfig() && await getStorage().isAvailable();
+            
+            if (useDatabase) {
+              const storage = getStorage();
+              const groups = await storage.getGroups(actualChannelId);
+              const ungroupedThreads = await storage.getUngroupedThreads(actualChannelId);
+              
+              if (groups.length > 0 || ungroupedThreads.length > 0) {
+                // Convert database format to grouping file format
+                groupingData = {
+                  timestamp: new Date().toISOString(),
+                  updated_at: new Date().toISOString(),
+                  channel_id: actualChannelId,
+                  grouping_method: "issue-based",
+                  stats: {
+                    totalThreads: groups.reduce((sum, g) => sum + g.thread_count, 0) + ungroupedThreads.length,
+                    groupedThreads: groups.reduce((sum, g) => sum + g.thread_count, 0),
+                    ungroupedThreads: ungroupedThreads.length,
+                    uniqueIssues: new Set(groups.map(g => g.github_issue_number).filter(Boolean)).size,
+                    multiThreadGroups: groups.filter(g => g.thread_count > 1).length,
+                    singleThreadGroups: groups.filter(g => g.thread_count === 1).length,
+                    total_groups_in_file: groups.length,
+                    total_ungrouped_in_file: ungroupedThreads.length,
+                  },
+                  groups: groups,
+                  ungrouped_threads: ungroupedThreads,
+                };
+                useDatabaseForStorage = true;
+              }
+            }
+          } catch (dbError) {
+            // Fall through to JSON file loading
+            console.error(`[Feature Matching] Failed to load from database, falling back to JSON:`, dbError);
+          }
+        }
+
+        // Fall back to JSON file if database didn't have data or grouping_data_path was provided
+        if (!groupingData) {
+          if (grouping_data_path) {
+            groupingPath = grouping_data_path;
+          } else {
+            if (!actualChannelId) {
+              throw new Error("Either grouping_data_path or channel_id must be provided");
+            }
+            
+            const existingGroupingFiles = await readdir(resultsDir).catch(() => []);
+            const existingGroupingFile = existingGroupingFiles
+              .filter(f => f.startsWith(`grouping-`) && f.includes(actualChannelId) && f.endsWith('.json'))
+              .sort()
+              .reverse()[0];
+            
+            if (!existingGroupingFile) {
+              throw new Error(`No grouping file found for channel ${actualChannelId}. Run suggest_grouping first.`);
+            }
+            
+            groupingPath = join(resultsDir, existingGroupingFile);
+          }
+
+          // Load grouping data from JSON file
+          const groupingContent = await readFile(groupingPath, "utf-8");
+          groupingData = safeJsonParse<{
+            timestamp: string;
+            updated_at?: string;
+            channel_id: string;
+            grouping_method: string;
+            stats: {
+              totalThreads: number;
+              groupedThreads: number;
+              ungroupedThreads: number;
+              uniqueIssues: number;
+              multiThreadGroups: number;
+              singleThreadGroups: number;
+              cross_cutting_groups?: number;
+              features_extracted?: number;
+              groups_matched?: number;
+              total_groups_in_file?: number;
+              total_ungrouped_in_file?: number;
+              newly_grouped?: number;
+              newly_ungrouped?: number;
+              previously_grouped?: number;
+              previously_ungrouped?: number;
+              totalSignals?: number;
+              groupedSignals?: number;
+              crossCuttingGroups?: number;
+              embeddingsComputed?: number;
+              embeddingsFromCache?: number;
+              ungrouped_count?: number;
+              ungrouped_threads_matched?: number;
+            };
+            groups: Group[];
+            ungrouped_threads?: Array<UngroupedThread & { channel_id?: string }>;
+            features?: Array<{ id: string; name: string }>;
+          }>(groupingContent, groupingPath);
+        }
 
         // Get features from cache or extract from documentation
         const docUrls = config.pmIntegration?.documentation_urls;
@@ -4322,7 +4481,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Map groups to features
         // Log removed to avoid interfering with MCP JSON protocol
         // console.error(`[Feature Matching] Mapping ${groupingData.groups.length} groups to features...`);
-        const { mapGroupsToFeatures, mapUngroupedThreadsToFeatures } = await import("../export/featureMapper.js");
+        const { mapGroupsToFeatures, mapUngroupedThreadsToFeatures, mapUngroupedIssuesToFeatures } = await import("../export/featureMapper.js");
         const groupsWithFeatures = await mapGroupsToFeatures(groupingData.groups, features, min_similarity) as Group[];
 
         // Map ungrouped threads to features
@@ -4344,6 +4503,66 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             ...t,
             channel_id: t.channel_id || groupingData.channel_id,
           })) as UngroupedThread[];
+        }
+
+        // Map ungrouped issues to features (if using database)
+        let ungroupedIssuesMatched = 0;
+        const { hasDatabaseConfig, getStorage } = await import("../storage/factory.js");
+        const useDatabase = hasDatabaseConfig() && await getStorage().isAvailable();
+        
+        if (useDatabase) {
+          try {
+            const { prisma } = await import("../storage/db/prisma.js");
+            // Load ungrouped issues from database
+            const ungroupedIssues = await prisma.ungroupedIssue.findMany({
+              select: {
+                issueNumber: true,
+                issueTitle: true,
+                issueUrl: true,
+                issueState: true,
+                issueBody: true,
+                issueLabels: true,
+                issueAuthor: true,
+              },
+            });
+
+            if (ungroupedIssues.length > 0) {
+              // Convert to format expected by mapUngroupedIssuesToFeatures
+              const issuesToMatch = ungroupedIssues.map(issue => ({
+                issue_number: issue.issueNumber,
+                issue_title: issue.issueTitle,
+                issue_url: issue.issueUrl || undefined,
+                issue_state: issue.issueState || undefined,
+                issue_body: issue.issueBody || undefined,
+                issue_labels: issue.issueLabels || undefined,
+                issue_author: issue.issueAuthor || undefined,
+              }));
+
+              // Map to features
+              const ungroupedIssuesWithFeatures = await mapUngroupedIssuesToFeatures(
+                issuesToMatch,
+                features,
+                min_similarity
+              );
+
+              // Save back to database with affects_features
+              for (const issue of ungroupedIssuesWithFeatures) {
+                await prisma.ungroupedIssue.update({
+                  where: { issueNumber: issue.issue_number },
+                  data: {
+                    affectsFeatures: issue.affects_features ? JSON.parse(JSON.stringify(issue.affects_features)) : [],
+                  },
+                });
+              }
+
+              ungroupedIssuesMatched = ungroupedIssuesWithFeatures.length;
+              // Log removed to avoid interfering with MCP JSON protocol
+              // console.error(`[Feature Matching] Matched ${ungroupedIssuesMatched} ungrouped issues to features`);
+            }
+          } catch (ungroupedIssuesError) {
+            // Log but don't fail - ungrouped issues matching is optional
+            console.error(`[Feature Matching] Warning: Failed to match ungrouped issues to features:`, ungroupedIssuesError);
+          }
         }
 
         // Update grouping data  
@@ -4368,12 +4587,22 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           features_extracted: features.length,
           groups_matched: groupsWithFeatures.length,
           ungrouped_threads_matched: ungroupedThreadsMatched,
+          ungrouped_issues_matched: ungroupedIssuesMatched,
         };
 
-        // Save updated grouping file
-        await writeFile(groupingPath, JSON.stringify(groupingData, null, 2), "utf-8");
+        // Save updated grouping data (to database or JSON file)
+        if (useDatabaseForStorage) {
+          // Save to database
+          const { getStorage } = await import("../storage/factory.js");
+          const storage = getStorage();
+          await storage.saveGroups(groupingData.groups);
+          await storage.saveUngroupedThreads(groupingData.ungrouped_threads || []);
+        } else if (groupingPath) {
+          // Save to JSON file
+          await writeFile(groupingPath, JSON.stringify(groupingData, null, 2), "utf-8");
+        }
         // Log removed to avoid interfering with MCP JSON protocol
-        // console.error(`[Feature Matching] Updated grouping file with feature matches: ${groupingPath}`);
+        // console.error(`[Feature Matching] Updated grouping data with feature matches`);
 
         return {
           content: [
@@ -4381,17 +4610,18 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
               type: "text",
               text: JSON.stringify({
                 success: true,
-                message: `Matched ${groupsWithFeatures.length} groups and ${ungroupedThreadsMatched} ungrouped threads to ${features.length} features`,
+                message: `Matched ${groupsWithFeatures.length} groups, ${ungroupedThreadsMatched} ungrouped threads, and ${ungroupedIssuesMatched} ungrouped issues to ${features.length} features`,
                 stats: {
                   total_groups: groupsWithFeatures.length,
                   cross_cutting_groups: crossCuttingCount,
                   features_extracted: features.length,
                   groups_matched: groupsWithFeatures.length,
                   ungrouped_threads_matched: ungroupedThreadsMatched,
+                  ungrouped_issues_matched: ungroupedIssuesMatched,
                   total_ungrouped_threads: groupingData.ungrouped_threads?.length || 0,
                 },
                 features: features.map(f => ({ id: f.id, name: f.name })),
-                output_file: groupingPath,
+                output_file: useDatabaseForStorage ? "database" : groupingPath,
               }, null, 2),
             },
           ],

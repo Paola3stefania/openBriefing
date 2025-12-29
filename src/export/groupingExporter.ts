@@ -649,6 +649,7 @@ export async function exportGroupingToPMTool(
                     issueAuthor: issue.author || null,
                     issueCreatedAt: issue.created_at ? new Date(issue.created_at) : null,
                     exportStatus: "pending",
+                    affectsFeatures: [], // Will be populated when matched to features
                   },
                   create: {
                     issueNumber: issue.number,
@@ -660,6 +661,7 @@ export async function exportGroupingToPMTool(
                     issueAuthor: issue.author || null,
                     issueCreatedAt: issue.created_at ? new Date(issue.created_at) : null,
                     exportStatus: "pending",
+                    affectsFeatures: [], // Will be populated when matched to features
                   },
                 });
               } else {

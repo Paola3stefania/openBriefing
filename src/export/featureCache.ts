@@ -37,6 +37,20 @@ export async function getFeaturesFromCacheOrExtract(
     const cached = await storage.getFeatures(urls);
     if (cached && cached.features && cached.features.length > 0) {
       log(`Using cached features (${cached.features.length} features from ${urls.length} URL(s), extracted at ${cached.extracted_at})`);
+      
+      // If using database storage, ensure features are saved to database
+      // (they might be cached in JSON but not in database yet)
+      const { hasDatabaseConfig } = await import("../storage/factory.js");
+      if (hasDatabaseConfig()) {
+        try {
+          await storage.saveFeatures(urls, cached.features as ProductFeature[], cached.documentation_count);
+          log(`Ensured ${cached.features.length} cached features are saved to database`);
+        } catch (error) {
+          // Log but don't fail - features are still available from cache
+          log(`Warning: Failed to save cached features to database: ${error}`);
+        }
+      }
+      
       return cached.features as ProductFeature[];
     }
   }

@@ -140,6 +140,7 @@ model UngroupedThread {
   linearIssueId       String?  @map("linear_issue_id")
   linearIssueUrl      String?  @map("linear_issue_url")
   linearIssueIdentifier String? @map("linear_issue_identifier")
+  affectsFeatures     Json     @default("[]") @map("affects_features")
   createdAt           DateTime @default(now()) @map("created_at")
   updatedAt           DateTime @updatedAt @map("updated_at")
 
@@ -149,6 +150,7 @@ model UngroupedThread {
   @@index([channelId])
   @@index([reason])
   @@index([exportStatus])
+  @@index([affectsFeatures], type: Gin)
   @@map("ungrouped_threads")
 }
 
@@ -353,11 +355,13 @@ model UngroupedIssue {
   linearIssueId        String?  @map("linear_issue_id")
   linearIssueUrl       String?  @map("linear_issue_url")
   linearIssueIdentifier String? @map("linear_issue_identifier")
+  affectsFeatures      Json     @default("[]") @map("affects_features")
   createdAt            DateTime @default(now()) @map("created_at")
   updatedAt            DateTime @updatedAt @map("updated_at")
 
   @@index([exportStatus])
   @@index([issueState])
+  @@index([affectsFeatures], type: Gin)
   @@map("ungrouped_issues")
 }
 

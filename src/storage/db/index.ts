@@ -577,6 +577,7 @@ export class DatabaseStorage implements IStorage {
               topIssueNumber: thread.top_issue?.number ?? null,
               topIssueTitle: thread.top_issue?.title ?? null,
               topIssueSimilarity: thread.top_issue?.similarity_score ? new Decimal(thread.top_issue.similarity_score) : null,
+              affectsFeatures: thread.affects_features ? JSON.parse(JSON.stringify(thread.affects_features)) : [],
             },
             create: {
               threadId: thread.thread_id,
@@ -585,6 +586,7 @@ export class DatabaseStorage implements IStorage {
               topIssueNumber: thread.top_issue?.number ?? null,
               topIssueTitle: thread.top_issue?.title ?? null,
               topIssueSimilarity: thread.top_issue?.similarity_score ? new Decimal(thread.top_issue.similarity_score) : null,
+              affectsFeatures: thread.affects_features ? JSON.parse(JSON.stringify(thread.affects_features)) : [],
             },
           });
         }
@@ -611,6 +613,7 @@ export class DatabaseStorage implements IStorage {
       author: ut.thread.firstMessageAuthor ?? undefined,
       timestamp: ut.thread.firstMessageTimestamp?.toISOString(),
       reason: ut.reason as "no_matches" | "below_threshold",
+      affects_features: (Array.isArray(ut.affectsFeatures) ? ut.affectsFeatures : []) as Array<{ id: string; name: string }>,
       top_issue: ut.topIssueNumber
         ? {
             number: ut.topIssueNumber,
@@ -828,6 +831,20 @@ export class DatabaseStorage implements IStorage {
         });
       }
     });
+
+    // After saving features, compute embeddings if OPENAI_API_KEY is available
+    // This ensures embeddings are ready when matching groups/threads to features
+    if (process.env.OPENAI_API_KEY && features.length > 0) {
+      try {
+        const { computeAndSaveFeatureEmbeddings } = await import("./embeddings.js");
+        // Only compute embeddings for newly saved features (computeAndSaveFeatureEmbeddings
+        // will check which features already have embeddings and skip them)
+        await computeAndSaveFeatureEmbeddings(process.env.OPENAI_API_KEY);
+      } catch (error) {
+        // Log but don't fail - embeddings can be computed on-demand later
+        console.error(`[saveFeatures] Warning: Failed to compute feature embeddings automatically:`, error);
+      }
+    }
   }
 
   async getFeatures(urls: string[]): Promise<{ features: ProductFeature[]; extracted_at: string; documentation_count: number } | null> {
