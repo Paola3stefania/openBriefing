@@ -486,10 +486,10 @@ const tools: Tool[] = [
         },
         min_similarity: {
           type: "number",
-          description: "Minimum similarity threshold for grouping issues (0-100 scale, default 60). Issues with similarity >= threshold are grouped together.",
+          description: "Minimum similarity threshold for grouping issues (0-100 scale, default 80). Issues with similarity >= threshold are grouped together. Higher values create smaller, more focused groups.",
           minimum: 0,
           maximum: 100,
-          default: 60,
+          default: 80,
         },
         force: {
           type: "boolean",
@@ -5618,7 +5618,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const {
         channel_id,
         include_closed = false,
-        min_similarity = 60,
+        min_similarity = 80,
         force = false,
       } = args as {
         channel_id?: string;
