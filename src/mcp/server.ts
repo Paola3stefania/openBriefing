@@ -400,17 +400,13 @@ const tools: Tool[] = [
   },
   {
     name: "export_to_pm_tool",
-    description: "Export classified Discord messages and GitHub issues to a PM tool (Linear, Jira, etc.). For grouping results, groups should be matched to features first using match_groups_to_features. Can use either classification results or grouping results. Uses configuration from environment variables (PM_TOOL_*).",
+    description: "Export GitHub issues and Discord threads from the database to a PM tool (Linear, Jira, etc.). Uses issue-centric approach where GitHub issues are primary and Discord threads are attached as context. Requires DATABASE_URL to be configured. Uses configuration from environment variables (PM_TOOL_*).",
     inputSchema: {
       type: "object",
       properties: {
-        classified_data_path: {
+        channel_id: {
           type: "string",
-          description: "Path to the classified Discord messages JSON file (defaults to latest classified file for default channel)",
-        },
-        grouping_data_path: {
-          type: "string",
-          description: "Path to the grouping results JSON file (from suggest_grouping). Groups should be matched to features first using match_groups_to_features.",
+          description: "Discord channel ID for context. If not provided, uses DISCORD_DEFAULT_CHANNEL_ID from config.",
         },
         include_closed: {
           type: "boolean",
@@ -467,6 +463,37 @@ const tools: Tool[] = [
         semantic_only: {
           type: "boolean",
           description: "If true, use pure semantic similarity instead of issue-based grouping (default false)",
+          default: false,
+        },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "group_github_issues",
+    description: "Group related GitHub issues together and connect Discord threads to them. This is issue-centric: GitHub issues are primary, Discord threads are attached as context. Creates groups of related issues (1 group = 1 Linear issue) and ungrouped issues (1 issue = 1 Linear issue). All data is read from and saved to the database.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        channel_id: {
+          type: "string",
+          description: "Discord channel ID for matching threads. If not provided, uses DISCORD_DEFAULT_CHANNEL_ID from config.",
+        },
+        include_closed: {
+          type: "boolean",
+          description: "If true, includes closed GitHub issues. If false (default), only processes open issues.",
+          default: false,
+        },
+        min_similarity: {
+          type: "number",
+          description: "Minimum similarity threshold for grouping issues (0-100 scale, default 60). Issues with similarity >= threshold are grouped together.",
+          minimum: 0,
+          maximum: 100,
+          default: 60,
+        },
+        force: {
+          type: "boolean",
+          description: "If true, re-process all issues even if already grouped. If false (default), only process new/ungrouped issues.",
           default: false,
         },
       },
@@ -3860,17 +3887,13 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     case "export_to_pm_tool": {
       const { 
-        use_issue_centric = true, // Default to new issue-centric approach
+        use_issue_centric = true, // Default to issue-centric approach (always use DB)
         channel_id,
         include_closed,
-        classified_data_path, // Legacy
-        grouping_data_path, // Legacy
       } = args as {
         use_issue_centric?: boolean;
         channel_id?: string;
         include_closed?: boolean;
-        classified_data_path?: string;
-        grouping_data_path?: string;
       };
 
       try {
@@ -3895,7 +3918,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         const resultsDir = join(process.cwd(), config.paths.resultsDir || "results");
-        const actualChannelId = config.discord.defaultChannelId;
+        const actualChannelId = channel_id || config.discord.defaultChannelId;
 
         // Build PM tool configuration from config
         const pmToolConfig: PMToolConfig = {
@@ -3905,311 +3928,40 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           team_id: config.pmIntegration.pm_tool.team_id,
         };
 
-        let result: Awaited<ReturnType<typeof import("../export/groupingExporter.js").exportGroupingToPMTool>> | Awaited<ReturnType<typeof import("../export/groupingExporter.js").exportIssuesToPMTool>> | Awaited<ReturnType<typeof runExportWorkflow>> | undefined;
-        let sourceFile: string = "";
-        let useDatabaseForStorage = false;
-        
-        // NEW APPROACH: Issue-centric export (GitHub issues are primary, Discord threads attached)
-        if (use_issue_centric) {
-          const exportChannelId = channel_id || actualChannelId;
-          if (!exportChannelId) {
-            throw new Error("channel_id is required for issue-centric export. Provide channel_id or set DISCORD_DEFAULT_CHANNEL_ID in environment variables.");
-          }
-          
-          sourceFile = `database:issues:${exportChannelId}`;
-          console.error(`[Export] Using issue-centric export (GitHub issues primary, Discord context attached)`);
-          
-          const { exportIssuesToPMTool } = await import("../export/groupingExporter.js");
-          result = await exportIssuesToPMTool(pmToolConfig, {
-            include_closed: include_closed ?? false,
-            channelId: exportChannelId,
-          });
-          
-          // Update database with export status is handled inside exportIssuesToPMTool
-          useDatabaseForStorage = true;
-        } else {
-          // LEGACY APPROACH: Export from grouping results (Discord threads/groups are primary)
-          // Option 1: Export from grouping results (preferred - already mapped to features)
-          // First, try loading from database if available
-          // Import the export function to get the correct type
-          const { exportGroupingToPMTool } = await import("../export/groupingExporter.js");
-          type GroupingDataForExport = Parameters<typeof exportGroupingToPMTool>[0];
-        
-          let groupingData: GroupingDataForExport | null = null;
-        
-          // Try loading from database first (if available and channel_id is known)
-          if (!grouping_data_path && actualChannelId) {
-          try {
+        // Check database availability first - we always want to use DB when available
             const { hasDatabaseConfig, getStorage } = await import("../storage/factory.js");
-            const useDatabase = hasDatabaseConfig() && await getStorage().isAvailable();
+        const hasDb = hasDatabaseConfig();
+        let dbAvailable = false;
             
-            if (useDatabase) {
+        if (hasDb) {
+          try {
               const storage = getStorage();
-              const groups = await storage.getGroups(actualChannelId);
-              const ungroupedThreads = await storage.getUngroupedThreads(actualChannelId);
-              
-              if (groups.length > 0 || ungroupedThreads.length > 0) {
-                // Look up GitHub issue details (including state) for groups that have issue numbers
-                const issueNumbers = groups.map(g => g.github_issue_number).filter((num): num is number => !!num);
-                const issuesMap = new Map<number, { number: number; title: string; url: string; state: string; labels?: string[] }>();
-                
-                if (issueNumbers.length > 0) {
-                  const { prisma } = await import("../storage/db/prisma.js");
-                  const issues = await prisma.gitHubIssue.findMany({
-                    where: {
-                      issueNumber: { in: issueNumbers },
-                    },
-                    select: {
-                      issueNumber: true,
-                      issueTitle: true,
-                      issueUrl: true,
-                      issueState: true,
-                      issueLabels: true,
-                    },
-                  });
-                  
-                  for (const issue of issues) {
-                    issuesMap.set(issue.issueNumber, {
-                      number: issue.issueNumber,
-                      title: issue.issueTitle,
-                      url: issue.issueUrl,
-                      state: issue.issueState || "open",
-                      labels: issue.issueLabels,
-                    });
-                  }
-                }
-                
-                // Convert database format to grouping file format
-                // Extract unique features from groups and ungrouped threads
-                const featureMap = new Map<string, { id: string; name: string }>();
-                for (const group of groups) {
-                  if (group.affects_features) {
-                    for (const feature of group.affects_features) {
-                      featureMap.set(feature.id, feature);
-                    }
-                  }
-                }
-                for (const thread of ungroupedThreads) {
-                  if (thread.affects_features) {
-                    for (const feature of thread.affects_features) {
-                      featureMap.set(feature.id, feature);
-                    }
-                  }
-                }
-                
-                groupingData = {
-                  timestamp: new Date().toISOString(),
-                  channel_id: actualChannelId,
-                  stats: {
-                    totalSignals: groups.reduce((sum, g) => sum + g.thread_count, 0) + ungroupedThreads.length,
-                    groupedSignals: groups.reduce((sum, g) => sum + g.thread_count, 0),
-                    crossCuttingGroups: groups.filter(g => g.is_cross_cutting).length,
-                  },
-                  features: Array.from(featureMap.values()),
-                  groups: groups.map(group => ({
-                    id: group.id,
-                    suggested_title: group.suggested_title,
-                    github_issue: group.github_issue_number && issuesMap.has(group.github_issue_number)
-                      ? issuesMap.get(group.github_issue_number)
-                      : undefined,
-                    avg_similarity: group.avg_similarity,
-                    is_cross_cutting: group.is_cross_cutting,
-                    affects_features: group.affects_features,
-                    threads: group.threads,
-                    status: group.status,
-                    exported_at: group.exported_at,
-                    linear_issue_id: group.linear_issue_id,
-                    linear_issue_url: group.linear_issue_url,
-                    linear_issue_identifier: group.linear_issue_identifier,
-                    linear_project_ids: group.linear_project_ids,
-                  })),
-                  ungrouped_threads: ungroupedThreads.map(thread => ({
-                    thread_id: thread.thread_id,
-                    thread_name: thread.thread_name,
-                    url: thread.url,
-                    author: thread.author,
-                    timestamp: thread.timestamp,
-                    reason: thread.reason,
-                    export_status: thread.export_status,
-                    exported_at: thread.exported_at,
-                    linear_issue_id: thread.linear_issue_id,
-                    linear_issue_url: thread.linear_issue_url,
-                    linear_issue_identifier: thread.linear_issue_identifier,
-                    top_issue: thread.top_issue,
-                    affects_features: thread.affects_features,
-                  })),
-                };
-                useDatabaseForStorage = true;
-                sourceFile = `database:${actualChannelId}`;
-                console.error(`[Export] Using grouping data from database (${groups.length} groups, ${ungroupedThreads.length} ungrouped threads)`);
-              }
-            }
-          } catch (dbError) {
-            // Fall through to JSON file loading
-            console.error(`[Export] Failed to load from database, falling back to JSON:`, dbError);
+            dbAvailable = await storage.isAvailable();
+          } catch {
+            console.error(`[Export] Database configured but not available`);
           }
-          }
-        
-          // Fall back to JSON file if database didn't have data or grouping_data_path was provided
-          if (!groupingData) {
-          let actualGroupingPath = grouping_data_path;
-          if (!actualGroupingPath && actualChannelId) {
-            // Try to find the latest grouping file for this channel
-            const existingGroupingFiles = await readdir(resultsDir).catch(() => []);
-            const existingGroupingFile = existingGroupingFiles
-              .filter(f => f.startsWith(`grouping-`) && f.includes(actualChannelId) && f.endsWith('.json'))
-              .sort()
-              .reverse()[0];
-            
-            if (existingGroupingFile) {
-              actualGroupingPath = join(resultsDir, existingGroupingFile);
-              console.error(`[Export] Auto-detected grouping file: ${actualGroupingPath}`);
-            }
-          }
-          
-          if (actualGroupingPath) {
-            if (!existsSync(actualGroupingPath)) {
-              throw new Error(`Grouping data file not found: ${actualGroupingPath}`);
-            }
-            
-            sourceFile = actualGroupingPath;
-            console.error(`[Export] Using grouping data from ${actualGroupingPath}`);
-            const groupingContent = await readFile(actualGroupingPath, "utf-8");
-            groupingData = safeJsonParse<GroupingDataForExport>(groupingContent, actualGroupingPath);
-          }
-          }
-        
-          // If we have grouping data (from DB or file), export it
-          if (groupingData) {
-            result = await exportGroupingToPMTool(groupingData, pmToolConfig, { include_closed: include_closed ?? false });
-            
-            // Update export status (in database or file)
-            if (result && result.success) {
-              if (useDatabaseForStorage) {
-              // Update database with export status
-              const { getStorage } = await import("../storage/factory.js");
-              const storage = getStorage();
-              
-              if (result.group_export_mappings) {
-                for (const mapping of result.group_export_mappings) {
-                  const group = groupingData.groups.find(g => g.id === mapping.group_id);
-                  if (group) {
-                    // Use markGroupAsExported, then update identifier if needed
-                    await storage.markGroupAsExported(
-                      mapping.group_id,
-                      mapping.id,
-                      mapping.url,
-                      group.linear_project_ids
-                    );
-                    
-                    // Update identifier separately if needed (using prisma directly)
-                    if (mapping.identifier) {
-                      const { prisma } = await import("../storage/db/prisma.js");
-                      await prisma.group.update({
-                        where: { id: mapping.group_id },
-                        data: { linearIssueIdentifier: mapping.identifier },
-                      });
-                    }
-                  }
-                }
-              }
-              
-              if (result.ungrouped_thread_export_mappings && groupingData.ungrouped_threads && actualChannelId) {
-                // Update ungrouped threads by saving them with updated export status
-                const exportMappings = result.ungrouped_thread_export_mappings;
-                const updatedThreads: UngroupedThread[] = groupingData.ungrouped_threads.map(thread => {
-                  const mapping = exportMappings.find((m: { thread_id: string }) => m.thread_id === thread.thread_id);
-                  if (mapping) {
-                    return {
-                      ...thread,
-                      channel_id: actualChannelId, // Ensure channel_id is set
-                      export_status: "exported" as const,
-                      exported_at: new Date().toISOString(),
-                      linear_issue_id: mapping.id,
-                      linear_issue_url: mapping.url,
-                      linear_issue_identifier: mapping.identifier,
-                    };
-                  }
-                  return {
-                    ...thread,
-                    channel_id: actualChannelId, // Ensure channel_id is set
-                  };
-                });
-                
-                await storage.saveUngroupedThreads(updatedThreads);
-              }
-              
-              console.error(`[Export] Updated database with export status`);
-            } else if (sourceFile && sourceFile.startsWith('/')) {
-              // Update JSON file with export status
-            if (result.group_export_mappings) {
-              const exportMappings = new Map(result.group_export_mappings.map(m => [m.group_id, m]));
-              
-              for (const group of groupingData.groups || []) {
-                const mapping = exportMappings.get(group.id);
-                if (mapping) {
-                  group.status = "exported";
-                  group.exported_at = new Date().toISOString();
-                  group.linear_issue_id = mapping.id;
-                  group.linear_issue_url = mapping.url;
-                  if (mapping.identifier) {
-                    group.linear_issue_identifier = mapping.identifier;
-                  }
-                }
-                
-                if (!group.suggested_title) {
-                  group.suggested_title = "Untitled Group";
-                }
-              }
-            }
-            
-            if (result.ungrouped_thread_export_mappings && groupingData.ungrouped_threads) {
-              const threadMappings = new Map(result.ungrouped_thread_export_mappings.map(m => [m.thread_id, m]));
-              
-              for (const ungroupedThread of groupingData.ungrouped_threads) {
-                const mapping = threadMappings.get(ungroupedThread.thread_id);
-                if (mapping) {
-                  ungroupedThread.export_status = "exported";
-                  ungroupedThread.exported_at = new Date().toISOString();
-                  ungroupedThread.linear_issue_id = mapping.id;
-                  ungroupedThread.linear_issue_url = mapping.url;
-                  if (mapping.identifier) {
-                    ungroupedThread.linear_issue_identifier = mapping.identifier;
-                  }
-                }
-              }
-            }
-            
-              await writeFile(sourceFile, JSON.stringify(groupingData, null, 2), "utf-8");
-              console.error(`[Export] Updated grouping file with export status: ${sourceFile}`);
-            }
-          }
-          } else {
-            // Option 2: Export from classification results (requires feature extraction)
-          
-          // Get documentation URLs from config
-          if (!config.pmIntegration.documentation_urls || config.pmIntegration.documentation_urls.length === 0) {
-            throw new Error("No documentation URLs configured. Set DOCUMENTATION_URLS in environment variables, or use grouping_data_path instead.");
-          }
-          
-          // Determine classified data path
-          let classifiedPath = classified_data_path;
-          if (!classifiedPath) {
-            if (!actualChannelId) {
-              throw new Error("Channel ID is required. Provide classified_data_path or set DISCORD_DEFAULT_CHANNEL_ID in environment variables.");
-            }
-            classifiedPath = join(resultsDir, `discord-classified-${actualChannelId}.json`);
-          }
-          
-          sourceFile = classifiedPath || "";
+        }
 
-          // Run export workflow
-          result = await runExportWorkflow(
-            config.pmIntegration.documentation_urls,
-            classifiedPath,
-            pmToolConfig
-          );
-          } // End of legacy approach (else block)
+        if (!dbAvailable) {
+          throw new Error("Database is required for export. Please ensure DATABASE_URL is set and the database is accessible.");
+        }
+
+        let result: Awaited<ReturnType<typeof import("../export/groupingExporter.js").exportIssuesToPMTool>> | undefined;
+        let sourceFile: string = "";
+        
+        // Always use issue-centric export from database
+        if (!actualChannelId) {
+          throw new Error("channel_id is required for export. Provide channel_id or set DISCORD_DEFAULT_CHANNEL_ID in environment variables.");
+        }
+        
+        sourceFile = `database:issues:${actualChannelId}`;
+        console.error(`[Export] Using issue-centric export from database (GitHub issues primary, Discord context attached)`);
+        
+        const { exportIssuesToPMTool } = await import("../export/groupingExporter.js");
+        result = await exportIssuesToPMTool(pmToolConfig, {
+          include_closed: include_closed ?? false,
+          channelId: actualChannelId,
+        });
 
         if (!result) {
           throw new Error("Export failed: No result returned from export operation");
@@ -4229,25 +3981,17 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           issues_exported: result.issues_exported,
           errors: result.errors,
           source_file: sourceFile,
+          closed_items_count: result.closed_items_count,
+          closed_items_file: result.closed_items_file,
         };
         
-        // Save to file
+        // Save to file for backup
         await mkdir(resultsDir, { recursive: true });
         await writeFile(exportResultsPath, JSON.stringify(exportResultData, null, 2), "utf-8");
         
-        // Save to database only if database is configured and available
-        const { hasDatabaseConfig, getStorage } = await import("../storage/factory.js");
-        const useDatabase = hasDatabaseConfig();
-        
-        if (useDatabase) {
+        // Always save to database (we verified it's available above)
           try {
             const storage = getStorage();
-            
-            // Check if database is actually available
-            const dbAvailable = await storage.isAvailable();
-            if (!dbAvailable) {
-              console.error(`[Export] DATABASE_URL is set but database is not available. Skipping database save.`);
-            } else {
               await storage.saveExportResult({
                 id: exportResultId,
                 channelId: actualChannelId,
@@ -4271,14 +4015,10 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 closedItemsFile: result.closed_items_file,
               });
               console.error(`[Export] Saved export result to database: ${exportResultId}`);
-            }
           } catch (dbError) {
-            // Log but don't fail if database save fails (export results are tracking/audit data)
+          // Log but don't fail if database save fails (export already succeeded)
             const errorMessage = dbError instanceof Error ? dbError.message : String(dbError);
             console.error(`[Export] Failed to save export result to database:`, errorMessage);
-          }
-        } else {
-          console.error(`[Export] DATABASE_URL not set. Export result saved to JSON file only.`);
         }
 
         return {
@@ -4291,7 +4031,10 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 features_mapped: result.features_mapped,
                 issues_exported: result.issues_exported,
                 errors: result.errors,
+                closed_items_count: result.closed_items_count,
+                closed_items_file: result.closed_items_file,
                 results_saved_to: exportResultsPath,
+                database_record: exportResultId,
                 message: result.success
                   ? `Successfully exported to ${pmToolConfig.type}: ${result.issues_exported?.created || 0} created, ${result.issues_exported?.updated || 0} updated`
                   : `Export failed: ${result.errors?.join(", ")}`,
@@ -5840,6 +5583,439 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
       } catch (error) {
         logError("Grouping failed:", error);
+        throw new Error(`Grouping failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    case "group_github_issues": {
+      const {
+        channel_id,
+        include_closed = false,
+        min_similarity = 60,
+        force = false,
+      } = args as {
+        channel_id?: string;
+        include_closed?: boolean;
+        min_similarity?: number;
+        force?: boolean;
+      };
+
+      try {
+        const config = getConfig();
+        const actualChannelId = channel_id || config.discord.defaultChannelId;
+
+        if (!actualChannelId) {
+          throw new Error("Channel ID is required. Provide channel_id parameter or set DISCORD_DEFAULT_CHANNEL_ID.");
+        }
+
+        if (!process.env.OPENAI_API_KEY) {
+          throw new Error("OPENAI_API_KEY is required for issue grouping.");
+        }
+
+        // Verify database is available
+        const { hasDatabaseConfig, getStorage } = await import("../storage/factory.js");
+        if (!hasDatabaseConfig()) {
+          throw new Error("Database is required for issue grouping. Please configure DATABASE_URL.");
+        }
+        
+        const storage = getStorage();
+        const dbAvailable = await storage.isAvailable();
+        if (!dbAvailable) {
+          throw new Error("Database is not available. Please check your DATABASE_URL configuration.");
+        }
+
+        const { prisma } = await import("../storage/db/prisma.js");
+
+        // STEP 1: Get all GitHub issues from database
+        console.error(`[GroupIssues] Loading GitHub issues from database...`);
+        const allIssues = await prisma.gitHubIssue.findMany({
+          where: include_closed ? {} : { issueState: "open" },
+          orderBy: { issueNumber: 'desc' },
+        });
+        console.error(`[GroupIssues] Found ${allIssues.length} GitHub issues (${include_closed ? 'including closed' : 'open only'})`);
+
+        if (allIssues.length === 0) {
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                success: true,
+                message: "No GitHub issues found in database. Run fetch_github_issues first.",
+                stats: { total_issues: 0, groups: 0, ungrouped: 0 },
+              }, null, 2),
+            }],
+          };
+        }
+
+        // STEP 2: Compute/load issue embeddings from database
+        console.error(`[GroupIssues] Computing GitHub issue embeddings...`);
+        const { computeAndSaveIssueEmbeddings } = await import("../storage/db/embeddings.js");
+        // Parameters: apiKey, onProgress callback (undefined), force flag
+        const embeddingResult = await computeAndSaveIssueEmbeddings(process.env.OPENAI_API_KEY, undefined, force);
+        console.error(`[GroupIssues] GitHub issue embeddings: ${embeddingResult.computed} computed, ${embeddingResult.cached} cached, ${embeddingResult.total} total`);
+
+        // STEP 3: Load all issue embeddings for grouping
+        const issueEmbeddings = await prisma.issueEmbedding.findMany({
+          where: {
+            issueNumber: { in: allIssues.map(i => i.issueNumber) },
+          },
+        });
+        console.error(`[GroupIssues] Loaded ${issueEmbeddings.length} embeddings`);
+
+        // Create embedding map
+        const embeddingMap = new Map<number, number[]>();
+        for (const emb of issueEmbeddings) {
+          embeddingMap.set(emb.issueNumber, emb.embedding as number[]);
+        }
+
+        // STEP 4: Group issues by similarity using embeddings
+        console.error(`[GroupIssues] Grouping issues by similarity (threshold: ${min_similarity}%)...`);
+        
+        // Cosine similarity function
+        const cosineSimilarity = (a: number[], b: number[]): number => {
+          let dotProduct = 0;
+          let normA = 0;
+          let normB = 0;
+          for (let i = 0; i < a.length; i++) {
+            dotProduct += a[i] * b[i];
+            normA += a[i] * a[i];
+            normB += b[i] * b[i];
+          }
+          return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
+        };
+
+        // Group issues using Union-Find approach
+        const parent = new Map<number, number>();
+        const rank = new Map<number, number>();
+        
+        const find = (x: number): number => {
+          if (!parent.has(x)) {
+            parent.set(x, x);
+            rank.set(x, 0);
+          }
+          if (parent.get(x) !== x) {
+            parent.set(x, find(parent.get(x)!));
+          }
+          return parent.get(x)!;
+        };
+        
+        const union = (x: number, y: number): void => {
+          const px = find(x);
+          const py = find(y);
+          if (px === py) return;
+          
+          const rx = rank.get(px) || 0;
+          const ry = rank.get(py) || 0;
+          
+          if (rx < ry) {
+            parent.set(px, py);
+          } else if (rx > ry) {
+            parent.set(py, px);
+          } else {
+            parent.set(py, px);
+            rank.set(px, rx + 1);
+          }
+        };
+
+        // Compare all pairs of issues
+        const threshold = min_similarity / 100;
+        const issuesWithEmbeddings = allIssues.filter(i => embeddingMap.has(i.issueNumber));
+        
+        for (let i = 0; i < issuesWithEmbeddings.length; i++) {
+          for (let j = i + 1; j < issuesWithEmbeddings.length; j++) {
+            const embA = embeddingMap.get(issuesWithEmbeddings[i].issueNumber)!;
+            const embB = embeddingMap.get(issuesWithEmbeddings[j].issueNumber)!;
+            const similarity = cosineSimilarity(embA, embB);
+            
+            if (similarity >= threshold) {
+              union(issuesWithEmbeddings[i].issueNumber, issuesWithEmbeddings[j].issueNumber);
+            }
+          }
+        }
+
+        // Build groups from Union-Find
+        const groupMap = new Map<number, number[]>();
+        for (const issue of allIssues) {
+          const root = find(issue.issueNumber);
+          if (!groupMap.has(root)) {
+            groupMap.set(root, []);
+          }
+          groupMap.get(root)!.push(issue.issueNumber);
+        }
+
+        // Separate single-issue "groups" (ungrouped) from multi-issue groups
+        const groups: Array<{ id: string; issues: number[]; title: string }> = [];
+        const ungroupedIssues: number[] = [];
+        
+        for (const [root, issueNumbers] of groupMap) {
+          if (issueNumbers.length > 1) {
+            // Multi-issue group
+            const groupIssues = allIssues.filter(i => issueNumbers.includes(i.issueNumber));
+            const title = groupIssues[0]?.issueTitle || `Group ${root}`;
+            groups.push({
+              id: `issue-group-${root}`,
+              issues: issueNumbers,
+              title,
+            });
+          } else {
+            // Single issue - ungrouped
+            ungroupedIssues.push(issueNumbers[0]);
+          }
+        }
+
+        console.error(`[GroupIssues] Created ${groups.length} groups, ${ungroupedIssues.length} ungrouped issues`);
+
+        // STEP 5: Match Discord threads to issues using embeddings
+        console.error(`[GroupIssues] Matching Discord threads to issues using embeddings...`);
+        
+        // First, compute thread embeddings if needed
+        console.error(`[GroupIssues] Computing Discord thread embeddings...`);
+        const { computeAndSaveThreadEmbeddings } = await import("../storage/db/embeddings.js");
+        const threadEmbeddingResult = await computeAndSaveThreadEmbeddings(process.env.OPENAI_API_KEY, {
+          channelId: actualChannelId,
+        });
+        console.error(`[GroupIssues] Thread embeddings: ${threadEmbeddingResult.computed} computed, ${threadEmbeddingResult.cached} cached`);
+
+        // Load all thread embeddings
+        const threadEmbeddings = await prisma.threadEmbedding.findMany({
+          include: {
+            thread: true,
+          },
+        });
+        console.error(`[GroupIssues] Loaded ${threadEmbeddings.length} thread embeddings`);
+
+        // Create thread embedding map
+        const threadEmbeddingMap = new Map<string, { embedding: number[]; threadName: string | null }>();
+        for (const emb of threadEmbeddings) {
+          threadEmbeddingMap.set(emb.threadId, {
+            embedding: emb.embedding as number[],
+            threadName: emb.thread.threadName,
+          });
+        }
+
+        // Match threads to issues using cosine similarity
+        const threadMatchThreshold = min_similarity / 100; // Use same threshold
+        const issueThreadsMap = new Map<number, Array<{ threadId: string; threadName: string | null; similarity: number }>>();
+        const newMatches: Array<{ threadId: string; issueNumber: number; similarity: number; issueTitle: string; issueUrl: string }> = [];
+
+        for (const [threadId, threadData] of threadEmbeddingMap) {
+          for (const issue of allIssues) {
+            const issueEmb = embeddingMap.get(issue.issueNumber);
+            if (!issueEmb) continue;
+
+            const similarity = cosineSimilarity(threadData.embedding, issueEmb);
+            
+            if (similarity >= threadMatchThreshold) {
+              // Add to map
+              if (!issueThreadsMap.has(issue.issueNumber)) {
+                issueThreadsMap.set(issue.issueNumber, []);
+              }
+              issueThreadsMap.get(issue.issueNumber)!.push({
+                threadId,
+                threadName: threadData.threadName,
+                similarity: similarity * 100, // Convert to percentage
+              });
+
+              // Track for database save
+              newMatches.push({
+                threadId,
+                issueNumber: issue.issueNumber,
+                similarity: similarity * 100,
+                issueTitle: issue.issueTitle,
+                issueUrl: issue.issueUrl,
+              });
+            }
+          }
+        }
+
+        console.error(`[GroupIssues] Found ${newMatches.length} thread-issue matches using embeddings`);
+
+        // Save matches to issue_thread_matches table (issue-centered)
+        if (newMatches.length > 0) {
+          console.error(`[GroupIssues] Saving issue-thread matches to database...`);
+          
+          // Get thread details for message counts and timestamps
+          const threadIds = [...new Set(newMatches.map(m => m.threadId))];
+          const threadDetails = await prisma.classifiedThread.findMany({
+            where: { threadId: { in: threadIds } },
+            select: {
+              threadId: true,
+              threadName: true,
+              firstMessageUrl: true,
+              messageCount: true,
+              firstMessageTimestamp: true,
+            },
+          });
+          const threadDetailMap = new Map(threadDetails.map(t => [t.threadId, t]));
+
+          for (const match of newMatches) {
+            const threadDetail = threadDetailMap.get(match.threadId);
+            try {
+              await prisma.issueThreadMatch.upsert({
+                where: {
+                  issueNumber_threadId: {
+                    issueNumber: match.issueNumber,
+                    threadId: match.threadId,
+                  },
+                },
+                create: {
+                  issueNumber: match.issueNumber,
+                  threadId: match.threadId,
+                  threadName: threadDetail?.threadName || null,
+                  threadUrl: threadDetail?.firstMessageUrl || null,
+                  similarityScore: match.similarity,
+                  matchMethod: "embedding",
+                  messageCount: threadDetail?.messageCount || 0,
+                  firstMessageAt: threadDetail?.firstMessageTimestamp || null,
+                },
+                update: {
+                  similarityScore: match.similarity,
+                  threadName: threadDetail?.threadName || null,
+                  messageCount: threadDetail?.messageCount || 0,
+                },
+              });
+            } catch (matchError) {
+              console.error(`[GroupIssues] Error saving match for issue ${match.issueNumber} -> thread ${match.threadId}:`, matchError);
+            }
+          }
+          
+          // Update issues to mark them as matched to threads
+          const matchedIssueNumbers = [...new Set(newMatches.map(m => m.issueNumber))];
+          await prisma.gitHubIssue.updateMany({
+            where: { issueNumber: { in: matchedIssueNumbers } },
+            data: { matchedToThreads: true },
+          });
+          
+          console.error(`[GroupIssues] Saved ${newMatches.length} issue-thread matches`);
+        }
+
+        // STEP 6: Save groups to database
+        console.error(`[GroupIssues] Saving groups to database...`);
+        
+        // Ensure channel exists
+        await prisma.channel.upsert({
+          where: { id: actualChannelId },
+          create: { id: actualChannelId },
+          update: {},
+        });
+
+        // Clear existing groups if force=true
+        if (force) {
+          await prisma.groupThread.deleteMany({
+            where: { group: { channelId: actualChannelId } },
+          });
+          await prisma.group.deleteMany({
+            where: { channelId: actualChannelId },
+          });
+          console.error(`[GroupIssues] Cleared existing groups`);
+        }
+
+        // Save groups
+        for (const group of groups) {
+          // Collect all threads for all issues in this group
+          const groupThreads: Array<{ threadId: string; similarity: number }> = [];
+          for (const issueNum of group.issues) {
+            const threads = issueThreadsMap.get(issueNum) || [];
+            for (const t of threads) {
+              if (!groupThreads.find(gt => gt.threadId === t.threadId)) {
+                groupThreads.push({ threadId: t.threadId, similarity: t.similarity });
+              }
+            }
+          }
+
+          const avgSimilarity = groupThreads.length > 0
+            ? groupThreads.reduce((sum, t) => sum + t.similarity, 0) / groupThreads.length
+            : 0;
+
+          await prisma.group.upsert({
+            where: { id: group.id },
+            create: {
+              id: group.id,
+              channelId: actualChannelId,
+              suggestedTitle: group.title,
+              githubIssueNumber: group.issues[0], // Primary issue
+              avgSimilarity,
+              threadCount: groupThreads.length,
+              isCrossCutting: false,
+              status: "pending",
+              affectsFeatures: [],
+            },
+            update: {
+              suggestedTitle: group.title,
+              githubIssueNumber: group.issues[0],
+              avgSimilarity,
+              threadCount: groupThreads.length,
+            },
+          });
+
+          // Update issues to mark them as grouped
+          await prisma.gitHubIssue.updateMany({
+            where: { issueNumber: { in: group.issues } },
+            data: { inGroup: true, groupId: group.id },
+          });
+        }
+
+        // Mark ungrouped issues
+        await prisma.gitHubIssue.updateMany({
+          where: { issueNumber: { in: ungroupedIssues } },
+          data: { inGroup: false, groupId: null },
+        });
+
+        console.error(`[GroupIssues] Saved ${groups.length} groups to database`);
+
+        // Build response with details
+        const groupDetails = groups.map(g => {
+          const groupIssues = allIssues.filter(i => g.issues.includes(i.issueNumber));
+          const threadCount = g.issues.reduce((sum, num) => sum + (issueThreadsMap.get(num)?.length || 0), 0);
+          return {
+            id: g.id,
+            title: g.title,
+            issue_count: g.issues.length,
+            issues: g.issues.map(num => {
+              const issue = groupIssues.find(i => i.issueNumber === num);
+              return {
+                number: num,
+                title: issue?.issueTitle,
+                state: issue?.issueState,
+              };
+            }),
+            discord_thread_count: threadCount,
+          };
+        });
+
+        const ungroupedDetails = ungroupedIssues.slice(0, 20).map(num => {
+          const issue = allIssues.find(i => i.issueNumber === num);
+          const threads = issueThreadsMap.get(num) || [];
+          return {
+            issue_number: num,
+            title: issue?.issueTitle,
+            state: issue?.issueState,
+            discord_thread_count: threads.length,
+          };
+        });
+
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              success: true,
+              message: `Grouped ${allIssues.length} GitHub issues: ${groups.length} groups, ${ungroupedIssues.length} ungrouped`,
+              stats: {
+                total_issues: allIssues.length,
+                groups: groups.length,
+                ungrouped: ungroupedIssues.length,
+                total_issues_in_groups: groups.reduce((sum, g) => sum + g.issues.length, 0),
+                discord_threads_matched: newMatches.length,
+              },
+              groups: groupDetails,
+              ungrouped_sample: ungroupedDetails,
+              ungrouped_count: ungroupedIssues.length,
+            }, null, 2),
+          }],
+        };
+
+      } catch (error) {
+        logError("Group GitHub issues failed:", error);
         throw new Error(`Grouping failed: ${error instanceof Error ? error.message : String(error)}`);
       }
     }

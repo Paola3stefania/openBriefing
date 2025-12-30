@@ -211,6 +211,7 @@ model GitHubIssue {
 
   group                Group?   @relation(fields: [groupId], references: [id])
   embedding            IssueEmbedding?
+  threadMatches        IssueThreadMatch[] // Issue-centered thread matches
 
   @@index([inGroup])
   @@index([matchedToThreads])
@@ -219,6 +220,31 @@ model GitHubIssue {
   @@index([groupId])
   @@index([issueAssignees], type: Gin)
   @@map("github_issues")
+}
+
+// Issue-centered thread matches (GitHub issue is primary, Discord threads are attached)
+model IssueThreadMatch {
+  id              Int      @id @default(autoincrement())
+  issueNumber     Int      @map("issue_number")
+  threadId        String   @map("thread_id")
+  threadName      String?  @map("thread_name")
+  threadUrl       String?  @map("thread_url")
+  similarityScore Decimal  @map("similarity_score") @db.Decimal(5, 2) // 0-100 scale
+  matchMethod     String   @default("embedding") @map("match_method") // 'embedding' | 'keyword' | 'manual'
+  messageCount    Int      @default(0) @map("message_count")
+  firstMessageAt  DateTime? @map("first_message_at")
+  lastMessageAt   DateTime? @map("last_message_at")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  issue           GitHubIssue @relation(fields: [issueNumber], references: [issueNumber], onDelete: Cascade)
+
+  @@unique([issueNumber, threadId])
+  @@index([issueNumber])
+  @@index([threadId])
+  @@index([similarityScore(sort: Desc)])
+  @@index([matchMethod])
+  @@map("issue_thread_matches")
 }
 
 model IssueEmbedding {

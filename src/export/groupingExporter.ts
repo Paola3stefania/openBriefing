@@ -2872,26 +2872,93 @@ export async function exportIssuesToPMTool(
 
     log(`Found ${allIssues.length} GitHub issues to export (${includeClosed ? 'including closed' : 'open only'})`);
 
-    // STEP 2: Load Discord cache to get thread messages
+    // STEP 2: Load Discord messages from database
     let discordCache: import("../storage/cache/discordCache.js").DiscordCache | null = null;
     if (channelId) {
       try {
-        const { loadDiscordCache } = await import("../storage/cache/discordCache.js");
-        const { join } = await import("path");
-        const { existsSync } = await import("fs");
-        const config = getConfig();
-        const cacheDir = join(process.cwd(), config.paths.cacheDir);
-        const cacheFileName = `discord-messages-${channelId}.json`;
-        const cachePath = join(cacheDir, cacheFileName);
+        // Load messages from database
+        const dbMessages = await prisma.discordMessage.findMany({
+          where: { channelId },
+          orderBy: { createdAt: 'asc' },
+        });
         
-        if (existsSync(cachePath)) {
-          discordCache = await loadDiscordCache(cachePath);
-          log(`Loaded Discord cache with ${Object.keys(discordCache.threads || {}).length} threads`);
+        if (dbMessages.length > 0) {
+          // Convert database messages to DiscordCache format
+          const threads: Record<string, import("../storage/cache/discordCache.js").ThreadMessages> = {};
+          const mainMessages: import("../storage/cache/discordCache.js").DiscordMessage[] = [];
+          
+          for (const msg of dbMessages) {
+            const discordMsg: import("../storage/cache/discordCache.js").DiscordMessage = {
+              id: msg.id,
+              content: msg.content,
+              author: {
+                id: msg.authorId,
+                username: msg.authorUsername || "unknown",
+                discriminator: msg.authorDiscriminator || "0",
+                bot: msg.authorBot,
+                avatar: msg.authorAvatar || null,
+              },
+              timestamp: msg.timestamp,
+              created_at: msg.createdAt.toISOString(),
+              edited_at: msg.editedAt?.toISOString() || null,
+              channel_id: msg.channelId,
+              channel_name: msg.channelName || undefined,
+              guild_id: msg.guildId || undefined,
+              guild_name: msg.guildName || undefined,
+              attachments: msg.attachments as import("../storage/cache/discordCache.js").DiscordMessage["attachments"],
+              embeds: msg.embeds,
+              mentions: msg.mentions,
+              reactions: msg.reactions as import("../storage/cache/discordCache.js").DiscordMessage["reactions"],
+              url: msg.url || undefined,
+            };
+            
+            if (msg.threadId) {
+              // Message belongs to a thread
+              if (!threads[msg.threadId]) {
+                threads[msg.threadId] = {
+                  thread_id: msg.threadId,
+                  thread_name: msg.threadName || "Unknown Thread",
+                  message_count: 0,
+                  oldest_message_date: null,
+                  newest_message_date: null,
+                  messages: [],
+                };
+              }
+              threads[msg.threadId].messages.push(discordMsg);
+              threads[msg.threadId].message_count = threads[msg.threadId].messages.length;
+              // Update date range
+              const msgDate = msg.createdAt.toISOString();
+              if (!threads[msg.threadId].oldest_message_date || msgDate < threads[msg.threadId].oldest_message_date!) {
+                threads[msg.threadId].oldest_message_date = msgDate;
+              }
+              if (!threads[msg.threadId].newest_message_date || msgDate > threads[msg.threadId].newest_message_date!) {
+                threads[msg.threadId].newest_message_date = msgDate;
+              }
+            } else {
+              // Main channel message
+              mainMessages.push(discordMsg);
+            }
+          }
+          
+          // Build the cache object
+          const dates = dbMessages.map(m => m.createdAt);
+          discordCache = {
+            fetched_at: new Date().toISOString(),
+            channel_id: channelId,
+            channel_name: dbMessages[0]?.channelName || undefined,
+            total_count: dbMessages.length,
+            oldest_message_date: dates.length > 0 ? new Date(Math.min(...dates.map(d => d.getTime()))).toISOString() : null,
+            newest_message_date: dates.length > 0 ? new Date(Math.max(...dates.map(d => d.getTime()))).toISOString() : null,
+            threads,
+            main_messages: mainMessages,
+          };
+          
+          log(`Loaded ${dbMessages.length} Discord messages from database (${Object.keys(threads).length} threads)`);
         } else {
-          log(`Discord cache not found at ${cachePath}, continuing without Discord context`);
+          log(`No Discord messages found in database for channel ${channelId}`);
         }
       } catch (error) {
-        logError("Error loading Discord cache:", error);
+        logError("Error loading Discord messages from database:", error);
         // Continue without Discord context
       }
     }
@@ -2955,17 +3022,10 @@ export async function exportIssuesToPMTool(
 
     for (const issue of issuesWithClassification) {
       try {
-        // Find Discord threads that match this issue
-        const threadMatches = await prisma.threadIssueMatch.findMany({
+        // Find Discord threads that match this issue (from issue-centered table)
+        const threadMatches = await prisma.issueThreadMatch.findMany({
           where: {
             issueNumber: issue.issueNumber,
-          },
-          include: {
-            thread: {
-              include: {
-                channel: true,
-              },
-            },
           },
           orderBy: {
             similarityScore: 'desc',
