@@ -337,6 +337,14 @@ function calculatePriority(options: {
     }
   }
   
+  // Documentation and assistance - LOW priority
+  const lowPriorityPatterns = ["documentation", "assistance", "docs", "question", "how to", "help"];
+  for (const pattern of lowPriorityPatterns) {
+    if (normalizedLabels.some(l => l.includes(pattern)) || normalizedTitle.includes(pattern)) {
+      return "low";
+    }
+  }
+  
   // Ungrouped items are lower priority (less clear impact)
   if (is_ungrouped) {
     return isUrgent ? "medium" : "low";

@@ -7029,7 +7029,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         // Valid labels
-        const validLabels = ["security", "bug", "regression", "urgent", "enhancement"];
+        const validLabels = ["security", "bug", "regression", "urgent", "enhancement", "documentation", "assistance"];
         
         // Process in batches of 10
         const batchSize = 10;
@@ -7060,24 +7060,29 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
                     content: `You are a technical issue classifier. Analyze each issue and return applicable labels.
 
 Available labels:
-- security: Security vulnerabilities, auth issues, data leaks, XSS, CSRF, injection
-- bug: Software defects, errors, crashes, things not working
+- security: Security vulnerabilities, auth bypasses, data leaks, XSS, CSRF, injection
+- bug: Software defects, errors, crashes, things not working, unexpected behavior, "not found" errors
 - regression: Something that worked before but broke after update/release
 - urgent: Critical issues, production outages, blockers
-- enhancement: Feature requests, improvements, suggestions
+- enhancement: Feature requests, improvements, suggestions, new functionality
+- documentation: Documentation issues, missing docs, unclear docs, doc improvements
+- assistance: Questions, help requests, "how to" questions, guidance needed
 
 Rules:
-1. Return one line per issue: "[number] label1, label2" or "[number] none"
+1. Return one line per issue: "[number] label1, label2"
 2. If regression, also include bug
-3. Be conservative - only label if confident
-4. Questions/docs are "none"
+3. EVERY issue must have at least one label - pick the best fit
+4. Error messages like "not found", "failed", "error" are usually bugs
+5. "How to", "Guidance", "Help" are assistance
+6. "docs:", "documentation", "clarify" are documentation
 
 Example output:
 [1] bug
 [2] security
 [3] regression, bug
 [4] enhancement
-[5] none`
+[5] documentation
+[6] assistance`
                   },
                   {
                     role: "user",
