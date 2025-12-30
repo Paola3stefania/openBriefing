@@ -902,16 +902,27 @@ export class LinearIntegration extends BasePMTool {
       }
     }
     
-    // Discord threads (if multiple)
+    // Discord threads - always show if present
     if (issue.metadata?.discord_threads) {
       const discordThreads = issue.metadata.discord_threads as Array<{
+        thread_id: string;
         thread_name: string;
-        thread_url: string;
+        thread_url: string | null;
+        similarity?: number;
+        message_count?: number;
       }>;
-      if (discordThreads.length > 1) {
-        description += `\n**Additional Discord Discussions:**\n`;
+      if (discordThreads.length > 0) {
+        description += `\n**Related Discord Discussions:**\n`;
         for (const thread of discordThreads) {
-          description += `- [${thread.thread_name}](${thread.thread_url})\n`;
+          if (thread.thread_url) {
+            description += `- [${thread.thread_name}](${thread.thread_url})`;
+            if (thread.message_count) {
+              description += ` (${thread.message_count} messages)`;
+            }
+            description += `\n`;
+          } else {
+            description += `- ${thread.thread_name}\n`;
+          }
         }
       }
     }
@@ -1085,27 +1096,29 @@ export class LinearIntegration extends BasePMTool {
   /**
    * Map label names to Linear label IDs
    * Creates labels if they don't exist
+   * Returns unique label IDs (no duplicates)
    */
   private mapLabels(labels: string[]): string[] {
-    const labelIds: string[] = [];
+    const labelIdSet = new Set<string>();
     
     for (const label of labels) {
       const normalizedName = label.toLowerCase();
       const labelId = this.labelCache.get(normalizedName);
       if (labelId) {
-        labelIds.push(labelId);
+        labelIdSet.add(labelId);
       }
     }
     
-    return labelIds;
+    return Array.from(labelIdSet);
   }
 
   /**
    * Map labels asynchronously - creates missing labels
    * Use this when you need to ensure labels exist
+   * Returns unique label IDs (no duplicates)
    */
   async mapLabelsAsync(labels: string[]): Promise<string[]> {
-    const labelIds: string[] = [];
+    const labelIdSet = new Set<string>();
     
     for (const label of labels) {
       const normalizedName = label.toLowerCase();
@@ -1117,11 +1130,11 @@ export class LinearIntegration extends BasePMTool {
       }
       
       if (labelId) {
-        labelIds.push(labelId);
+        labelIdSet.add(labelId);
       }
     }
     
-    return labelIds;
+    return Array.from(labelIdSet);
   }
 }
 

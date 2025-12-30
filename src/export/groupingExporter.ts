@@ -3095,10 +3095,13 @@ export async function exportIssuesToPMTool(
           for (const threadId of threadIds.slice(0, 5)) { // Limit to top 5 threads
             const threadMatch = groupThreadMatches.find(m => m.threadId === threadId);
             const threadData = discordThreads[threadId];
+            const threadName = threadMatch?.threadName || threadId;
             
-            descriptionParts.push(`### ${threadMatch?.threadName || threadId}`);
             if (threadMatch?.threadUrl) {
-              descriptionParts.push(`[View Thread](${threadMatch.threadUrl})`);
+              descriptionParts.push(`### [${threadName}](${threadMatch.threadUrl})`);
+              descriptionParts.push(`> **Discord Thread:** ${threadMatch.threadUrl}`);
+            } else {
+              descriptionParts.push(`### ${threadName}`);
             }
             descriptionParts.push(`- **Similarity:** ${threadMatch?.similarityScore || 0}%`);
             descriptionParts.push(`- **Messages:** ${threadMatch?.messageCount || threadData?.message_count || 0}`);
@@ -3140,6 +3143,15 @@ export async function exportIssuesToPMTool(
           ? issueFeatures[0] 
           : { id: "general", name: "General" };
 
+        // Build discord_threads array with full details
+        const discordThreadsMetadata = groupThreadMatches.slice(0, 10).map(m => ({
+          thread_id: m.threadId,
+          thread_name: m.threadName || m.threadId,
+          thread_url: m.threadUrl,
+          similarity: Number(m.similarityScore),
+          message_count: m.messageCount || 0,
+        }));
+
         pmIssues.push({
           title: group.suggestedTitle || `Issue Group ${group.id}`,
           description: descriptionParts.join("\n"),
@@ -3156,6 +3168,7 @@ export async function exportIssuesToPMTool(
             issue_numbers: groupIssueList.map(i => i.issueNumber),
             discord_threads_count: threadIds.length,
             discord_thread_ids: threadIds,
+            discord_threads: discordThreadsMetadata,
           },
           linear_issue_id: group.linearIssueId || undefined,
           linear_issue_identifier: group.linearIssueIdentifier || undefined,
@@ -3211,10 +3224,13 @@ export async function exportIssuesToPMTool(
           
           for (const match of threadMatches.slice(0, 3)) {
             const threadData = discordThreads[match.threadId];
+            const threadName = match.threadName || match.threadId;
             
-            descriptionParts.push(`### ${match.threadName || match.threadId}`);
             if (match.threadUrl) {
-              descriptionParts.push(`[View Thread](${match.threadUrl})`);
+              descriptionParts.push(`### [${threadName}](${match.threadUrl})`);
+              descriptionParts.push(`> **Discord Thread:** ${match.threadUrl}`);
+            } else {
+              descriptionParts.push(`### ${threadName}`);
             }
             descriptionParts.push(`- **Similarity:** ${match.similarityScore}%`);
             descriptionParts.push(`- **Messages:** ${match.messageCount || threadData?.message_count || 0}`);
@@ -3244,6 +3260,15 @@ export async function exportIssuesToPMTool(
           ? issueFeatures[0] 
           : { id: "general", name: "General" };
 
+        // Build discord_threads array with full details
+        const discordThreadsMetadata = threadMatches.slice(0, 10).map(m => ({
+          thread_id: m.threadId,
+          thread_name: m.threadName || m.threadId,
+          thread_url: m.threadUrl,
+          similarity: Number(m.similarityScore),
+          message_count: m.messageCount || 0,
+        }));
+
         pmIssues.push({
           title: issue.issueTitle || `GitHub Issue #${issue.issueNumber}`,
           description: descriptionParts.join("\n"),
@@ -3259,6 +3284,7 @@ export async function exportIssuesToPMTool(
             issue_state: issue.issueState,
             discord_threads_count: threadMatches.length,
             discord_thread_ids: threadIds,
+            discord_threads: discordThreadsMetadata,
           },
           linear_issue_id: issue.linearIssueId || undefined,
           linear_issue_identifier: issue.linearIssueIdentifier || undefined,

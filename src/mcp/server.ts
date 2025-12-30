@@ -578,6 +578,35 @@ const tools: Tool[] = [
     },
   },
   {
+    name: "match_issues_to_threads",
+    description: "[Issue-centric] Match GitHub issues to Discord threads using embedding similarity. Saves matches to issue_thread_matches table. Can run with lower threshold than grouping to find more related discussions. Requires OPENAI_API_KEY for embedding computation.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        min_similarity: {
+          type: "number",
+          description: "Minimum similarity threshold (0-100) for matching issues to threads. Default: 50 (lower than grouping to find more discussions).",
+          default: 50,
+        },
+        include_closed: {
+          type: "boolean",
+          description: "Include closed GitHub issues (default: false, only open issues)",
+          default: false,
+        },
+        force: {
+          type: "boolean",
+          description: "If true, recompute all matches. If false (default), only match issues that don't have matches yet.",
+          default: false,
+        },
+        channel_id: {
+          type: "string",
+          description: "Discord channel ID to match threads from. If not specified, uses all classified threads.",
+        },
+      },
+      required: [],
+    },
+  },
+  {
     name: "classify_linear_issues",
     description: "Fetch all issues from Linear UNMute team and classify them with existing projects (features) or create new projects if needed. Requires PM_TOOL_API_KEY and PM_TOOL_TEAM_ID.",
     inputSchema: {
@@ -5840,11 +5869,12 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           });
         }
 
-        // Match threads to issues using cosine similarity
+        // STEP 5b: Match threads to issues using embeddings (direct comparison)
         const threadMatchThreshold = min_similarity / 100; // Use same threshold
         const issueThreadsMap = new Map<number, Array<{ threadId: string; threadName: string | null; similarity: number }>>();
-        const newMatches: Array<{ threadId: string; issueNumber: number; similarity: number; issueTitle: string; issueUrl: string }> = [];
+        const newMatches: Array<{ threadId: string; issueNumber: number; similarity: number; issueTitle: string; issueUrl: string; matchMethod: string }> = [];
 
+        console.error(`[GroupIssues] Matching threads to issues using embeddings...`);
         for (const [threadId, threadData] of threadEmbeddingMap) {
           for (const issue of allIssues) {
             const issueEmb = embeddingMap.get(issue.issueNumber);
@@ -5870,6 +5900,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 similarity: similarity * 100,
                 issueTitle: issue.issueTitle,
                 issueUrl: issue.issueUrl,
+                matchMethod: "embedding",
               });
             }
           }
@@ -5911,12 +5942,13 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
                   threadName: threadDetail?.threadName || null,
                   threadUrl: threadDetail?.firstMessageUrl || null,
                   similarityScore: match.similarity,
-                  matchMethod: "embedding",
+                  matchMethod: match.matchMethod, // embedding_with_code when code context used
                   messageCount: threadDetail?.messageCount || 0,
                   firstMessageAt: threadDetail?.firstMessageTimestamp || null,
                 },
                 update: {
                   similarityScore: match.similarity,
+                  matchMethod: match.matchMethod,
                   threadName: threadDetail?.threadName || null,
                   messageCount: threadDetail?.messageCount || 0,
                 },
@@ -7171,6 +7203,305 @@ Example output:
       } catch (error) {
         logError("Issue labeling failed:", error);
         throw new Error(`Issue labeling failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    case "match_issues_to_threads": {
+      const {
+        min_similarity = 50,
+        include_closed = false,
+        force = false,
+        channel_id,
+      } = args as {
+        min_similarity?: number;
+        include_closed?: boolean;
+        force?: boolean;
+        channel_id?: string;
+      };
+
+      try {
+        const apiKey = process.env.OPENAI_API_KEY;
+        if (!apiKey) {
+          throw new Error("OPENAI_API_KEY is required for computing embeddings.");
+        }
+
+        // Verify database is available
+        const { hasDatabaseConfig, getStorage } = await import("../storage/factory.js");
+        if (!hasDatabaseConfig()) {
+          throw new Error("Database is required. Please configure DATABASE_URL.");
+        }
+
+        const storage = getStorage();
+        const dbAvailable = await storage.isAvailable();
+        if (!dbAvailable) {
+          throw new Error("Database is not available. Please check your DATABASE_URL configuration.");
+        }
+
+        const { prisma } = await import("../storage/db/prisma.js");
+
+        console.error(`[MatchIssues] Starting issue-to-thread matching (threshold: ${min_similarity}%)...`);
+
+        // STEP 1: Load GitHub issues
+        console.error(`[MatchIssues] Loading GitHub issues...`);
+        const issueFilter: { issueState?: string; matchedToThreads?: boolean } = {};
+        if (!include_closed) {
+          issueFilter.issueState = "open";
+        }
+        if (!force) {
+          // Only process issues without matches
+          issueFilter.matchedToThreads = false;
+        }
+
+        const allIssues = await prisma.gitHubIssue.findMany({
+          where: issueFilter,
+          select: {
+            issueNumber: true,
+            issueTitle: true,
+            issueUrl: true,
+          },
+        });
+
+        if (allIssues.length === 0) {
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                success: true,
+                message: force 
+                  ? "No issues found in database."
+                  : "All issues already have thread matches. Use force=true to re-match.",
+                stats: { issues_processed: 0, matches_found: 0, issues_matched: 0 },
+              }, null, 2),
+            }],
+          };
+        }
+        console.error(`[MatchIssues] Found ${allIssues.length} issues to process`);
+
+        // STEP 2: Compute/load issue embeddings
+        console.error(`[MatchIssues] Computing issue embeddings...`);
+        const { computeAndSaveIssueEmbeddings } = await import("../storage/db/embeddings.js");
+        const embeddingResult = await computeAndSaveIssueEmbeddings(apiKey, undefined, false);
+        console.error(`[MatchIssues] Issue embeddings: ${embeddingResult.computed} computed, ${embeddingResult.cached} cached`);
+
+        // Load issue embeddings
+        const issueEmbeddings = await prisma.issueEmbedding.findMany({
+          where: {
+            issueNumber: { in: allIssues.map(i => i.issueNumber) },
+          },
+        });
+        console.error(`[MatchIssues] Loaded ${issueEmbeddings.length} issue embeddings`);
+
+        // Create issue embedding map
+        const issueEmbeddingMap = new Map<number, number[]>();
+        for (const emb of issueEmbeddings) {
+          issueEmbeddingMap.set(emb.issueNumber, emb.embedding as number[]);
+        }
+
+        // STEP 3: Compute/load thread embeddings
+        console.error(`[MatchIssues] Computing thread embeddings...`);
+        const { computeAndSaveThreadEmbeddings } = await import("../storage/db/embeddings.js");
+        const threadEmbeddingOpts = channel_id ? { channelId: channel_id } : {};
+        const threadEmbResult = await computeAndSaveThreadEmbeddings(apiKey, threadEmbeddingOpts);
+        console.error(`[MatchIssues] Thread embeddings: ${threadEmbResult.computed} computed, ${threadEmbResult.cached} cached`);
+
+        // Load thread embeddings
+        const threadEmbeddingQuery = channel_id 
+          ? { thread: { channelId: channel_id } }
+          : {};
+        const threadEmbeddings = await prisma.threadEmbedding.findMany({
+          where: threadEmbeddingQuery,
+          include: {
+            thread: {
+              select: {
+                threadId: true,
+                threadName: true,
+                firstMessageUrl: true,
+                messageCount: true,
+                firstMessageTimestamp: true,
+              },
+            },
+          },
+        });
+        console.error(`[MatchIssues] Loaded ${threadEmbeddings.length} thread embeddings`);
+
+        if (threadEmbeddings.length === 0) {
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                success: false,
+                message: "No thread embeddings found. Run classify_messages first to create classified threads.",
+                stats: { issues_processed: 0, matches_found: 0, issues_matched: 0 },
+              }, null, 2),
+            }],
+          };
+        }
+
+        // STEP 4: Match issues to threads using cosine similarity
+        console.error(`[MatchIssues] Matching issues to threads...`);
+
+        // Cosine similarity function
+        const cosineSimilarity = (a: number[], b: number[]): number => {
+          let dotProduct = 0;
+          let normA = 0;
+          let normB = 0;
+          for (let i = 0; i < a.length; i++) {
+            dotProduct += a[i] * b[i];
+            normA += a[i] * a[i];
+            normB += b[i] * b[i];
+          }
+          return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
+        };
+
+        const threshold = min_similarity / 100;
+        const newMatches: Array<{
+          issueNumber: number;
+          threadId: string;
+          threadName: string | null;
+          threadUrl: string | null;
+          similarity: number;
+          messageCount: number;
+          firstMessageAt: Date | null;
+        }> = [];
+
+        // Compare each thread to each issue
+        for (const threadEmb of threadEmbeddings) {
+          const threadVector = threadEmb.embedding as number[];
+          
+          for (const issue of allIssues) {
+            const issueVector = issueEmbeddingMap.get(issue.issueNumber);
+            if (!issueVector) continue;
+
+            const similarity = cosineSimilarity(threadVector, issueVector);
+            
+            if (similarity >= threshold) {
+              newMatches.push({
+                issueNumber: issue.issueNumber,
+                threadId: threadEmb.threadId,
+                threadName: threadEmb.thread.threadName,
+                threadUrl: threadEmb.thread.firstMessageUrl,
+                similarity: similarity * 100, // Convert to percentage
+                messageCount: threadEmb.thread.messageCount,
+                firstMessageAt: threadEmb.thread.firstMessageTimestamp,
+              });
+            }
+          }
+        }
+
+        console.error(`[MatchIssues] Found ${newMatches.length} matches above ${min_similarity}% threshold`);
+
+        // STEP 5: Save matches to database
+        if (newMatches.length > 0) {
+          console.error(`[MatchIssues] Saving matches to database...`);
+          
+          let savedCount = 0;
+          let errorCount = 0;
+
+          for (const match of newMatches) {
+            try {
+              await prisma.issueThreadMatch.upsert({
+                where: {
+                  issueNumber_threadId: {
+                    issueNumber: match.issueNumber,
+                    threadId: match.threadId,
+                  },
+                },
+                create: {
+                  issueNumber: match.issueNumber,
+                  threadId: match.threadId,
+                  threadName: match.threadName,
+                  threadUrl: match.threadUrl,
+                  similarityScore: match.similarity,
+                  matchMethod: "embedding",
+                  messageCount: match.messageCount,
+                  firstMessageAt: match.firstMessageAt,
+                },
+                update: {
+                  similarityScore: match.similarity,
+                  threadName: match.threadName,
+                  messageCount: match.messageCount,
+                },
+              });
+              savedCount++;
+            } catch (matchError) {
+              console.error(`[MatchIssues] Error saving match ${match.issueNumber} -> ${match.threadId}:`, matchError);
+              errorCount++;
+            }
+          }
+
+          // Update issues to mark them as matched
+          const matchedIssueNumbers = [...new Set(newMatches.map(m => m.issueNumber))];
+          await prisma.gitHubIssue.updateMany({
+            where: { issueNumber: { in: matchedIssueNumbers } },
+            data: { matchedToThreads: true },
+          });
+
+          console.error(`[MatchIssues] Saved ${savedCount} matches, ${errorCount} errors`);
+          console.error(`[MatchIssues] Updated ${matchedIssueNumbers.length} issues as matched`);
+
+          // Group matches by issue for summary
+          const matchesByIssue = new Map<number, number>();
+          for (const m of newMatches) {
+            matchesByIssue.set(m.issueNumber, (matchesByIssue.get(m.issueNumber) || 0) + 1);
+          }
+
+          // Top issues by match count
+          const topIssues = [...matchesByIssue.entries()]
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 10)
+            .map(([issueNum, count]) => {
+              const issue = allIssues.find(i => i.issueNumber === issueNum);
+              return {
+                issue_number: issueNum,
+                title: issue?.issueTitle?.substring(0, 60) || "Unknown",
+                thread_matches: count,
+              };
+            });
+
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                success: true,
+                message: `Matched ${matchedIssueNumbers.length} issues to ${newMatches.length} thread associations`,
+                stats: {
+                  issues_processed: allIssues.length,
+                  issues_with_embeddings: issueEmbeddingMap.size,
+                  threads_searched: threadEmbeddings.length,
+                  matches_found: newMatches.length,
+                  issues_matched: matchedIssueNumbers.length,
+                  matches_saved: savedCount,
+                  errors: errorCount,
+                },
+                threshold_used: min_similarity,
+                top_matched_issues: topIssues,
+              }, null, 2),
+            }],
+          };
+        } else {
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                success: true,
+                message: "No matches found above threshold",
+                stats: {
+                  issues_processed: allIssues.length,
+                  issues_with_embeddings: issueEmbeddingMap.size,
+                  threads_searched: threadEmbeddings.length,
+                  matches_found: 0,
+                  issues_matched: 0,
+                },
+                threshold_used: min_similarity,
+                suggestion: `Try lowering min_similarity (currently ${min_similarity}%) to find more matches`,
+              }, null, 2),
+            }],
+          };
+        }
+
+      } catch (error) {
+        logError("Issue-thread matching failed:", error);
+        throw new Error(`Issue-thread matching failed: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
 
