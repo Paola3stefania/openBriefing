@@ -355,26 +355,21 @@ const tools: Tool[] = [
     },
   },
   {
-    name: "sync_and_classify",
-    description: "Automated workflow: Sync Discord messages, sync GitHub issues, then classify messages with issues. Uses DISCORD_DEFAULT_CHANNEL_ID from config if channel_id is not provided.",
+    name: "sync_classify_and_export",
+    description: "Issue-centric workflow: 1) Fetch GitHub issues, 2) Check Discord messages, 3) Compute embeddings, 4) Group related issues, 5) Match Discord threads to issues, 6) Label issues, 7) Match to features, 8) Export to Linear, 9) Sync Linear status. All steps are incremental and use embeddings for matching. Requires DATABASE_URL and OPENAI_API_KEY.",
     inputSchema: {
       type: "object",
       properties: {
         channel_id: {
           type: "string",
-          description: "Discord channel ID to sync and classify. If not provided, uses DISCORD_DEFAULT_CHANNEL_ID from config.",
-        },
-        classify_all: {
-          type: "boolean",
-          description: "If true, classifies all unclassified messages (ignores limit). If false (default), only classifies new/unclassified messages up to the default limit (30).",
-          default: false,
+          description: "Discord channel ID. If not provided, uses DISCORD_DEFAULT_CHANNEL_ID.",
         },
         min_similarity: {
           type: "number",
-          description: "Minimum similarity score to consider a match (0-100 scale, default 20). Lower values (20-40) are more inclusive for initial classification, higher values (60-80) are more strict. See README for tier recommendations.",
+          description: "Minimum similarity threshold for thread-to-issue matching (0-100 scale, default 50).",
           minimum: 0,
           maximum: 100,
-          default: 20,
+          default: 50,
         },
       },
       required: [],
@@ -393,6 +388,16 @@ const tools: Tool[] = [
         include_closed: {
           type: "boolean",
           description: "If true, exports closed/resolved issues and threads. If false (default), only exports open/unresolved items.",
+          default: false,
+        },
+        dry_run: {
+          type: "boolean",
+          description: "If true, shows what would be exported without actually creating issues in Linear. Useful for testing.",
+          default: false,
+        },
+        update_projects: {
+          type: "boolean",
+          description: "If true, updates existing Linear issues with their correct project (feature) assignments. Use this to fix issues that were exported before project mapping was added.",
           default: false,
         },
       },
@@ -414,6 +419,20 @@ const tools: Tool[] = [
     inputSchema: {
       type: "object",
       properties: {},
+    },
+  },
+  {
+    name: "validate_export_sync",
+    description: "Compare our database export tracking with actual Linear issues. Fetches all Linear issues and compares with our database to find: 1) Orphans (in DB but deleted from Linear), 2) Untracked (in Linear but not in our DB), 3) In sync (matching). Useful for debugging export issues.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        fix_orphans: {
+          type: "boolean",
+          description: "If true, reset export status for orphaned items so they can be re-exported. Default: false (report only).",
+          default: false,
+        },
+      },
     },
   },
   {
@@ -2094,18 +2113,43 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           : undefined;
 
         // Check if cache exists for incremental update
+        // Check database first if configured, then fall back to file cache
         let existingCache: DiscordCache | null = null;
         let sinceDate: string | undefined = undefined;
 
         if (incremental) {
+          // Try database first
+          const { hasDatabaseConfig: hasDbConfigFetch, getStorage: getStorageFetch } = await import("../storage/factory.js");
+          if (hasDbConfigFetch()) {
+            try {
+              const storage = getStorageFetch();
+              const dbAvailable = await storage.isAvailable();
+              if (dbAvailable) {
+                const dbSinceDate = await storage.getMostRecentDiscordMessageDate(actualChannelId);
+                if (dbSinceDate) {
+                  sinceDate = dbSinceDate;
+                  console.error(`[FetchDiscord] Using database for incremental fetch. Most recent message: ${sinceDate}`);
+                }
+              }
+            } catch (dbError) {
+              console.error(`[FetchDiscord] Failed to check database for incremental date:`, dbError);
+            }
+          }
+
+          // Fall back to file cache if no database date found
+          if (!sinceDate) {
           try {
             const foundCachePath = await findDiscordCacheFile(actualChannelId);
             if (foundCachePath) {
               existingCache = await loadDiscordCache(foundCachePath);
               sinceDate = getMostRecentMessageDate(existingCache);
+                if (sinceDate) {
+                  console.error(`[FetchDiscord] Using file cache for incremental fetch. Most recent message: ${sinceDate}`);
+                }
             }
           } catch (error) {
             // Cache doesn't exist or invalid
+            }
           }
         }
 
@@ -3486,10 +3530,12 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       };
     }
 
-    case "sync_and_classify": {
-      const { channel_id, classify_all = false, min_similarity = 20 } = args as {
+    case "sync_classify_and_export": {
+      // Issue-centric workflow: GitHub issues are primary, Discord threads attached as context
+      // All steps are incremental (only process new/unprocessed items)
+      // All matching uses embeddings
+      const { channel_id, min_similarity = 50 } = args as {
         channel_id?: string;
-        classify_all?: boolean;
         min_similarity?: number;
       };
 
@@ -3500,288 +3546,534 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         throw new Error("Channel ID is required. Provide channel_id parameter or set DISCORD_DEFAULT_CHANNEL_ID in environment variables.");
       }
 
+      // Verify prerequisites
+      const { hasDatabaseConfig, getStorage } = await import("../storage/factory.js");
+      if (!hasDatabaseConfig()) {
+        throw new Error("DATABASE_URL is required for issue-centric workflow.");
+      }
+      const storage = getStorage();
+      if (!await storage.isAvailable()) {
+        throw new Error("Database is not available.");
+      }
+
+      const apiKey = process.env.OPENAI_API_KEY;
+      if (!apiKey) {
+        throw new Error("OPENAI_API_KEY is required for embeddings-based matching.");
+      }
+
+      const { prisma } = await import("../storage/db/prisma.js");
       const results: {
-        steps: Array<{ 
-          step: string; 
-          name?: string;
-          status?: string;
-          success?: boolean;
-          message?: string;
-          result?: Record<string, unknown>;
-          error?: string;
-        }>;
+        steps: Array<{ step: string; status: string; result?: Record<string, unknown>; error?: string }>;
         summary: Record<string, unknown>;
-      } = {
-        steps: [],
-        summary: {},
+      } = { steps: [], summary: {} };
+
+      // Local cosine similarity function
+      const cosineSimilarity = (a: number[], b: number[]): number => {
+        if (a.length !== b.length) return 0;
+        let dotProduct = 0, normA = 0, normB = 0;
+        for (let i = 0; i < a.length; i++) {
+          dotProduct += a[i] * b[i];
+          normA += a[i] * a[i];
+          normB += b[i] * b[i];
+        }
+        const denom = Math.sqrt(normA) * Math.sqrt(normB);
+        return denom === 0 ? 0 : dotProduct / denom;
       };
 
       try {
-        // Step 1: Sync Discord messages (incremental)
-        // Note: Full Discord sync requires the fetch_discord_messages tool
-        // For now, we'll check if cache exists and report status
-        const discordCachePath = await findDiscordCacheFile(actualChannelId);
-        let discordMessageCount = 0;
-        if (discordCachePath) {
-          const discordCache = await loadDiscordCache(discordCachePath);
-          const allMessages = getAllMessagesFromCache(discordCache);
-          discordMessageCount = allMessages.length;
-          results.steps.push({
-            step: "sync_discord",
-            name: "sync_discord",
-            status: "success",
-            result: {
-              total_count: discordMessageCount,
-              message: "Using existing cache. For full sync, run fetch_discord_messages separately.",
-            },
-          });
-        } else {
-          results.steps.push({
-            step: "sync_discord",
-            name: "sync_discord",
-            status: "skipped",
-            result: {
-              message: "No cache found. Run fetch_discord_messages first to sync messages.",
-            },
-          });
+        // =====================================================================
+        // STEP 1: Sync GitHub issues (incremental)
+        // =====================================================================
+        console.error("[Sync] Step 1: Fetching new GitHub issues...");
+        
+        const existingIssues = await prisma.gitHubIssue.findMany({
+          select: { issueNumber: true, issueUpdatedAt: true },
+          orderBy: { issueUpdatedAt: "desc" },
+          take: 1,
+        });
+        const sinceDate = existingIssues[0]?.issueUpdatedAt?.toISOString();
+        
+        const { GitHubTokenManager } = await import("../connectors/github/tokenManager.js");
+        const tokenManager = await GitHubTokenManager.fromEnvironment();
+        if (!tokenManager) {
+          throw new Error("GITHUB_TOKEN is required.");
         }
 
-        // Step 2: Sync GitHub issues (incremental)
-        const issuesCachePath = join(process.cwd(), config.paths.cacheDir, config.paths.issuesCacheFile);
-        let existingIssuesCache: IssuesCache | null = null;
-        let sinceDate: string | undefined = undefined;
-        let existingIssuesForResume: GitHubIssue[] = [];
-
-        // Load existing issues from database (if using database) or cache
-        const { hasDatabaseConfig: hasDbConfig, getStorage: getStorageFunc } = await import("../storage/factory.js");
-        const useDatabaseForIssues = hasDbConfig() && await getStorageFunc().isAvailable();
+        const newIssues = await fetchAllGitHubIssues(tokenManager, true, undefined, undefined, sinceDate, undefined, true);
         
-        if (useDatabaseForIssues) {
-          try {
-            const { prisma } = await import("../storage/db/prisma.js");
-            const dbIssues = await prisma.gitHubIssue.findMany({
-              select: {
-                issueNumber: true,
-                issueTitle: true,
-                issueBody: true,
-                issueUrl: true,
-                issueState: true,
-                issueLabels: true,
-                issueAuthor: true,
-                issueCreatedAt: true,
-                issueUpdatedAt: true,
-                issueComments: true,
-                issueAssignees: true,
-                issueMilestone: true,
-                issueReactions: true,
-              },
-              orderBy: { issueNumber: "asc" },
+        if (newIssues.length > 0) {
+          const issuesToSave = newIssues.map((issue) => ({
+            number: issue.number, title: issue.title, url: issue.html_url, state: issue.state,
+            body: issue.body || undefined, labels: issue.labels.map((l) => l.name),
+            author: issue.user.login, created_at: issue.created_at, updated_at: issue.updated_at,
+            comments: issue.comments || [], assignees: issue.assignees || [],
+            milestone: issue.milestone || null, reactions: issue.reactions || null,
+          }));
+          await storage.saveGitHubIssues(issuesToSave);
+        }
+
+        const totalIssues = await prisma.gitHubIssue.count();
+        const openIssues = await prisma.gitHubIssue.count({ where: { issueState: "open" } });
+          results.steps.push({
+          step: "fetch_github_issues",
+            status: "success",
+          result: { total: totalIssues, open: openIssues, new_synced: newIssues.length },
+        });
+
+        // =====================================================================
+        // STEP 2: Check Discord messages in database
+        // =====================================================================
+        console.error("[Sync] Step 2: Checking Discord messages...");
+        const discordCount = await storage.getDiscordMessageCount(actualChannelId);
+        results.steps.push({
+          step: "check_discord",
+          status: discordCount > 0 ? "success" : "warning",
+            result: {
+            total: discordCount,
+            message: discordCount > 0 ? "Messages available" : "Run fetch_discord_messages first",
+            },
+          });
+
+        // =====================================================================
+        // STEP 3: Compute embeddings (incremental - only new)
+        // =====================================================================
+        console.error("[Sync] Step 3: Computing embeddings for new issues and threads...");
+        const { computeAndSaveIssueEmbeddings, computeAndSaveThreadEmbeddings } = await import("../storage/db/embeddings.js");
+        
+        const issueEmbResult = await computeAndSaveIssueEmbeddings(apiKey, undefined, false);
+        const threadEmbResult = await computeAndSaveThreadEmbeddings(apiKey, { channelId: actualChannelId });
+        
+          results.steps.push({
+          step: "compute_embeddings",
+          status: "success",
+            result: {
+            issues: { computed: issueEmbResult.computed, cached: issueEmbResult.cached },
+            threads: { computed: threadEmbResult.computed, cached: threadEmbResult.cached },
+            },
+          });
+
+        // =====================================================================
+        // STEP 4: Group GitHub issues (incremental - only ungrouped)
+        // =====================================================================
+        console.error("[Sync] Step 4: Grouping ungrouped GitHub issues...");
+        const ungroupedIssues = await prisma.gitHubIssue.findMany({
+          where: { issueState: "open", groupId: null },
+          select: { issueNumber: true },
+        });
+
+        let groupsCreated = 0;
+        let issuesGrouped = 0;
+
+        if (ungroupedIssues.length > 0) {
+          // Load embeddings for ungrouped issues
+          const issueEmbs = await prisma.issueEmbedding.findMany({
+            where: { issueNumber: { in: ungroupedIssues.map(i => i.issueNumber) } },
+          });
+          const embMap = new Map(issueEmbs.map(e => [e.issueNumber, e.embedding as number[]]));
+
+          // Simple clustering: group issues with similarity >= 80%
+          const grouped = new Set<number>();
+          const newGroups: number[][] = [];
+
+          for (const issue of ungroupedIssues) {
+            if (grouped.has(issue.issueNumber)) continue;
+            const emb1 = embMap.get(issue.issueNumber);
+            if (!emb1) continue;
+
+            const group = [issue.issueNumber];
+            grouped.add(issue.issueNumber);
+
+            for (const other of ungroupedIssues) {
+              if (grouped.has(other.issueNumber)) continue;
+              const emb2 = embMap.get(other.issueNumber);
+              if (!emb2) continue;
+
+              const sim = cosineSimilarity(emb1, emb2) * 100;
+              if (sim >= 80) {
+                group.push(other.issueNumber);
+                grouped.add(other.issueNumber);
+              }
+            }
+
+            if (group.length > 1) {
+              newGroups.push(group);
+            }
+          }
+
+          // Save groups to database
+          for (const group of newGroups) {
+            const groupId = `issue-group-${group[0]}-${Date.now()}`;
+            const firstIssue = await prisma.gitHubIssue.findUnique({
+              where: { issueNumber: group[0] },
+              select: { issueTitle: true },
             });
 
-            // Convert database format to GitHubIssue format
-            existingIssuesForResume = dbIssues.map((issue) => ({
-              id: issue.issueNumber,
-              number: issue.issueNumber,
-              title: issue.issueTitle,
-              body: issue.issueBody || "",
-              state: (issue.issueState || "open") as "open" | "closed",
-              created_at: issue.issueCreatedAt?.toISOString() || new Date().toISOString(),
-              updated_at: issue.issueUpdatedAt?.toISOString() || new Date().toISOString(),
-              user: {
-                login: issue.issueAuthor || "unknown",
-                avatar_url: "",
+            await prisma.group.create({
+              data: {
+                id: groupId,
+                channelId: actualChannelId,
+                githubIssueNumber: group[0],
+                suggestedTitle: firstIssue?.issueTitle || `Group ${group[0]}`,
+                threadCount: 0,
+                status: "pending",
               },
-              labels: issue.issueLabels.map((name: string) => ({ name, color: "" })),
-              html_url: issue.issueUrl,
-              assignees: issue.issueAssignees.map((login: string) => ({ login, avatar_url: "" })),
-              milestone: issue.issueMilestone ? { title: issue.issueMilestone, state: "open" } : null,
-              reactions: issue.issueReactions as GitHubIssue["reactions"],
-              comments: (() => {
-              if (!Array.isArray(issue.issueComments)) return [];
-              const validComments: GitHubComment[] = [];
-              for (const c of issue.issueComments) {
-                if (
-                  typeof c === 'object' &&
-                  c !== null &&
-                  'id' in c &&
-                  'body' in c &&
-                  'user' in c
-                ) {
-                  const comment = c as Record<string, unknown>;
-                  if (
-                    typeof comment.id === 'number' &&
-                    typeof comment.body === 'string' &&
-                    typeof (comment.user as Record<string, unknown>)?.login === 'string'
-                  ) {
-                    const user = comment.user as Record<string, unknown>;
-                  validComments.push({
-                    id: comment.id,
-                    body: comment.body,
-                    user: {
-                        login: user.login as string,
-                        avatar_url: (user.avatar_url as string) || '',
-                      },
-                      created_at: (comment.created_at as string) || '',
-                      updated_at: (comment.updated_at as string) || '',
-                      html_url: (comment.html_url as string) || '',
-                      reactions: comment.reactions as GitHubComment["reactions"],
-                    });
+            });
+
+            // Link issues to group
+            for (const issueNum of group) {
+              await prisma.gitHubIssue.update({
+                where: { issueNumber: issueNum },
+                data: { inGroup: true, groupId },
+              });
+            }
+
+            groupsCreated++;
+            issuesGrouped += group.length;
+          }
+        }
+
+        results.steps.push({
+          step: "group_issues",
+          status: "success",
+          result: { ungrouped_checked: ungroupedIssues.length, groups_created: groupsCreated, issues_grouped: issuesGrouped },
+        });
+
+        // =====================================================================
+        // STEP 5: Match Discord threads to issues (incremental - embeddings)
+        // =====================================================================
+        console.error("[Sync] Step 5: Matching Discord threads to issues...");
+        
+        // Get issues not yet matched to threads
+        const unmatchedIssues = await prisma.gitHubIssue.findMany({
+          where: { issueState: "open", matchedToThreads: false },
+          select: { issueNumber: true },
+        });
+
+        let matchesCreated = 0;
+
+        if (unmatchedIssues.length > 0 && discordCount > 0) {
+          const issueEmbs = await prisma.issueEmbedding.findMany({
+            where: { issueNumber: { in: unmatchedIssues.map(i => i.issueNumber) } },
+          });
+          const threadEmbs = await prisma.threadEmbedding.findMany({
+            include: { thread: { select: { threadName: true, firstMessageUrl: true } } },
+          });
+
+          for (const issueEmb of issueEmbs) {
+            const issueVec = issueEmb.embedding as number[];
+            const matches: Array<{ threadId: string; similarity: number; threadName: string | null }> = [];
+
+            for (const threadEmb of threadEmbs) {
+              const threadVec = threadEmb.embedding as number[];
+              const sim = cosineSimilarity(issueVec, threadVec) * 100;
+              if (sim >= min_similarity) {
+                matches.push({ threadId: threadEmb.threadId, similarity: sim, threadName: threadEmb.thread?.threadName || null });
+              }
+            }
+
+            if (matches.length > 0) {
+              // Save top matches
+              for (const match of matches.slice(0, 5)) {
+                await prisma.issueThreadMatch.upsert({
+                  where: { issueNumber_threadId: { issueNumber: issueEmb.issueNumber, threadId: match.threadId } },
+                  create: {
+                    issueNumber: issueEmb.issueNumber,
+                    threadId: match.threadId,
+                    threadName: match.threadName,
+                    similarityScore: match.similarity,
+                    matchMethod: "embedding",
+                  },
+                  update: { similarityScore: match.similarity },
+                });
+                matchesCreated++;
+              }
+
+              await prisma.gitHubIssue.update({
+                where: { issueNumber: issueEmb.issueNumber },
+                data: { matchedToThreads: true },
+              });
+            }
+          }
+        }
+
+        results.steps.push({
+          step: "match_threads",
+          status: "success",
+          result: { issues_checked: unmatchedIssues.length, matches_created: matchesCreated },
+        });
+
+        // =====================================================================
+        // STEP 6: Label issues (incremental - only unlabeled)
+        // Uses batch LLM labeling for efficiency
+        // =====================================================================
+        console.error("[Sync] Step 6: Labeling unlabeled issues...");
+        
+        const unlabeledIssues = await prisma.gitHubIssue.findMany({
+          where: { issueState: "open", detectedLabels: { isEmpty: true } },
+          select: { issueNumber: true, issueTitle: true, issueBody: true },
+          take: 20, // Batch limit for LLM calls
+        });
+
+        let issuesLabeled = 0;
+        const validLabels = ["security", "bug", "regression", "urgent", "enhancement", "documentation", "assistance"];
+
+        if (unlabeledIssues.length > 0) {
+          // Process in batches of 10 for LLM
+          const batchSize = 10;
+          for (let i = 0; i < unlabeledIssues.length; i += batchSize) {
+            const batch = unlabeledIssues.slice(i, i + batchSize);
+            
+            const batchContent = batch.map((issue, idx) => 
+              `[${idx + 1}] Title: ${issue.issueTitle}${issue.issueBody ? `\nDescription: ${issue.issueBody.substring(0, 200)}` : ""}`
+            ).join("\n\n---\n\n");
+            
+            try {
+              const response = await fetch("https://api.openai.com/v1/chat/completions", {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  "Authorization": `Bearer ${apiKey}`,
+                },
+                body: JSON.stringify({
+                  model: "gpt-4o-mini",
+                  messages: [{
+                    role: "system",
+                    content: `You are an issue classifier. For each issue, output ONLY valid labels from: ${validLabels.join(", ")}. Format: [1] label1, label2\n[2] label1`,
+                  }, {
+                    role: "user",
+                    content: batchContent,
+                  }],
+                  temperature: 0,
+                  max_tokens: 500,
+                }),
+              });
+              
+              if (response.ok) {
+                const data = await response.json() as { choices: Array<{ message: { content: string } }> };
+                const text = data.choices[0]?.message?.content || "";
+                
+                // Parse labels for each issue
+                for (let j = 0; j < batch.length; j++) {
+                  const pattern = new RegExp(`\\[${j + 1}\\]\\s*([^\\[\\n]+)`, "i");
+                  const match = text.match(pattern);
+                  if (match) {
+                    const labels = match[1].split(",").map(l => l.trim().toLowerCase()).filter(l => validLabels.includes(l));
+                    if (labels.length > 0) {
+                      await prisma.gitHubIssue.update({
+                        where: { issueNumber: batch[j].issueNumber },
+                        data: { detectedLabels: labels },
+                      });
+                      issuesLabeled++;
+                    }
                   }
                 }
               }
-              return validComments;
-            })(),
-            }));
-
-            // Get most recent update date for incremental fetch
-            if (existingIssuesForResume.length > 0) {
-              const mostRecent = existingIssuesForResume
-                .map(i => new Date(i.updated_at).getTime())
-                .reduce((max, time) => Math.max(max, time), 0);
-              sinceDate = new Date(mostRecent).toISOString();
+            } catch (err) {
+              console.error(`[Sync] Failed to label batch:`, err);
             }
-
-            console.error(`[Sync] Loaded ${existingIssuesForResume.length} existing issues from database`);
-          } catch (dbError) {
-            console.error(`[Sync] Failed to load issues from database, will use cache:`, dbError);
           }
-        }
-
-        // Fallback to cache if database not available or empty
-        if (existingIssuesForResume.length === 0) {
-        if (existsSync(issuesCachePath)) {
-          existingIssuesCache = await loadIssuesFromCache(issuesCachePath);
-            existingIssuesForResume = existingIssuesCache.issues || [];
-          sinceDate = getMostRecentIssueDate(existingIssuesCache);
-            console.error(`[Sync] Loaded ${existingIssuesForResume.length} existing issues from cache`);
-          }
-        }
-
-        // Use token manager for automatic token rotation (same logic as fetch_github_issues)
-        const { GitHubTokenManager } = await import("../connectors/github/tokenManager.js");
-        let tokenManager = await GitHubTokenManager.fromEnvironment();
-        
-        if (!tokenManager) {
-          throw new Error("GITHUB_TOKEN environment variable is required. You can provide multiple tokens separated by commas: token1,token2,token3. Or set GITHUB_APP_ID and GITHUB_APP_INSTALLATION_ID for GitHub App authentication.");
-        }
-
-        // Pass existing issues to skip fetching them (more efficient)
-        const newIssues = await fetchAllGitHubIssues(
-          tokenManager, 
-          true, 
-          undefined, 
-          undefined, 
-          sinceDate,
-          undefined, // limit
-          true, // includeComments
-          existingIssuesForResume // Pass existing issues to skip fetching
-        );
-
-        // Merge with existing cache
-        let finalIssues: GitHubIssue[];
-        if (existingIssuesCache && newIssues.length > 0) {
-          finalIssues = mergeIssues(existingIssuesCache.issues, newIssues);
-        } else if (existingIssuesCache && newIssues.length === 0) {
-          finalIssues = existingIssuesCache.issues;
-        } else {
-          finalIssues = newIssues;
-        }
-
-        // Save to database if configured, otherwise save to JSON cache
-        const { hasDatabaseConfig, getStorage } = await import("../storage/factory.js");
-        const useDatabase = hasDatabaseConfig();
-
-        // Create summary stats (used regardless of storage backend)
-        const issuesSummary = {
-          total_count: finalIssues.length,
-          open_count: finalIssues.filter((i) => i.state === "open").length,
-          closed_count: finalIssues.filter((i) => i.state === "closed").length,
-        };
-
-        if (useDatabase) {
-          try {
-            const storage = getStorage();
-            const dbAvailable = await storage.isAvailable();
-            if (!dbAvailable) {
-              throw new Error("DATABASE_URL is set but database is not available");
-            }
-
-            const issuesToSave = finalIssues.map((issue) => ({
-              number: issue.number,
-              title: issue.title,
-              url: issue.html_url,
-              state: issue.state,
-              body: issue.body || undefined,
-              labels: issue.labels.map((l) => l.name),
-              author: issue.user.login,
-              created_at: issue.created_at,
-              updated_at: issue.updated_at,
-              comments: issue.comments || [],
-              assignees: issue.assignees || [],
-              milestone: issue.milestone || null,
-              reactions: issue.reactions || null,
-            }));
-            await storage.saveGitHubIssues(issuesToSave);
-          } catch (error) {
-            const errorMessage = error instanceof Error ? error.message : String(error);
-            throw new Error(`Failed to save GitHub issues to database: ${errorMessage}`);
-          }
-        } else {
-          // Only save to JSON if database is not configured
-          const issuesCacheData: IssuesCache = {
-            fetched_at: new Date().toISOString(),
-            ...issuesSummary,
-            issues: finalIssues,
-          };
-
-          const cacheDir = join(process.cwd(), config.paths.cacheDir);
-          await mkdir(cacheDir, { recursive: true });
-          await writeFile(issuesCachePath, JSON.stringify(issuesCacheData, null, 2), "utf-8");
         }
 
         results.steps.push({
-          step: "sync_github",
-          name: "sync_github",
+          step: "label_issues",
           status: "success",
-          result: {
-            total: issuesSummary.total_count,
-            open: issuesSummary.open_count,
-            closed: issuesSummary.closed_count,
-            new_updated: newIssues.length,
-          },
+          result: { unlabeled_checked: unlabeledIssues.length, issues_labeled: issuesLabeled },
         });
 
-        // Step 3: Return summary with instruction to classify
+        // =====================================================================
+        // STEP 7: Match issues to features (incremental - embeddings)
+        // =====================================================================
+        console.error("[Sync] Step 7: Matching issues to features...");
+        
+        const unmatchedToFeatures = await prisma.gitHubIssue.findMany({
+          where: { issueState: "open", affectsFeatures: { equals: [] } },
+          select: { issueNumber: true },
+          take: 50,
+        });
+
+        let featuresMatched = 0;
+
+        if (unmatchedToFeatures.length > 0) {
+          const features = await prisma.feature.findMany({
+            include: { embedding: true },
+          });
+
+          if (features.length > 0) {
+            const issueEmbs = await prisma.issueEmbedding.findMany({
+              where: { issueNumber: { in: unmatchedToFeatures.map(i => i.issueNumber) } },
+            });
+
+            for (const issueEmb of issueEmbs) {
+              const issueVec = issueEmb.embedding as number[];
+              const matchedFeatures: Array<{ id: string; name: string }> = [];
+
+              for (const feature of features) {
+                if (!feature.embedding) continue;
+                const featureVec = feature.embedding.embedding as number[];
+                const sim = cosineSimilarity(issueVec, featureVec);
+                if (sim >= 0.5) {
+                  matchedFeatures.push({ id: feature.id, name: feature.name });
+                }
+              }
+
+              if (matchedFeatures.length > 0) {
+                await prisma.gitHubIssue.update({
+                  where: { issueNumber: issueEmb.issueNumber },
+                  data: { affectsFeatures: matchedFeatures },
+                });
+                featuresMatched++;
+              }
+            }
+          }
+        }
+
+        results.steps.push({
+          step: "match_features",
+          status: "success",
+          result: { issues_checked: unmatchedToFeatures.length, issues_matched: featuresMatched },
+        });
+
+        // =====================================================================
+        // STEP 8: Export unexported issues to PM tool (Linear)
+        // =====================================================================
+        console.error("[Sync] Step 8: Exporting unexported issues to Linear...");
+        
+        let issuesExported = 0;
+        let exportSkipped = false;
+        let exportError: string | undefined;
+
+        const pmApiKey = process.env.PM_TOOL_API_KEY;
+        const pmTeamId = process.env.PM_TOOL_TEAM_ID;
+
+        if (!pmApiKey || !pmTeamId) {
+          exportSkipped = true;
+          exportError = "PM_TOOL_API_KEY or PM_TOOL_TEAM_ID not configured";
+        } else {
+          try {
+            // Get unexported open issues
+            const unexportedIssues = await prisma.gitHubIssue.findMany({
+              where: { 
+                issueState: "open", 
+                OR: [
+                  { exportStatus: null },
+                  { exportStatus: "pending" },
+                ],
+              },
+              select: { 
+                issueNumber: true, 
+                issueTitle: true, 
+                issueBody: true, 
+                issueUrl: true,
+                issueLabels: true,
+                detectedLabels: true,
+                affectsFeatures: true,
+              },
+              take: 20, // Batch limit
+            });
+
+            if (unexportedIssues.length > 0) {
+              const { exportIssuesToPMTool } = await import("../export/groupingExporter.js");
+              
+              const pmToolConfig = {
+                type: "linear" as const,
+                api_key: pmApiKey,
+                team_id: pmTeamId,
+              };
+
+              const exportResult = await exportIssuesToPMTool(pmToolConfig, {
+                include_closed: false,
+                channelId: actualChannelId,
+              });
+
+              issuesExported = exportResult.issues_exported?.created || 0;
+            }
+          } catch (err) {
+            exportError = err instanceof Error ? err.message : String(err);
+          }
+        }
+
+        results.steps.push({
+          step: "export_to_linear",
+          status: exportSkipped ? "skipped" : (exportError ? "error" : "success"),
+          result: exportSkipped 
+            ? { message: exportError }
+            : { issues_exported: issuesExported },
+          ...(exportError && !exportSkipped ? { error: exportError } : {}),
+        });
+
+        // =====================================================================
+        // STEP 9: Sync Linear status (mark done if GitHub issues closed)
+        // =====================================================================
+        console.error("[Sync] Step 9: Syncing Linear status...");
+        
+        let ticketsMarkedDone = 0;
+        let syncError: string | undefined;
+
+        if (!pmApiKey) {
+          results.steps.push({
+            step: "sync_linear_status",
+            status: "skipped",
+            result: { message: "PM_TOOL_API_KEY not configured" },
+          });
+        } else {
+          try {
+            const { syncLinearStatus } = await import("../sync/linearStatusSync.js");
+            const syncResult = await syncLinearStatus({ dryRun: false });
+            ticketsMarkedDone = syncResult.markedDone || 0;
+            
+            results.steps.push({
+              step: "sync_linear_status",
+          status: "success",
+          result: {
+                tickets_checked: syncResult.totalLinearTickets || 0,
+                tickets_marked_done: ticketsMarkedDone,
+          },
+        });
+          } catch (err) {
+            syncError = err instanceof Error ? err.message : String(err);
+            results.steps.push({
+              step: "sync_linear_status",
+              status: "error",
+              error: syncError,
+            });
+          }
+        }
+
+        // =====================================================================
+        // SUMMARY
+        // =====================================================================
         results.summary = {
-          discord_messages: discordMessageCount,
-          github_issues: issuesSummary.total_count,
-          message: "Sync complete. Run classify_discord_messages to classify messages.",
+          github_issues: { total: totalIssues, open: openIssues, new_synced: newIssues.length },
+          discord_messages: discordCount,
+          embeddings: { issues: issueEmbResult.computed + issueEmbResult.cached, threads: threadEmbResult.computed + threadEmbResult.cached },
+          grouping: { groups_created: groupsCreated, issues_grouped: issuesGrouped },
+          thread_matching: { matches_created: matchesCreated },
+          labeling: { issues_labeled: issuesLabeled },
+          feature_matching: { issues_matched: featuresMatched },
+          export: { issues_exported: issuesExported, skipped: exportSkipped },
+          linear_sync: { tickets_marked_done: ticketsMarkedDone },
         };
 
         return {
-          content: [
-            {
+          content: [{
               type: "text",
               text: JSON.stringify({
                 success: true,
-                message: "GitHub issues synced successfully. Discord messages: using existing cache. Run classify_discord_messages to classify messages.",
-                note: "For full Discord sync, run fetch_discord_messages separately first.",
+              message: "Issue-centric sync complete. All steps incremental with embeddings.",
                 ...results,
               }, null, 2),
-            },
-          ],
+          }],
         };
+
       } catch (error) {
-        const failedStep = results.steps.length + 1;
         results.steps.push({
-          step: String(failedStep),
-          status: "error",
+          step: "error",
+          status: "failed",
           error: error instanceof Error ? error.message : String(error),
         });
 
         return {
-          content: [
-            {
+          content: [{
               type: "text",
               text: JSON.stringify({
                 success: false,
@@ -3789,8 +4081,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 error: error instanceof Error ? error.message : String(error),
                 ...results,
               }, null, 2),
-            },
-          ],
+          }],
         };
       }
     }
@@ -3800,10 +4091,14 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         use_issue_centric = true, // Default to issue-centric approach (always use DB)
         channel_id,
         include_closed,
+        dry_run = false,
+        update_projects = false,
       } = args as {
         use_issue_centric?: boolean;
         channel_id?: string;
         include_closed?: boolean;
+        dry_run?: boolean;
+        update_projects?: boolean;
       };
 
       try {
@@ -3871,6 +4166,8 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         result = await exportIssuesToPMTool(pmToolConfig, {
           include_closed: include_closed ?? false,
           channelId: actualChannelId,
+          dry_run: dry_run,
+          update_projects: update_projects,
         });
 
         if (!result) {
@@ -4037,6 +4334,193 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       } catch (error) {
         logError("Validation failed:", error);
+        throw new Error(`Validation failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    case "validate_export_sync": {
+      const { fix_orphans = false } = args as { fix_orphans?: boolean };
+
+      try {
+        // Check required config
+        if (!process.env.PM_TOOL_API_KEY) {
+          throw new Error("PM_TOOL_API_KEY is required");
+        }
+        if (!process.env.PM_TOOL_TEAM_ID) {
+          throw new Error("PM_TOOL_TEAM_ID is required");
+        }
+
+        const { hasDatabaseConfig, getStorage } = await import("../storage/factory.js");
+        if (!hasDatabaseConfig()) {
+          throw new Error("DATABASE_URL is required");
+        }
+
+        const { prisma } = await import("../storage/db/prisma.js");
+        const teamId = process.env.PM_TOOL_TEAM_ID;
+
+        console.error("[ValidateSync] Fetching all Linear issues...");
+
+        // Fetch ALL Linear issues (including archived) with pagination
+        const allLinearIssues: Array<{ id: string; identifier: string; title: string }> = [];
+        let hasNextPage = true;
+        let cursor: string | null = null;
+
+        while (hasNextPage) {
+          const query = `
+            query GetAllTeamIssues($teamId: String!, $first: Int!, $after: String) {
+              team(id: $teamId) {
+                issues(first: $first, after: $after, includeArchived: true) {
+                  nodes { id identifier title }
+                  pageInfo { hasNextPage endCursor }
+                }
+              }
+            }
+          `;
+
+          const response = await fetch("https://api.linear.app/graphql", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": process.env.PM_TOOL_API_KEY!,
+            },
+            body: JSON.stringify({ query, variables: { teamId, first: 100, after: cursor } }),
+          });
+
+          const result = await response.json() as {
+            data?: {
+              team?: {
+                issues?: {
+                  nodes?: Array<{ id: string; identifier: string; title: string }>;
+                  pageInfo?: { hasNextPage: boolean; endCursor: string };
+                };
+              };
+            };
+          };
+
+          const nodes = result.data?.team?.issues?.nodes || [];
+          allLinearIssues.push(...nodes);
+          hasNextPage = result.data?.team?.issues?.pageInfo?.hasNextPage || false;
+          cursor = result.data?.team?.issues?.pageInfo?.endCursor || null;
+        }
+
+        console.error(`[ValidateSync] Found ${allLinearIssues.length} Linear issues`);
+        const linearIssueIds = new Set(allLinearIssues.map(i => i.id));
+        const linearIdentifiers = new Map(allLinearIssues.map(i => [i.id, i.identifier]));
+
+        // Get our exported items from DB
+        const ourExportedIssues = await prisma.gitHubIssue.findMany({
+          where: { linearIssueId: { not: null } },
+          select: { issueNumber: true, issueTitle: true, linearIssueId: true, linearIssueIdentifier: true },
+        });
+
+        const ourExportedGroups = await prisma.group.findMany({
+          where: { linearIssueId: { not: null } },
+          select: { id: true, suggestedTitle: true, linearIssueId: true, linearIssueIdentifier: true },
+        });
+
+        // Find orphans (in our DB but not in Linear)
+        const orphanIssues = ourExportedIssues.filter(i => !linearIssueIds.has(i.linearIssueId!));
+        const orphanGroups = ourExportedGroups.filter(g => !linearIssueIds.has(g.linearIssueId!));
+
+        // Find in-sync items
+        const syncedIssues = ourExportedIssues.filter(i => linearIssueIds.has(i.linearIssueId!));
+        const syncedGroups = ourExportedGroups.filter(g => linearIssueIds.has(g.linearIssueId!));
+
+        // Find untracked (in Linear but not in our DB)
+        const ourLinearIds = new Set([
+          ...ourExportedIssues.map(i => i.linearIssueId),
+          ...ourExportedGroups.map(g => g.linearIssueId),
+        ]);
+        const untrackedLinear = allLinearIssues.filter(i => !ourLinearIds.has(i.id));
+
+        const summary = {
+          linear_total: allLinearIssues.length,
+          our_db: {
+            exported_issues: ourExportedIssues.length,
+            exported_groups: ourExportedGroups.length,
+            total: ourExportedIssues.length + ourExportedGroups.length,
+          },
+          in_sync: {
+            issues: syncedIssues.length,
+            groups: syncedGroups.length,
+            total: syncedIssues.length + syncedGroups.length,
+          },
+          orphans: {
+            issues: orphanIssues.length,
+            groups: orphanGroups.length,
+            total: orphanIssues.length + orphanGroups.length,
+            sample_issues: orphanIssues.slice(0, 5).map(i => ({
+              issue_number: i.issueNumber,
+              linear_identifier: i.linearIssueIdentifier,
+            })),
+            sample_groups: orphanGroups.slice(0, 5).map(g => ({
+              group_id: g.id,
+              linear_identifier: g.linearIssueIdentifier,
+            })),
+          },
+          untracked_in_linear: {
+            count: untrackedLinear.length,
+            sample: untrackedLinear.slice(0, 10).map(i => ({
+              identifier: i.identifier,
+              title: i.title.substring(0, 50),
+            })),
+          },
+        };
+
+        let fixResult = null;
+
+        // Fix orphans if requested
+        if (fix_orphans && (orphanIssues.length > 0 || orphanGroups.length > 0)) {
+          console.error(`[ValidateSync] Fixing ${orphanIssues.length} orphaned issues and ${orphanGroups.length} orphaned groups...`);
+
+          if (orphanIssues.length > 0) {
+            await prisma.gitHubIssue.updateMany({
+              where: { issueNumber: { in: orphanIssues.map(i => i.issueNumber) } },
+              data: {
+                exportStatus: null,
+                exportedAt: null,
+                linearIssueId: null,
+                linearIssueUrl: null,
+                linearIssueIdentifier: null,
+              },
+            });
+          }
+
+          if (orphanGroups.length > 0) {
+            await prisma.group.updateMany({
+              where: { id: { in: orphanGroups.map(g => g.id) } },
+              data: {
+                status: "pending",
+                exportedAt: null,
+                linearIssueId: null,
+                linearIssueUrl: null,
+                linearIssueIdentifier: null,
+              },
+            });
+          }
+
+          fixResult = {
+            issues_reset: orphanIssues.length,
+            groups_reset: orphanGroups.length,
+            message: "Orphans reset. Run export again to re-export them.",
+          };
+        }
+
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              success: true,
+              summary,
+              fix_result: fixResult,
+              message: orphanIssues.length + orphanGroups.length > 0
+                ? `Found ${orphanIssues.length + orphanGroups.length} orphans. ${fix_orphans ? "Fixed!" : "Use fix_orphans=true to reset them."}`
+                : "All exported items are in sync with Linear!",
+            }, null, 2),
+          }],
+        };
+
+      } catch (error) {
         throw new Error(`Validation failed: ${error instanceof Error ? error.message : String(error)}`);
       }
     }

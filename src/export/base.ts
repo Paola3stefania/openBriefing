@@ -13,6 +13,7 @@ export interface LinearPMTool {
   validateTeam?(createIfMissing: boolean, defaultTeamName: string): Promise<boolean>;
   createOrGetProject?(featureId: string, featureName: string, featureDescription?: string): Promise<string>;
   initializeLabels?(): Promise<void>;
+  updateIssue?(issueId: string, updates: Partial<PMToolIssue>): Promise<void>;
 }
 
 export interface IPMTool {

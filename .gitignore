@@ -15,3 +15,4 @@ results/**/*.json
 
 # Keep cursor config example but ignore personal config
 cursor-mcp-config.json
+.vercel

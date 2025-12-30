@@ -2834,10 +2834,14 @@ export async function exportIssuesToPMTool(
   options?: { 
     include_closed?: boolean;
     channelId?: string;
+    dry_run?: boolean;
+    update_projects?: boolean; // Update existing Linear issues with correct project (feature) assignments
   }
 ): Promise<ExportWorkflowResult> {
   const includeClosed = options?.include_closed ?? false;
   const channelId = options?.channelId;
+  const dryRun = options?.dry_run ?? false;
+  const updateProjects = options?.update_projects ?? false;
   const result: ExportWorkflowResult = {
     success: false,
     features_extracted: 0,
@@ -2849,8 +2853,9 @@ export async function exportIssuesToPMTool(
     const pmTool = createPMTool(pmToolConfig);
     
     // Validate team for Linear
+    let linearTool: import("./base.js").LinearPMTool | null = null;
     if (pmToolConfig.type === "linear") {
-      const linearTool = pmTool as import("./base.js").LinearPMTool;
+      linearTool = pmTool as import("./base.js").LinearPMTool;
       if (linearTool.validateTeam) {
         await linearTool.validateTeam(true, "UNMute");
         if (linearTool.teamId && !pmToolConfig.team_id) {
@@ -2875,10 +2880,12 @@ export async function exportIssuesToPMTool(
 
     // =============================================================
     // STEP 1: Get GROUPS from GitHub issues (each unique groupId becomes 1 Linear issue)
+    // Only get groups that haven't been exported yet (incremental)
     // =============================================================
-    log("Loading grouped issues from database...");
+    log("Loading unexported grouped issues from database...");
     
     // Get all issues that have a groupId set (these are our grouped issues)
+    // Filter out issues in groups that are already exported
     const groupedIssues = await prisma.gitHubIssue.findMany({
       where: {
         groupId: { not: null },
@@ -2892,14 +2899,31 @@ export async function exportIssuesToPMTool(
     const uniqueGroupIds = [...new Set(groupedIssues.map(i => i.groupId).filter((id): id is string => id !== null))];
     log(`Found ${uniqueGroupIds.length} unique groups from issues`);
 
-    // Load group metadata from Group table (for titles, features, etc.)
-    const groupMetadata = await prisma.group.findMany({
+    // Load ALL group metadata from Group table (for titles, features, etc.)
+    const allGroupMetadata = await prisma.group.findMany({
       where: { id: { in: uniqueGroupIds } },
     });
-    const groupMetadataMap = new Map(groupMetadata.map(g => [g.id, g]));
+    const groupMetadataMap = new Map(allGroupMetadata.map(g => [g.id, g]));
+    
+    // Filter to only unexported groups (status = "pending" OR no linearIssueId)
+    const unexportedGroupIds = new Set(
+      allGroupMetadata
+        .filter(g => g.status === "pending" || !g.linearIssueId)
+        .map(g => g.id)
+    );
+    
+    // Also include groups not in the Group table (they're implicitly unexported)
+    for (const groupId of uniqueGroupIds) {
+      if (!groupMetadataMap.has(groupId)) {
+        unexportedGroupIds.add(groupId);
+      }
+    }
+    
+    log(`Found ${unexportedGroupIds.size} unexported groups (${uniqueGroupIds.length - unexportedGroupIds.size} already exported)`);
+    log(`Unexported group IDs: ${Array.from(unexportedGroupIds).join(', ') || 'NONE'}`);
 
-    // Build groups array with metadata (or generate defaults if not in Group table)
-    const groups = uniqueGroupIds.map(groupId => {
+    // Build groups array - ONLY include unexported groups
+    const groups = uniqueGroupIds.filter(id => unexportedGroupIds.has(id)).map(groupId => {
       const metadata = groupMetadataMap.get(groupId);
       const issuesInGroup = groupedIssues.filter(i => i.groupId === groupId);
       const primaryIssue = issuesInGroup[0];
@@ -2927,16 +2951,25 @@ export async function exportIssuesToPMTool(
 
     // =============================================================
     // STEP 2: Get UNGROUPED ISSUES (each becomes 1 Linear issue)
+    // Only get issues that haven't been exported yet (incremental)
     // =============================================================
-    log("Loading ungrouped issues from database...");
+    log("Loading unexported ungrouped issues from database...");
     const ungroupedIssues = await prisma.gitHubIssue.findMany({
       where: {
         groupId: null, // Issues without a groupId are ungrouped
         ...(includeClosed ? {} : { issueState: "open" }),
+        // Only get unexported issues (incremental export)
+        OR: [
+          { exportStatus: null },
+          { exportStatus: "pending" },
+        ],
       },
       orderBy: { issueNumber: 'desc' },
     });
-    log(`Found ${ungroupedIssues.length} ungrouped issues`);
+    log(`Found ${ungroupedIssues.length} unexported ungrouped issues`);
+    if (ungroupedIssues.length > 0 && ungroupedIssues.length <= 20) {
+      log(`Unexported issue numbers: ${ungroupedIssues.map(i => i.issueNumber).join(', ')}`);
+    }
 
     // Verify we have all issues
     const allIssues = [...groupedIssues, ...ungroupedIssues];
@@ -3298,10 +3331,189 @@ export async function exportIssuesToPMTool(
     }
 
     log(`Prepared ${pmIssues.length} PM issues for export (${groups.length} groups + ${ungroupedIssues.length} ungrouped)`);
+    if (pmIssues.length > 0 && pmIssues.length <= 20) {
+      log(`PM issue source_ids: ${pmIssues.map(i => i.source_id).join(', ')}`);
+    }
 
     // =============================================================
-    // STEP 5: Export to PM tool
+    // STEP 4.5: Create Linear projects for features and map project_id
     // =============================================================
+    const projectMappings = new Map<string, string>(); // feature_id -> project_id
+    
+    if (linearTool?.createOrGetProject && (pmIssues.length > 0 || updateProjects)) {
+      log("Creating/mapping Linear projects for features...");
+      
+      // Collect unique features from pmIssues AND from database (for update_projects)
+      const featureMap = new Map<string, string>(); // feature_id -> feature_name
+      
+      // From pmIssues (new exports)
+      for (const issue of pmIssues) {
+        if (issue.feature_id && issue.feature_name) {
+          featureMap.set(issue.feature_id, issue.feature_name);
+        }
+      }
+      
+      // From database features (for update_projects)
+      if (updateProjects) {
+        const allFeatures = await prisma.feature.findMany();
+        for (const feature of allFeatures) {
+          if (!featureMap.has(feature.id)) {
+            featureMap.set(feature.id, feature.name);
+          }
+        }
+      }
+      
+      // Ensure "general" feature exists
+      if (!featureMap.has("general")) {
+        featureMap.set("general", "General");
+      }
+      
+      // Create/get Linear projects for each feature
+      for (const [featureId, featureName] of featureMap) {
+        try {
+          const projectId = await linearTool.createOrGetProject(
+            featureId,
+            featureName,
+            `Feature: ${featureName}`
+          );
+          projectMappings.set(featureId, projectId);
+          log(`  Mapped feature "${featureName}" -> project ${projectId}`);
+        } catch (error) {
+          logError(`  Failed to create project for ${featureName}:`, error);
+        }
+      }
+      
+      // Update pmIssues with project_id
+      for (const issue of pmIssues) {
+        if (issue.feature_id) {
+          const projectId = projectMappings.get(issue.feature_id) || projectMappings.get("general");
+          if (projectId) {
+            issue.project_id = projectId;
+          }
+        }
+      }
+      
+      log(`Mapped ${projectMappings.size} features to Linear projects`);
+      
+      // =============================================================
+      // STEP 4.6: Update existing Linear issues with correct projects (if update_projects flag set)
+      // =============================================================
+      const updateIssueMethod = linearTool.updateIssue;
+      if (updateProjects && updateIssueMethod) {
+        log("Updating existing Linear issues with correct project assignments...");
+        
+        // Get all exported issues (groups and ungrouped) that have a linearIssueId
+        const exportedGroups = await prisma.group.findMany({
+          where: { linearIssueId: { not: null } },
+        });
+        
+        const exportedIssues = await prisma.gitHubIssue.findMany({
+          where: { 
+            linearIssueId: { not: null },
+            groupId: null, // Only ungrouped issues (grouped ones are handled via groups)
+          },
+        });
+        
+        log(`Found ${exportedGroups.length} exported groups and ${exportedIssues.length} exported ungrouped issues`);
+        
+        let updatedCount = 0;
+        let skippedCount = 0;
+        
+        // Update groups
+        for (const group of exportedGroups) {
+          try {
+            // Get feature from group's issues
+            const groupIssues = await prisma.gitHubIssue.findMany({
+              where: { groupId: group.id },
+              take: 1,
+            });
+            
+            const primaryIssue = groupIssues[0];
+            const issueFeatures = primaryIssue?.affectsFeatures as Array<{ id: string; name: string }> | null;
+            const featureId = issueFeatures?.[0]?.id || "general";
+            const projectId = projectMappings.get(featureId) || projectMappings.get("general");
+            
+            if (projectId && group.linearIssueId) {
+              if (dryRun) {
+                log(`  [DRY RUN] Would update group ${group.id} (${group.linearIssueId}) with project ${projectId}`);
+              } else {
+                await updateIssueMethod.call(linearTool, group.linearIssueId, { project_id: projectId });
+                log(`  Updated group ${group.id} (${group.linearIssueId}) with project ${projectId}`);
+              }
+              updatedCount++;
+            } else {
+              skippedCount++;
+            }
+          } catch (error) {
+            logError(`  Failed to update group ${group.id}:`, error);
+          }
+        }
+        
+        // Update ungrouped issues
+        for (const issue of exportedIssues) {
+          try {
+            const issueFeatures = issue.affectsFeatures as Array<{ id: string; name: string }> | null;
+            const featureId = issueFeatures?.[0]?.id || "general";
+            const projectId = projectMappings.get(featureId) || projectMappings.get("general");
+            
+            if (projectId && issue.linearIssueId) {
+              if (dryRun) {
+                log(`  [DRY RUN] Would update issue #${issue.issueNumber} (${issue.linearIssueId}) with project ${projectId}`);
+              } else {
+                await updateIssueMethod.call(linearTool, issue.linearIssueId, { project_id: projectId });
+                log(`  Updated issue #${issue.issueNumber} (${issue.linearIssueId}) with project ${projectId}`);
+              }
+              updatedCount++;
+            } else {
+              skippedCount++;
+            }
+          } catch (error) {
+            logError(`  Failed to update issue #${issue.issueNumber}:`, error);
+          }
+        }
+        
+        log(`Project update complete: ${updatedCount} updated, ${skippedCount} skipped`);
+        
+        // Add to result
+        (result as ExportWorkflowResult & { projects_updated?: number }).projects_updated = updatedCount;
+      }
+    }
+
+    // =============================================================
+    // STEP 5: Export to PM tool (or dry run)
+    // =============================================================
+    if (dryRun) {
+      log(`[DRY RUN] Would export ${pmIssues.length} issues to ${pmToolConfig.type}`);
+      
+      // Return dry run result without actually exporting
+      result.success = true;
+      result.issues_exported = {
+        created: 0,
+        updated: 0,
+        skipped: pmIssues.length,
+      };
+      
+      // Add dry run details
+      const dryRunDetails = {
+        dry_run: true,
+        would_export: pmIssues.length,
+        groups_to_export: groups.length,
+        ungrouped_issues_to_export: ungroupedIssues.length,
+        items: pmIssues.map(i => ({
+          source_id: i.source_id,
+          title: i.title,
+          labels: i.labels,
+          feature: i.feature_name,
+          has_discord_context: ((i.metadata as Record<string, unknown>)?.discord_threads_count as number || 0) > 0,
+        })),
+      };
+      
+      return {
+        ...result,
+        dry_run_details: dryRunDetails,
+      } as ExportWorkflowResult & { dry_run_details: typeof dryRunDetails };
+    }
+
     const exportResult = await pmTool.exportIssues(pmIssues);
 
     // =============================================================
@@ -3309,7 +3521,10 @@ export async function exportIssuesToPMTool(
     // =============================================================
     if (exportResult.success) {
       try {
+        log(`Updating export status for ${pmIssues.length} issues...`);
+        let updatedCount = 0;
         for (const pmIssue of pmIssues) {
+          log(`  Issue ${pmIssue.source_id}: linear_issue_id=${pmIssue.linear_issue_id || 'NOT SET'}`);
           if (pmIssue.linear_issue_id) {
             if (pmIssue.source_id.startsWith("group-")) {
               // Update group export status
@@ -3324,6 +3539,8 @@ export async function exportIssuesToPMTool(
                   linearIssueIdentifier: pmIssue.linear_issue_identifier || null,
                 },
               });
+              updatedCount++;
+              log(`    Updated group ${groupId} -> exported`);
             } else if (pmIssue.source_id.startsWith("github-issue-")) {
               // Update issue export status
               const issueNumber = parseInt(pmIssue.source_id.replace("github-issue-", ""), 10);
@@ -3338,11 +3555,13 @@ export async function exportIssuesToPMTool(
                     linearIssueIdentifier: pmIssue.linear_issue_identifier || null,
                   },
                 });
+                updatedCount++;
+                log(`    Updated issue #${issueNumber} -> exported`);
               }
             }
           }
         }
-        log(`Updated export status in database`);
+        log(`Updated export status for ${updatedCount}/${pmIssues.length} items in database`);
       } catch (error) {
         logError("Error updating database with export status:", error);
       }

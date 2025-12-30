@@ -203,6 +203,60 @@ export class DatabaseStorage implements IStorage {
     }
   }
 
+  async getDiscordMessages(channelId: string): Promise<Array<{
+    id: string;
+    channelId: string;
+    authorId: string;
+    authorUsername?: string;
+    authorBot?: boolean;
+    content: string;
+    createdAt: string;
+    editedAt?: string | null;
+    channelName?: string;
+    guildId?: string;
+    guildName?: string;
+    threadId?: string;
+    threadName?: string;
+    url?: string;
+  }>> {
+    const messages = await prisma.discordMessage.findMany({
+      where: { channelId },
+      orderBy: { createdAt: "asc" },
+    });
+
+    return messages.map((msg) => ({
+      id: msg.id,
+      channelId: msg.channelId,
+      authorId: msg.authorId,
+      authorUsername: msg.authorUsername ?? undefined,
+      authorBot: msg.authorBot,
+      content: msg.content,
+      createdAt: msg.createdAt.toISOString(),
+      editedAt: msg.editedAt?.toISOString() ?? null,
+      channelName: msg.channelName ?? undefined,
+      guildId: msg.guildId ?? undefined,
+      guildName: msg.guildName ?? undefined,
+      threadId: msg.threadId ?? undefined,
+      threadName: msg.threadName ?? undefined,
+      url: msg.url ?? undefined,
+    }));
+  }
+
+  async getDiscordMessageCount(channelId: string): Promise<number> {
+    return prisma.discordMessage.count({
+      where: { channelId },
+    });
+  }
+
+  async getMostRecentDiscordMessageDate(channelId: string): Promise<string | null> {
+    const mostRecent = await prisma.discordMessage.findFirst({
+      where: { channelId },
+      orderBy: { createdAt: "desc" },
+      select: { createdAt: true },
+    });
+    return mostRecent?.createdAt.toISOString() ?? null;
+  }
+
   async saveClassifiedThread(thread: ClassifiedThread): Promise<void> {
     await this.saveClassifiedThreads([thread]);
   }

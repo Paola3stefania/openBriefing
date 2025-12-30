@@ -110,6 +110,37 @@ export class JsonStorage implements IStorage {
     // fetch handler will handle JSON caching directly.
   }
 
+  async getDiscordMessages(channelId: string): Promise<Array<{
+    id: string;
+    channelId: string;
+    authorId: string;
+    authorUsername?: string;
+    authorBot?: boolean;
+    content: string;
+    createdAt: string;
+    editedAt?: string | null;
+    channelName?: string;
+    guildId?: string;
+    guildName?: string;
+    threadId?: string;
+    threadName?: string;
+    url?: string;
+  }>> {
+    // JSON storage uses file-based cache - this is handled by the MCP server directly
+    // Return empty array as the MCP server loads from cache files directly
+    return [];
+  }
+
+  async getDiscordMessageCount(channelId: string): Promise<number> {
+    // JSON storage uses file-based cache - return 0 to indicate not available
+    return 0;
+  }
+
+  async getMostRecentDiscordMessageDate(channelId: string): Promise<string | null> {
+    // JSON storage uses file-based cache - return null to indicate not available
+    return null;
+  }
+
   async saveClassifiedThread(thread: ClassifiedThread): Promise<void> {
     await this.saveClassifiedThreads([thread]);
   }

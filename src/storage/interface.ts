@@ -102,6 +102,26 @@ export interface IStorage {
     url?: string;
   }>): Promise<void>;
   
+  // Discord message retrieval
+  getDiscordMessages(channelId: string): Promise<Array<{
+    id: string;
+    channelId: string;
+    authorId: string;
+    authorUsername?: string;
+    authorBot?: boolean;
+    content: string;
+    createdAt: string;
+    editedAt?: string | null;
+    channelName?: string;
+    guildId?: string;
+    guildName?: string;
+    threadId?: string;
+    threadName?: string;
+    url?: string;
+  }>>;
+  getDiscordMessageCount(channelId: string): Promise<number>;
+  getMostRecentDiscordMessageDate(channelId: string): Promise<string | null>;
+  
   // Classification operations
   saveClassifiedThread(thread: ClassifiedThread): Promise<void>;
   saveClassifiedThreads(threads: ClassifiedThread[]): Promise<void>;
