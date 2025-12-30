@@ -3121,7 +3121,7 @@ export async function exportIssuesToPMTool(
         // Collect all labels from issues in the group (GitHub labels + detected labels)
         const allLabels = new Set<string>();
         allLabels.add("issue-group");
-        if (threadIds.length > 0) allLabels.add("discord-discussion");
+        if (threadIds.length > 0) allLabels.add("discord");
         for (const issue of groupIssueList) {
           issue.issueLabels?.forEach(l => allLabels.add(l));
           // Add LLM-detected labels from database
@@ -3245,7 +3245,7 @@ export async function exportIssuesToPMTool(
 
         // Collect labels (GitHub labels + LLM-detected labels from database)
         const labels = [...(issue.issueLabels || []), ...(issue.detectedLabels || [])];
-        if (threadMatches.length > 0) labels.push("discord-discussion");
+        if (threadMatches.length > 0) labels.push("discord");
 
         // Calculate priority - ungrouped issues can still be security/bugs
         const issuePriority = calculatePriority({

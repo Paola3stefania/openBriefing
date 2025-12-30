@@ -24,6 +24,7 @@ const STANDARD_LABELS = {
   blocker: { name: "blocker", color: "#991B1B", description: "Blocker - prevents progress" },
   
   // Source labels - blue/purple colors
+  "discord": { name: "discord", color: "#5865F2", description: "Has related Discord discussions" },
   "discord-thread": { name: "discord-thread", color: "#5865F2", description: "Originated from Discord" },
   "github-issue": { name: "github-issue", color: "#6E5494", description: "Related to GitHub issue" },
   
@@ -72,12 +73,15 @@ export class LinearIntegration extends BasePMTool {
       }
     `;
 
+    // Use mapLabelsAsync to auto-create missing labels
+    const labelIds = await this.mapLabelsAsync(issue.labels || []);
+
     const variables = {
       input: {
         teamId: this.teamId || undefined,
         title: issue.title,
         description: this.formatDescription(issue),
-        labelIds: this.mapLabels(issue.labels || []),
+        labelIds,
         priority: this.mapPriority(issue.priority),
         ...(issue.project_id && {
           projectId: issue.project_id, // Link to Linear project (feature)
@@ -125,7 +129,8 @@ export class LinearIntegration extends BasePMTool {
     
     if (updates.title) input.title = updates.title;
     if (updates.description) input.description = this.formatDescription(updates as PMToolIssue);
-    if (updates.labels) input.labelIds = this.mapLabels(updates.labels);
+    // Use mapLabelsAsync to auto-create missing labels
+    if (updates.labels) input.labelIds = await this.mapLabelsAsync(updates.labels);
     if (updates.priority) input.priority = this.mapPriority(updates.priority);
     if (updates.project_id) input.projectId = updates.project_id;
 
