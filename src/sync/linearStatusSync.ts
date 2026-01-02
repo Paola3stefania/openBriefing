@@ -154,6 +154,97 @@ export async function syncLinearStatus(options: {
   
   log(`[Sync] Found Done state: ${doneState.name} (${doneState.id})`);
   
+  // Check for and unarchive any exported issues that got archived
+  log(`[Sync] Checking for archived exported issues...`);
+  const exportedIssues = await prisma.gitHubIssue.findMany({
+    where: { linearIssueId: { not: null } },
+    select: { linearIssueId: true, issueNumber: true },
+  });
+  
+  const exportedGroups = await prisma.group.findMany({
+    where: { linearIssueId: { not: null } },
+    select: { linearIssueId: true, id: true },
+  });
+  
+  const allExportedIds = [
+    ...exportedIssues.map(i => i.linearIssueId).filter((id): id is string => id !== null),
+    ...exportedGroups.map(g => g.linearIssueId).filter((id): id is string => id !== null),
+  ];
+  
+  let unarchivedCount = 0;
+  for (const linearId of allExportedIds) {
+    try {
+      // Check if archived by querying directly
+      const checkQuery = `
+        query {
+          issue(id: "${linearId}") {
+            id
+            archivedAt
+            project { id }
+            cycle { id }
+          }
+        }
+      `;
+      
+      const checkResponse = await fetch(linearConfig.api_url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: linearConfig.api_key,
+        },
+        body: JSON.stringify({ query: checkQuery }),
+      });
+      
+      const checkData = await checkResponse.json();
+      const issue = checkData.data?.issue;
+      
+      if (issue && issue.archivedAt) {
+        // Try to unarchive - first remove any problematic project/cycle
+        if (issue.project || issue.cycle) {
+          try {
+            const updateInput: Record<string, unknown> = {};
+            if (issue.project) updateInput.projectId = null;
+            if (issue.cycle) updateInput.cycleId = null;
+            
+            await linear.updateIssue(linearId, updateInput as any);
+          } catch (e) {
+            // Ignore errors when removing project/cycle
+          }
+        }
+        
+        // Unarchive
+        const unarchiveQuery = `
+          mutation {
+            issueUnarchive(id: "${linearId}") {
+              success
+            }
+          }
+        `;
+        
+        const response = await fetch(linearConfig.api_url, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: linearConfig.api_key,
+          },
+          body: JSON.stringify({ query: unarchiveQuery }),
+        });
+        
+        const data = await response.json();
+        if (data.data?.issueUnarchive?.success) {
+          unarchivedCount++;
+          log(`[Sync] Unarchived issue ${linearId}`);
+        }
+      }
+    } catch (error) {
+      // Skip errors - issue might not exist or have permission issues
+    }
+  }
+  
+  if (unarchivedCount > 0) {
+    log(`[Sync] Unarchived ${unarchivedCount} exported issues`);
+  }
+  
   // Get all OPEN Linear tickets (not done/canceled)
   // Uses pagination to fetch all issues
   log(`[Sync] Fetching open Linear tickets...`);
