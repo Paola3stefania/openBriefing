@@ -145,7 +145,7 @@ export async function executeToolHandler(
               issueAuthor: issue.user?.login,
               issueCreatedAt: new Date(issue.created_at),
               issueUpdatedAt: new Date(issue.updated_at),
-              issueComments: (issue.comments || []) as Prisma.InputJsonValue,
+              issueComments: issue.comments ? (JSON.parse(JSON.stringify(issue.comments)) as Prisma.InputJsonValue) : [],
               issueMilestone: issue.milestone?.title,
             },
             update: {
@@ -155,7 +155,7 @@ export async function executeToolHandler(
               issueLabels: issue.labels.map((l) => l.name),
               issueAssignees: issue.assignees?.map((a) => a.login) || [],
               issueUpdatedAt: new Date(issue.updated_at),
-              issueComments: (issue.comments || []) as Prisma.InputJsonValue,
+              issueComments: issue.comments ? (JSON.parse(JSON.stringify(issue.comments)) as Prisma.InputJsonValue) : [],
               issueMilestone: issue.milestone?.title,
             },
           });
