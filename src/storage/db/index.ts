@@ -821,8 +821,8 @@ export class DatabaseStorage implements IStorage {
         issuesUpdated: result.issuesUpdated ?? 0,
         issuesSkipped: result.issuesSkipped ?? 0,
         errors: result.errors ?? [],
-        exportMappings: result.exportMappings ? (result.exportMappings as unknown as Prisma.InputJsonValue) : Prisma.JsonNull,
-        closedItemsCount: result.closedItemsCount ? (result.closedItemsCount as unknown as Prisma.InputJsonValue) : Prisma.JsonNull,
+        exportMappings: result.exportMappings ? (result.exportMappings as Prisma.InputJsonValue) : Prisma.JsonNull,
+        closedItemsCount: result.closedItemsCount ? (result.closedItemsCount as Prisma.InputJsonValue) : Prisma.JsonNull,
         closedItemsFile: result.closedItemsFile ?? null,
       },
       create: {
@@ -837,8 +837,8 @@ export class DatabaseStorage implements IStorage {
         issuesUpdated: result.issuesUpdated ?? 0,
         issuesSkipped: result.issuesSkipped ?? 0,
         errors: result.errors ?? [],
-        exportMappings: result.exportMappings ? (result.exportMappings as unknown as Prisma.InputJsonValue) : Prisma.JsonNull,
-        closedItemsCount: result.closedItemsCount ? (result.closedItemsCount as unknown as Prisma.InputJsonValue) : Prisma.JsonNull,
+        exportMappings: result.exportMappings ? (result.exportMappings as Prisma.InputJsonValue) : Prisma.JsonNull,
+        closedItemsCount: result.closedItemsCount ? (result.closedItemsCount as Prisma.InputJsonValue) : Prisma.JsonNull,
         closedItemsFile: result.closedItemsFile ?? null,
       },
     });
@@ -1245,10 +1245,10 @@ export class DatabaseStorage implements IStorage {
               issueAuthor: issue.author ?? null,
               issueCreatedAt: issue.created_at ? new Date(issue.created_at) : null,
               issueUpdatedAt: issue.updated_at ? new Date(issue.updated_at) : null,
-              issueComments: issue.comments ? (issue.comments as unknown as Prisma.InputJsonValue) : [],
+              issueComments: issue.comments ? (issue.comments as Prisma.InputJsonValue) : [],
               issueAssignees: issue.assignees ? issue.assignees.map(a => a.login) : [],
               issueMilestone: issue.milestone?.title ?? null,
-              issueReactions: issue.reactions ? (issue.reactions as unknown as Prisma.InputJsonValue) : Prisma.JsonNull,
+              issueReactions: issue.reactions ? (JSON.parse(JSON.stringify(issue.reactions)) as Prisma.InputJsonValue) : Prisma.JsonNull,
             },
             create: {
               issueNumber: issue.number,
@@ -1260,10 +1260,10 @@ export class DatabaseStorage implements IStorage {
               issueAuthor: issue.author ?? null,
               issueCreatedAt: issue.created_at ? new Date(issue.created_at) : null,
               issueUpdatedAt: issue.updated_at ? new Date(issue.updated_at) : null,
-              issueComments: issue.comments ? (issue.comments as unknown as Prisma.InputJsonValue) : [],
+              issueComments: issue.comments ? (issue.comments as Prisma.InputJsonValue) : [],
               issueAssignees: issue.assignees ? issue.assignees.map(a => a.login) : [],
               issueMilestone: issue.milestone?.title ?? null,
-              issueReactions: issue.reactions ? (issue.reactions as unknown as Prisma.InputJsonValue) : Prisma.JsonNull,
+              issueReactions: issue.reactions ? (JSON.parse(JSON.stringify(issue.reactions)) as Prisma.InputJsonValue) : Prisma.JsonNull,
             },
           });
         }

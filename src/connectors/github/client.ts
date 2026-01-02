@@ -306,7 +306,7 @@ export async function fetchIssueDetails(
     throw new Error(errorMessage);
   }
 
-  const issue: GitHubIssue = await issueResponse.json();
+  const issue = await issueResponse.json() as GitHubIssue;
 
   // Always fetch comments if requested (removed comments_count check to ensure we get all comments)
   // This ensures we catch comments that were added after the issue was last fetched
@@ -716,7 +716,7 @@ export async function fetchAllGitHubIssues(
           
           if (retryResponse.ok) {
             // Success with new token, continue processing
-            const issues: GitHubIssue[] = await retryResponse.json();
+            const issues = await retryResponse.json() as GitHubIssue[];
             const actualIssues = issues.filter(issue => !issue.pull_request);
             console.error(`[GitHub] Page ${page}: Found ${actualIssues.length} issues (${issues.length - actualIssues.length} PRs filtered out) after token rotation`);
             
@@ -823,7 +823,7 @@ export async function fetchAllGitHubIssues(
       throw new Error(errorMessage);
     }
 
-    const issues: GitHubIssue[] = await response.json();
+    const issues = await response.json() as GitHubIssue[];
     
     // Filter out pull requests (issues have pull_request field set to null)
     const actualIssues = issues.filter(issue => !issue.pull_request);
@@ -952,7 +952,7 @@ export async function fetchAllGitHubIssues(
             
             if (retryResponse.ok) {
               // Success with new token, continue processing
-              const issues: GitHubIssue[] = await retryResponse.json();
+              const issues = await retryResponse.json() as GitHubIssue[];
               const actualIssues = issues.filter(issue => !issue.pull_request);
               console.error(`[GitHub] Page ${page}: Found ${actualIssues.length} closed issues (${issues.length - actualIssues.length} PRs filtered out) after token rotation`);
               
@@ -1059,7 +1059,7 @@ export async function fetchAllGitHubIssues(
         throw new Error(errorMessage);
       }
 
-      const issues: GitHubIssue[] = await response.json();
+      const issues = await response.json() as GitHubIssue[];
       
       // Filter out pull requests (issues have pull_request field set to null)
       const actualIssues = issues.filter(issue => !issue.pull_request);

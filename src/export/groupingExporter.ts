@@ -530,8 +530,8 @@ Return ONLY the labels, nothing else.`
       return getAutoLabelsFromPatterns({ labels, title });
     }
     
-    const data = await response.json();
-    const result = data.choices[0]?.message?.content?.trim().toLowerCase() || "";
+    const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
+    const result = data.choices?.[0]?.message?.content?.trim().toLowerCase() || "";
     
     if (result === "none" || !result) {
       return [];
@@ -656,8 +656,8 @@ Example output:
         continue;
       }
       
-      const data = await response.json();
-      const result = data.choices[0]?.message?.content?.trim() || "";
+      const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
+      const result = data.choices?.[0]?.message?.content?.trim() || "";
       
       // Parse results
       const validLabels = ["security", "bug", "regression", "urgent", "enhancement"];
@@ -2149,8 +2149,8 @@ Respond with ONLY "RESOLVED" or "NOT_RESOLVED" (no other text).`
       return null;
     }
     
-    const data = await response.json();
-    const result = data.choices[0]?.message?.content?.trim().toUpperCase();
+    const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
+    const result = data.choices?.[0]?.message?.content?.trim().toUpperCase();
     
     return result === "RESOLVED";
   } catch (error) {
@@ -2269,8 +2269,8 @@ Respond with ONLY "ISSUE" or "QUESTION" (no other text).`
       return null; // Default to exporting if API fails
     }
     
-    const data = await response.json();
-    const result = data.choices[0]?.message?.content?.trim().toUpperCase();
+    const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
+    const result = data.choices?.[0]?.message?.content?.trim().toUpperCase();
     
     // Return true if it's an ISSUE, false if it's a QUESTION
     return result === "ISSUE";
@@ -2554,8 +2554,8 @@ async function classifyGitHubIssue(issue: {
       throw new Error(`OpenAI API error: ${response.status}`);
     }
 
-    const data = await response.json();
-    const result = JSON.parse(data.choices[0].message.content);
+    const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
+    const result = JSON.parse(data.choices?.[0]?.message?.content || "{}");
     return result;
   } catch (error) {
     logError("Error classifying issue with LLM:", error);

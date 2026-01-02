@@ -1499,7 +1499,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             throw new Error(`GitHub API error: ${response.status}`);
           }
           
-          const issues = (await response.json()) as Array<{ number: number; pull_request?: unknown }>;
+          const issues = (await response.json()) as Array<{ number: number; pull_request?: { url: string; html_url: string; diff_url: string; patch_url: string } | null }>;
           const actualIssues = issues.filter(issue => !issue.pull_request);
           const issueNumbers = actualIssues.map(issue => issue.number);
           allIssueNumbers.push(...issueNumbers);

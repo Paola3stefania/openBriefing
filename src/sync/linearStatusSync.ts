@@ -250,7 +250,7 @@ async function checkAndUnarchiveIssue(
       }),
     });
     
-    const data = await response.json();
+    const data = await response.json() as { data?: { issueUnarchive?: { success?: boolean } } };
     return data.data?.issueUnarchive?.success === true;
   } catch (error) {
     logError(`[Sync] Error checking/unarchiving issue ${linearId}:`, error);
