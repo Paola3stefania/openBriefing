@@ -97,6 +97,41 @@ export async function executeToolHandler(
       return { channels, count: channels.length };
     }
 
+    case "read_messages": {
+      const { ChannelType } = await import("discord.js");
+      const { channel_id, limit = 50 } = args as { channel_id?: string; limit?: number };
+      const discord = await getDiscordClient();
+      const config = getConfig();
+      const actualChannelId = channel_id || config.discord.defaultChannelId;
+      
+      if (!actualChannelId) {
+        throw new Error("Channel ID is required. Provide channel_id parameter or set DISCORD_DEFAULT_CHANNEL_ID in environment variables.");
+      }
+      
+      const channel = await discord.channels.fetch(actualChannelId);
+      if (!channel || (channel.type !== ChannelType.GuildText && channel.type !== ChannelType.DM)) {
+        throw new Error("Channel not found or not a text channel");
+      }
+      
+      const textChannel = channel as import("discord.js").TextChannel;
+      const messages = await textChannel.messages.fetch({ limit: Math.min(limit, 100) });
+      
+      const result = Array.from(messages.values()).map((msg) => ({
+        id: msg.id,
+        author: {
+          id: msg.author.id,
+          username: msg.author.username,
+          bot: msg.author.bot,
+        },
+        content: msg.content,
+        timestamp: msg.createdAt.toISOString(),
+        attachments: msg.attachments.map((a) => ({ id: a.id, filename: a.name, url: a.url })),
+        embeds: msg.embeds.length,
+      }));
+      
+      return { messages: result, count: result.length };
+    }
+
     // =========================================================================
     // GITHUB - Call existing client functions
     // =========================================================================
