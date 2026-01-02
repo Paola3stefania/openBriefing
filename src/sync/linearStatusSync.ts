@@ -17,7 +17,35 @@ import { log, logError } from "../mcp/logger.js";
 import { getConfig } from "../config/index.js";
 import { GitHubTokenManager } from "../connectors/github/tokenManager.js";
 
-// Sync summary
+// ============================================================================
+// Constants
+// ============================================================================
+
+const ISSUE_STATES = {
+  OPEN: "open",
+  CLOSED: "closed",
+  UNKNOWN: "unknown",
+} as const;
+
+const LINEAR_STATUS = {
+  DONE: "done",
+  PENDING: "pending",
+} as const;
+
+const SYNC_ACTIONS = {
+  MARKED_DONE: "marked_done",
+  UNCHANGED: "unchanged",
+  SKIPPED: "skipped",
+  ERROR: "error",
+} as const;
+
+const BATCH_SIZE = 50; // For batching API calls
+const CONCURRENCY_LIMIT = 5; // Max parallel API calls
+
+// ============================================================================
+// Types
+// ============================================================================
+
 export interface SyncSummary {
   totalLinearTickets: number;
   synced: number;
@@ -25,25 +53,62 @@ export interface SyncSummary {
   skippedNoLinks: number;
   unchanged: number;
   errors: number;
-  details: Array<{
+  unarchivedCount: number;
+  details: SyncDetail[];
+}
+
+interface SyncDetail {
     linearIdentifier: string;
-    action: "marked_done" | "unchanged" | "skipped" | "error";
+  action: typeof SYNC_ACTIONS[keyof typeof SYNC_ACTIONS];
     reason: string;
     githubIssues: Array<{ number: number; state: string }>;
     prs: Array<{ url: string; merged: boolean }>;
-  }>;
 }
 
-/**
- * Extract GitHub issue URLs from text
- * Matches: https://github.com/owner/repo/issues/123
- */
-function extractGitHubIssueUrls(text: string): Array<{ owner: string; repo: string; number: number }> {
-  const pattern = /https:\/\/github\.com\/([^\/]+)\/([^\/]+)\/issues\/(\d+)/g;
-  const results: Array<{ owner: string; repo: string; number: number }> = [];
+interface GitHubIssueUrl {
+  owner: string;
+  repo: string;
+  number: number;
+}
+
+interface GitHubPRUrl extends GitHubIssueUrl {
+  url: string;
+}
+
+interface LinearConfig {
+  apiKey: string;
+  teamId: string;
+  apiUrl: string;
+}
+
+interface SyncOptions {
+  dryRun?: boolean;
+  force?: boolean;
+}
+
+interface SyncDependencies {
+  prisma: PrismaClient;
+  linear: LinearIntegration;
+  linearConfig: LinearConfig;
+  tokenManager: GitHubTokenManager | null;
+  config: ReturnType<typeof getConfig>;
+}
+
+// ============================================================================
+// URL Extraction Utilities
+// ============================================================================
+
+const GITHUB_ISSUE_PATTERN = /https:\/\/github\.com\/([^\/]+)\/([^\/]+)\/issues\/(\d+)/g;
+const GITHUB_PR_PATTERN = /https:\/\/github\.com\/([^\/]+)\/([^\/]+)\/pull\/(\d+)/g;
+
+function extractGitHubIssueUrls(text: string): GitHubIssueUrl[] {
+  const results: GitHubIssueUrl[] = [];
   let match;
   
-  while ((match = pattern.exec(text)) !== null) {
+  // Reset regex state
+  GITHUB_ISSUE_PATTERN.lastIndex = 0;
+  
+  while ((match = GITHUB_ISSUE_PATTERN.exec(text)) !== null) {
     results.push({
       owner: match[1],
       repo: match[2],
@@ -54,16 +119,14 @@ function extractGitHubIssueUrls(text: string): Array<{ owner: string; repo: stri
   return results;
 }
 
-/**
- * Extract GitHub PR URLs from text
- * Matches: https://github.com/owner/repo/pull/123
- */
-function extractGitHubPRUrls(text: string): Array<{ owner: string; repo: string; number: number; url: string }> {
-  const pattern = /https:\/\/github\.com\/([^\/]+)\/([^\/]+)\/pull\/(\d+)/g;
-  const results: Array<{ owner: string; repo: string; number: number; url: string }> = [];
+function extractGitHubPRUrls(text: string): GitHubPRUrl[] {
+  const results: GitHubPRUrl[] = [];
   let match;
   
-  while ((match = pattern.exec(text)) !== null) {
+  // Reset regex state
+  GITHUB_PR_PATTERN.lastIndex = 0;
+  
+  while ((match = GITHUB_PR_PATTERN.exec(text)) !== null) {
     results.push({
       owner: match[1],
       repo: match[2],
@@ -75,9 +138,10 @@ function extractGitHubPRUrls(text: string): Array<{ owner: string; repo: string;
   return results;
 }
 
-/**
- * Check if a GitHub PR is merged
- */
+// ============================================================================
+// GitHub API Utilities
+// ============================================================================
+
 async function checkPRMerged(
   owner: string,
   repo: string,
@@ -113,166 +177,259 @@ async function checkPRMerged(
   }
 }
 
-/**
- * Main sync function
- * 
- * Starts from Linear tickets (not from GitHub issues)
- * 1. Get all open Linear tickets
- * 2. For each, check connected GitHub issues/PRs
- * 3. Mark Done if all issues closed OR any PR merged
- */
-export async function syncLinearStatus(options: {
-  dryRun?: boolean;
-  force?: boolean;
-}): Promise<SyncSummary> {
-  const { dryRun = false } = options;
+// ============================================================================
+// Linear API Utilities
+// ============================================================================
+
+async function checkAndUnarchiveIssue(
+  linearId: string,
+  linearConfig: LinearConfig,
+  linear: LinearIntegration
+): Promise<boolean> {
+  try {
+    const checkQuery = `
+      query CheckIssueArchived($id: String!) {
+        issue(id: $id) {
+          id
+          archivedAt
+          project { id }
+          cycle { id }
+        }
+      }
+    `;
+    
+    const checkResponse = await fetch(linearConfig.apiUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: linearConfig.apiKey,
+      },
+      body: JSON.stringify({ 
+        query: checkQuery,
+        variables: { id: linearId }
+      }),
+    });
+    
+    const checkData = await checkResponse.json();
+    const issue = checkData.data?.issue;
+    
+    if (!issue?.archivedAt) {
+      return false; // Not archived, nothing to do
+    }
+    
+    // Remove problematic project/cycle before unarchiving
+    if (issue.project || issue.cycle) {
+      try {
+        const updateInput: Record<string, unknown> = {};
+        if (issue.project) updateInput.projectId = null;
+        if (issue.cycle) updateInput.cycleId = null;
+        await linear.updateIssue(linearId, updateInput as any);
+      } catch (e) {
+        log(`[Sync] Warning: Could not remove project/cycle from ${linearId}`);
+      }
+    }
+    
+    // Unarchive the issue
+    const unarchiveQuery = `
+      mutation UnarchiveIssue($id: String!) {
+        issueUnarchive(id: $id) {
+          success
+        }
+      }
+    `;
+    
+    const response = await fetch(linearConfig.apiUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: linearConfig.apiKey,
+      },
+      body: JSON.stringify({ 
+        query: unarchiveQuery,
+        variables: { id: linearId }
+      }),
+    });
+    
+    const data = await response.json();
+    return data.data?.issueUnarchive?.success === true;
+  } catch (error) {
+    logError(`[Sync] Error checking/unarchiving issue ${linearId}:`, error);
+    return false;
+  }
+}
+
+// ============================================================================
+// Batch Processing Utilities
+// ============================================================================
+
+async function processInBatches<T, R>(
+  items: T[],
+  processor: (item: T) => Promise<R>,
+  concurrencyLimit: number = CONCURRENCY_LIMIT
+): Promise<R[]> {
+  const results: R[] = [];
   
-  const config = getConfig();
-  const prisma = new PrismaClient();
-  
-  // Initialize Linear client
-  const linearConfig = {
-    type: "linear" as const,
-    api_key: process.env.PM_TOOL_API_KEY || "",
-    team_id: process.env.PM_TOOL_TEAM_ID || "",
-    api_url: "https://api.linear.app/graphql",
-  };
-  
-  if (!linearConfig.api_key) {
-    throw new Error("PM_TOOL_API_KEY is required for Linear sync");
+  for (let i = 0; i < items.length; i += concurrencyLimit) {
+    const batch = items.slice(i, i + concurrencyLimit);
+    const batchResults = await Promise.all(batch.map(processor));
+    results.push(...batchResults);
   }
   
-  const linear = new LinearIntegration(linearConfig);
+  return results;
+}
+
+// ============================================================================
+// Sync Logic - Separated into focused functions
+// ============================================================================
+
+async function unarchiveExportedIssues(
+  deps: SyncDependencies
+): Promise<number> {
+  const { prisma, linear, linearConfig } = deps;
   
-  // Get workflow states
-  const workflowStates = await linear.getWorkflowStates(linearConfig.team_id);
-  const doneState = workflowStates.find(s => s.type === "completed" || s.name.toLowerCase() === "done");
-  
-  if (!doneState) {
-    throw new Error("Could not find 'Done' workflow state in Linear");
-  }
-  
-  log(`[Sync] Found Done state: ${doneState.name} (${doneState.id})`);
-  
-  // Check for and unarchive any exported issues that got archived
   log(`[Sync] Checking for archived exported issues...`);
-  const exportedIssues = await prisma.gitHubIssue.findMany({
-    where: { linearIssueId: { not: null } },
-    select: { linearIssueId: true, issueNumber: true },
-  });
   
-  const exportedGroups = await prisma.group.findMany({
-    where: { linearIssueId: { not: null } },
-    select: { linearIssueId: true, id: true },
-  });
+  const [exportedIssues, exportedGroups] = await Promise.all([
+    prisma.gitHubIssue.findMany({
+      where: { linearIssueId: { not: null } },
+      select: { linearIssueId: true },
+    }),
+    prisma.group.findMany({
+      where: { linearIssueId: { not: null } },
+      select: { linearIssueId: true },
+    }),
+  ]);
   
   const allExportedIds = [
     ...exportedIssues.map(i => i.linearIssueId).filter((id): id is string => id !== null),
     ...exportedGroups.map(g => g.linearIssueId).filter((id): id is string => id !== null),
   ];
   
-  let unarchivedCount = 0;
-  for (const linearId of allExportedIds) {
-    try {
-      // Check if archived by querying directly
-      const checkQuery = `
-        query {
-          issue(id: "${linearId}") {
-            id
-            archivedAt
-            project { id }
-            cycle { id }
-          }
-        }
-      `;
-      
-      const checkResponse = await fetch(linearConfig.api_url, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: linearConfig.api_key,
-        },
-        body: JSON.stringify({ query: checkQuery }),
-      });
-      
-      const checkData = await checkResponse.json();
-      const issue = checkData.data?.issue;
-      
-      if (issue && issue.archivedAt) {
-        // Try to unarchive - first remove any problematic project/cycle
-        if (issue.project || issue.cycle) {
-          try {
-            const updateInput: Record<string, unknown> = {};
-            if (issue.project) updateInput.projectId = null;
-            if (issue.cycle) updateInput.cycleId = null;
-            
-            await linear.updateIssue(linearId, updateInput as any);
-          } catch (e) {
-            // Ignore errors when removing project/cycle
-          }
-        }
-        
-        // Unarchive
-        const unarchiveQuery = `
-          mutation {
-            issueUnarchive(id: "${linearId}") {
-              success
-            }
-          }
-        `;
-        
-        const response = await fetch(linearConfig.api_url, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: linearConfig.api_key,
-          },
-          body: JSON.stringify({ query: unarchiveQuery }),
-        });
-        
-        const data = await response.json();
-        if (data.data?.issueUnarchive?.success) {
-          unarchivedCount++;
-          log(`[Sync] Unarchived issue ${linearId}`);
-        }
-      }
-    } catch (error) {
-      // Skip errors - issue might not exist or have permission issues
-    }
+  if (allExportedIds.length === 0) {
+    return 0;
   }
+  
+  // Process in batches to avoid rate limits
+  const results = await processInBatches(
+    allExportedIds,
+    (id) => checkAndUnarchiveIssue(id, linearConfig, linear),
+    CONCURRENCY_LIMIT
+  );
+  
+  const unarchivedCount = results.filter(Boolean).length;
   
   if (unarchivedCount > 0) {
     log(`[Sync] Unarchived ${unarchivedCount} exported issues`);
   }
   
-  // Get all OPEN Linear tickets (not done/canceled)
-  // Uses pagination to fetch all issues
-  log(`[Sync] Fetching open Linear tickets...`);
-  const openLinearTickets = await linear.getOpenIssues(linearConfig.team_id);
-  log(`[Sync] Found ${openLinearTickets.length} open Linear tickets`);
+  return unarchivedCount;
+}
+
+async function getIssueStatesFromDB(
+  issueNumbers: number[],
+  dbIssues: Array<{ issueNumber: number; issueState: string | null }>,
+  prisma: PrismaClient
+): Promise<Array<{ number: number; state: string }>> {
+  const issueStates: Array<{ number: number; state: string }> = [];
   
-  const summary: SyncSummary = {
-    totalLinearTickets: openLinearTickets.length,
-    synced: 0,
-    markedDone: 0,
-    skippedNoLinks: 0,
-    unchanged: 0,
-    errors: 0,
-    details: [],
-  };
-  
-  // Initialize token manager for GitHub API calls (lazy - only when needed)
-  let tokenManager: GitHubTokenManager | null = null;
-  
-  const getTokenManager = async (): Promise<GitHubTokenManager | null> => {
-    if (!tokenManager) {
-      tokenManager = await GitHubTokenManager.fromEnvironment();
+  for (const issueNumber of issueNumbers) {
+    // First check the already-fetched DB issues
+    const dbIssue = dbIssues.find(i => i.issueNumber === issueNumber);
+    if (dbIssue) {
+      issueStates.push({
+        number: issueNumber,
+        state: dbIssue.issueState || ISSUE_STATES.UNKNOWN,
+      });
+      continue;
     }
-    return tokenManager;
-  };
+    
+    // Check DB for issues from URL extraction
+    const cachedIssue = await prisma.gitHubIssue.findUnique({
+      where: { issueNumber },
+      select: { issueState: true },
+    });
+    
+    issueStates.push({
+      number: issueNumber,
+      state: cachedIssue?.issueState || ISSUE_STATES.UNKNOWN,
+    });
+  }
   
-  // Process each open Linear ticket
-  for (const ticket of openLinearTickets) {
+  return issueStates;
+}
+
+async function checkPRStates(
+  prUrls: GitHubPRUrl[],
+  tokenManager: GitHubTokenManager | null
+): Promise<Array<{ url: string; merged: boolean }>> {
+  if (prUrls.length === 0 || !tokenManager) {
+    return [];
+  }
+  
+  return processInBatches(
+    prUrls,
+    async (pr) => {
+      const status = await checkPRMerged(pr.owner, pr.repo, pr.number, tokenManager);
+      return { url: pr.url, merged: status.merged };
+    },
+    CONCURRENCY_LIMIT
+  );
+}
+
+function shouldMarkDone(
+  issueStates: Array<{ number: number; state: string }>,
+  prStates: Array<{ url: string; merged: boolean }>
+): { shouldMark: boolean; reason: string } {
+  const hasIssues = issueStates.length > 0;
+  const allIssuesClosed = hasIssues && issueStates.every(i => i.state === ISSUE_STATES.CLOSED);
+  
+  const hasPRs = prStates.length > 0;
+  const anyPRMerged = hasPRs && prStates.some(p => p.merged);
+  
+  if (allIssuesClosed && anyPRMerged) {
+    return {
+      shouldMark: true,
+      reason: `All ${issueStates.length} issues closed AND ${prStates.filter(p => p.merged).length} PR(s) merged`,
+    };
+  }
+  
+  if (allIssuesClosed) {
+    return {
+      shouldMark: true,
+      reason: `All ${issueStates.length} GitHub issue(s) closed`,
+    };
+  }
+  
+  if (anyPRMerged) {
+    return {
+      shouldMark: true,
+      reason: `${prStates.filter(p => p.merged).length} PR(s) merged`,
+    };
+  }
+  
+  // Not ready - build reason
+  const reasons: string[] = [];
+  if (hasIssues) {
+    const openCount = issueStates.filter(i => i.state !== ISSUE_STATES.CLOSED).length;
+    reasons.push(`${openCount}/${issueStates.length} issues still open`);
+  }
+  if (hasPRs && !anyPRMerged) {
+    reasons.push(`0/${prStates.length} PRs merged`);
+  }
+  
+  return {
+    shouldMark: false,
+    reason: reasons.join(", ") || "No closed issues or merged PRs",
+  };
+}
+
+async function processTicket(
+  ticket: { id: string; identifier: string; title?: string; description?: string },
+  deps: SyncDependencies,
+  doneStateId: string,
+  dryRun: boolean
+): Promise<SyncDetail> {
+  const { prisma, linear, config, tokenManager } = deps;
     const identifier = ticket.identifier;
     
     try {
@@ -280,8 +437,7 @@ export async function syncLinearStatus(options: {
       const title = ticket.title || "";
       const fullText = `${title}\n${description}`;
       
-      // Find connected GitHub issues
-      // 1. From our database (issues exported with this linearIssueId)
+    // Find connected GitHub issues from DB
       const dbIssues = await prisma.gitHubIssue.findMany({
         where: { linearIssueId: ticket.id },
         select: {
@@ -291,7 +447,7 @@ export async function syncLinearStatus(options: {
         },
       });
       
-      // 2. From URLs in Linear description
+    // Extract URLs from Linear description
       const issueUrls = extractGitHubIssueUrls(fullText);
       const prUrls = extractGitHubPRUrls(fullText);
       
@@ -299,161 +455,164 @@ export async function syncLinearStatus(options: {
       const allIssueNumbers = new Set<number>();
       dbIssues.forEach(i => allIssueNumbers.add(i.issueNumber));
       
-      // Add issues from URLs (only if from same repo)
+    // Add issues from URLs (only if from configured repo)
       for (const issueUrl of issueUrls) {
         if (issueUrl.owner === config.github.owner && issueUrl.repo === config.github.repo) {
           allIssueNumbers.add(issueUrl.number);
         }
       }
       
-      // Skip if no GitHub issues or PRs connected
+    // Skip if no connections
       if (allIssueNumbers.size === 0 && prUrls.length === 0) {
-        summary.skippedNoLinks++;
-        summary.details.push({
+      return {
           linearIdentifier: identifier,
-          action: "skipped",
+        action: SYNC_ACTIONS.SKIPPED,
           reason: "No GitHub issues or PRs linked",
           githubIssues: [],
           prs: [],
-        });
-        continue;
-      }
-      
-      // Check GitHub issue states (from cached DB data)
-      const issueStates: Array<{ number: number; state: string }> = [];
-      
-      for (const issueNumber of allIssueNumbers) {
-        // First check our DB cache
-        const dbIssue = dbIssues.find(i => i.issueNumber === issueNumber);
-        if (dbIssue) {
-          issueStates.push({
-            number: issueNumber,
-            state: dbIssue.issueState || "unknown",
-          });
-        } else {
-          // Check DB for issues not in the dbIssues result (from URL extraction)
-          const cachedIssue = await prisma.gitHubIssue.findUnique({
-            where: { issueNumber },
-            select: { issueState: true },
-          });
-          
-          if (cachedIssue) {
-            issueStates.push({
-              number: issueNumber,
-              state: cachedIssue.issueState || "unknown",
-            });
-          } else {
-            // Issue not in our DB - mark as unknown
-            issueStates.push({
-              number: issueNumber,
-              state: "unknown",
-            });
-          }
-        }
-      }
-      
-      // Check PR states (only if we have PRs to check)
-      const prStates: Array<{ url: string; merged: boolean }> = [];
-      
-      if (prUrls.length > 0) {
-        const tm = await getTokenManager();
-        if (tm) {
-          for (const pr of prUrls) {
-            const prStatus = await checkPRMerged(pr.owner, pr.repo, pr.number, tm);
-            prStates.push({
-              url: pr.url,
-              merged: prStatus.merged,
-            });
-          }
-        }
-      }
-      
-      // Determine if ticket should be marked Done
-      // Rule 1: ALL GitHub issues are closed
-      const hasIssues = issueStates.length > 0;
-      const allIssuesClosed = hasIssues && issueStates.every(i => i.state === "closed");
-      
-      // Rule 2: ANY PR is merged
-      const hasPRs = prStates.length > 0;
-      const anyPRMerged = hasPRs && prStates.some(p => p.merged);
-      
-      // Decision: mark Done if (all issues closed) OR (any PR merged)
-      const shouldMarkDone = allIssuesClosed || anyPRMerged;
-      
-      if (shouldMarkDone) {
-        let reason = "";
-        if (allIssuesClosed && anyPRMerged) {
-          reason = `All ${issueStates.length} issues closed AND ${prStates.filter(p => p.merged).length} PR(s) merged`;
-        } else if (allIssuesClosed) {
-          reason = `All ${issueStates.length} GitHub issue(s) closed`;
-        } else if (anyPRMerged) {
-          reason = `${prStates.filter(p => p.merged).length} PR(s) merged`;
-        }
+      };
+    }
+    
+    // Get issue and PR states
+    const [issueStates, prStates] = await Promise.all([
+      getIssueStatesFromDB(Array.from(allIssueNumbers), dbIssues, prisma),
+      checkPRStates(prUrls, tokenManager),
+    ]);
+    
+    // Determine action
+    const decision = shouldMarkDone(issueStates, prStates);
+    
+    if (decision.shouldMark) {
+      if (!dryRun) {
+        await linear.updateIssueState(ticket.id, doneStateId);
         
-        if (!dryRun) {
-          await linear.updateIssueState(ticket.id, doneState.id);
-          
-          // Update our DB records
-          for (const issue of dbIssues) {
-            await prisma.gitHubIssue.update({
-              where: { issueNumber: issue.issueNumber },
+        // Update DB records
+        await prisma.gitHubIssue.updateMany({
+          where: { issueNumber: { in: dbIssues.map(i => i.issueNumber) } },
               data: {
-                linearStatus: "done",
+            linearStatus: LINEAR_STATUS.DONE,
                 linearStatusSyncedAt: new Date(),
               },
             });
           }
-        }
+      
+      log(`[Sync] ${dryRun ? "[DRY RUN] " : ""}${identifier}: -> Done (${decision.reason})`);
         
-        summary.markedDone++;
-        summary.synced++;
-        summary.details.push({
+      return {
           linearIdentifier: identifier,
-          action: "marked_done",
-          reason: dryRun ? `[DRY RUN] ${reason}` : reason,
+        action: SYNC_ACTIONS.MARKED_DONE,
+        reason: dryRun ? `[DRY RUN] ${decision.reason}` : decision.reason,
           githubIssues: issueStates,
           prs: prStates,
-        });
-        
-        log(`[Sync] ${dryRun ? "[DRY RUN] " : ""}${identifier}: -> Done (${reason})`);
-      } else {
-        // Not ready to mark done - build reason
-        let reason = "";
-        if (hasIssues) {
-          const openCount = issueStates.filter(i => i.state !== "closed").length;
-          reason = `${openCount}/${issueStates.length} issues still open`;
-        }
-        if (hasPRs && !anyPRMerged) {
-          const prReason = `0/${prStates.length} PRs merged`;
-          reason = reason ? `${reason}, ${prReason}` : prReason;
-        }
-        
-        summary.unchanged++;
-        summary.details.push({
+      };
+    }
+    
+    return {
           linearIdentifier: identifier,
-          action: "unchanged",
-          reason: reason || "No closed issues or merged PRs",
+      action: SYNC_ACTIONS.UNCHANGED,
+      reason: decision.reason,
           githubIssues: issueStates,
           prs: prStates,
-        });
-      }
+    };
       
     } catch (error) {
       logError(`[Sync] Error processing ${identifier}:`, error);
-      summary.errors++;
-      summary.details.push({
+    return {
         linearIdentifier: identifier,
-        action: "error",
+      action: SYNC_ACTIONS.ERROR,
         reason: error instanceof Error ? error.message : String(error),
         githubIssues: [],
         prs: [],
-      });
-    }
+    };
   }
+}
+
+// ============================================================================
+// Main Entry Point
+// ============================================================================
+
+export async function syncLinearStatus(options: SyncOptions = {}): Promise<SyncSummary> {
+  const { dryRun = false } = options;
   
-  await prisma.$disconnect();
+  const config = getConfig();
+  const prisma = new PrismaClient();
+  
+  try {
+    // Validate configuration
+    const linearConfig: LinearConfig = {
+      apiKey: process.env.PM_TOOL_API_KEY || "",
+      teamId: process.env.PM_TOOL_TEAM_ID || "",
+      apiUrl: "https://api.linear.app/graphql",
+    };
+    
+    if (!linearConfig.apiKey) {
+      throw new Error("PM_TOOL_API_KEY is required for Linear sync");
+    }
+    
+    const linear = new LinearIntegration({
+      type: "linear",
+      api_key: linearConfig.apiKey,
+      team_id: linearConfig.teamId,
+      api_url: linearConfig.apiUrl,
+    });
+    
+    // Get workflow states
+    const workflowStates = await linear.getWorkflowStates(linearConfig.teamId);
+    const doneState = workflowStates.find(
+      s => s.type === "completed" || s.name.toLowerCase() === "done"
+    );
+    
+    if (!doneState) {
+      throw new Error("Could not find 'Done' workflow state in Linear");
+    }
+    
+    log(`[Sync] Found Done state: ${doneState.name} (${doneState.id})`);
+    
+    // Initialize token manager lazily
+    const tokenManager = await GitHubTokenManager.fromEnvironment();
+    
+    // Build dependencies
+    const deps: SyncDependencies = {
+      prisma,
+      linear,
+      linearConfig,
+      tokenManager,
+      config,
+    };
+    
+    // Step 1: Unarchive any exported issues that got archived
+    const unarchivedCount = await unarchiveExportedIssues(deps);
+    
+    // Step 2: Get all open Linear tickets
+    log(`[Sync] Fetching open Linear tickets...`);
+    const openLinearTickets = await linear.getOpenIssues(linearConfig.teamId);
+    log(`[Sync] Found ${openLinearTickets.length} open Linear tickets`);
+    
+    // Step 3: Process each ticket
+    const details: SyncDetail[] = [];
+    
+    for (const ticket of openLinearTickets) {
+      const result = await processTicket(ticket, deps, doneState.id, dryRun);
+      details.push(result);
+    }
+    
+    // Build summary
+    const summary: SyncSummary = {
+      totalLinearTickets: openLinearTickets.length,
+      synced: details.filter(d => d.action === SYNC_ACTIONS.MARKED_DONE).length,
+      markedDone: details.filter(d => d.action === SYNC_ACTIONS.MARKED_DONE).length,
+      skippedNoLinks: details.filter(d => d.action === SYNC_ACTIONS.SKIPPED).length,
+      unchanged: details.filter(d => d.action === SYNC_ACTIONS.UNCHANGED).length,
+      errors: details.filter(d => d.action === SYNC_ACTIONS.ERROR).length,
+      unarchivedCount,
+      details,
+    };
   
   log(`[Sync] Complete: ${summary.markedDone} marked done, ${summary.unchanged} unchanged, ${summary.skippedNoLinks} skipped (no links), ${summary.errors} errors`);
   
   return summary;
+    
+  } finally {
+    await prisma.$disconnect();
+  }
 }
