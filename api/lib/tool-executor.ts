@@ -101,8 +101,7 @@ export async function executeToolHandler(
       const { ChannelType } = await import("discord.js");
       const { channel_id, limit = 50 } = args as { channel_id?: string; limit?: number };
       const discord = await getDiscordClient();
-      const config = getConfig();
-      const actualChannelId = channel_id || config.discord.defaultChannelId;
+      const actualChannelId = channel_id || process.env.DISCORD_DEFAULT_CHANNEL_ID;
       
       if (!actualChannelId) {
         throw new Error("Channel ID is required. Provide channel_id parameter or set DISCORD_DEFAULT_CHANNEL_ID in environment variables.");

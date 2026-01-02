@@ -12,11 +12,10 @@
     "isolatedModules": true,
     "noEmit": true,
     "outDir": "./dist",
-    "rootDir": ".",
-    "baseUrl": ".",
+    "baseUrl": "..",
     "types": ["node"]
   },
-  "include": ["./**/*.ts"],
+  "include": ["./**/*.ts", "../src/**/*.ts"],
   "exclude": ["node_modules", "dist"]
 }
 
