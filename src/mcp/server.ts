@@ -7450,8 +7450,8 @@ Example output:
               continue;
             }
             
-            const data = await response.json();
-            const result = data.choices[0]?.message?.content?.trim() || "";
+            const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
+            const result = data.choices?.[0]?.message?.content?.trim() || "";
             
             // Parse results
             const lines = result.split("\n").filter((l: string) => l.trim());
@@ -8519,8 +8519,8 @@ Example output:
               continue;
             }
 
-            const data = await response.json();
-            const result = data.choices[0]?.message?.content?.trim() || "";
+            const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
+            const result = data.choices?.[0]?.message?.content?.trim() || "";
 
             // Parse results
             const validLabels = ["security", "bug", "regression", "urgent", "enhancement"];
@@ -8589,7 +8589,7 @@ Example output:
                             throw new Error(`Failed to update issue: ${updateResponse.status}`);
                           }
 
-                          const updateData = await updateResponse.json();
+                          const updateData = await updateResponse.json() as { data?: { issueUpdate?: { success?: boolean } }; errors?: Array<{ message: string }> };
                           if (!updateData.data?.issueUpdate?.success) {
                             throw new Error(`Failed to update issue: ${JSON.stringify(updateData.errors)}`);
                           }

@@ -1104,7 +1104,7 @@ export class LinearIntegration extends BasePMTool {
       throw new Error(`Linear API error: ${response.status} ${response.statusText}. Details: ${errorDetails}`);
     }
 
-    return await response.json();
+    return await response.json() as { data?: T; errors?: Array<{ message: string }> };
   }
 
   private formatDescription(issue: PMToolIssue): string {

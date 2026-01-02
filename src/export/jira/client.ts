@@ -112,7 +112,7 @@ export class JiraIntegration extends BasePMTool {
       throw new Error(`Jira API error: ${response.status} ${errorText}`);
     }
 
-    const data = await response.json();
+    const data = await response.json() as { id: string; key: string };
     
     return {
       id: data.id,

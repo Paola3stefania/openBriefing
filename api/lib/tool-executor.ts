@@ -31,10 +31,10 @@ export function getAvailableTools() {
 }
 
 // Lazy-loaded shared instances
-let _discord: Awaited<typeof import("discord.js")>["Client"] | null = null;
+let _discord: import("discord.js").Client | null = null;
 let _discordReady = false;
 
-async function getDiscordClient() {
+async function getDiscordClient(): Promise<import("discord.js").Client> {
   if (!_discord) {
     const { Client, GatewayIntentBits } = await import("discord.js");
     const token = process.env.DISCORD_TOKEN;
@@ -47,7 +47,7 @@ async function getDiscordClient() {
         GatewayIntentBits.MessageContent,
         GatewayIntentBits.DirectMessages,
       ],
-    }) as InstanceType<typeof Client>;
+    });
 
     _discord.once("ready", () => { _discordReady = true; });
     await _discord.login(token);
@@ -144,7 +144,7 @@ export async function executeToolHandler(
               issueAuthor: issue.user?.login,
               issueCreatedAt: new Date(issue.created_at),
               issueUpdatedAt: new Date(issue.updated_at),
-              issueComments: issue.comments || [],
+              issueComments: (issue.comments || []) as unknown as Record<string, unknown>,
               issueMilestone: issue.milestone?.title,
             },
             update: {
@@ -154,7 +154,7 @@ export async function executeToolHandler(
               issueLabels: issue.labels.map((l) => l.name),
               issueAssignees: issue.assignees?.map((a) => a.login) || [],
               issueUpdatedAt: new Date(issue.updated_at),
-              issueComments: issue.comments || [],
+              issueComments: (issue.comments || []) as unknown as Record<string, unknown>,
               issueMilestone: issue.milestone?.title,
             },
           });
@@ -174,7 +174,8 @@ export async function executeToolHandler(
       if (!query) throw new Error("query is required");
       
       const results = await searchGitHubIssues(query);
-      return { results, count: results.length };
+      const count = results.items?.length || 0;
+      return { results, count };
     }
 
     // =========================================================================
@@ -198,7 +199,7 @@ export async function executeToolHandler(
           throw new Error("Channel not found or not a text channel");
         }
         
-        const textChannel = channel as InstanceType<typeof TextChannel>;
+        const textChannel = channel as import("discord.js").TextChannel;
         
         // Get since date for incremental
         let sinceDate: Date | null = null;
@@ -252,23 +253,24 @@ export async function executeToolHandler(
         
         // Save to database
         for (const msg of messages) {
+          const discordMsg = msg as import("discord.js").Message;
           await prisma.discordMessage.upsert({
-            where: { id: msg.id },
+            where: { id: discordMsg.id },
             create: {
-              id: msg.id,
-              channelId: msg.channel.id,
-              authorId: msg.author.id,
-              authorUsername: msg.author.username,
-              authorBot: msg.author.bot,
-              content: msg.content,
-              createdAt: msg.createdAt,
-              editedAt: msg.editedAt,
-              timestamp: msg.createdTimestamp.toString(),
-              threadId: msg.thread?.id,
-              threadName: msg.thread?.name,
-              url: msg.url,
+              id: discordMsg.id,
+              channelId: discordMsg.channel.id,
+              authorId: discordMsg.author.id,
+              authorUsername: discordMsg.author.username,
+              authorBot: discordMsg.author.bot,
+              content: discordMsg.content,
+              createdAt: discordMsg.createdAt,
+              editedAt: discordMsg.editedAt,
+              timestamp: discordMsg.createdTimestamp.toString(),
+              threadId: discordMsg.thread?.id,
+              threadName: discordMsg.thread?.name,
+              url: discordMsg.url,
             },
-            update: { content: msg.content, editedAt: msg.editedAt },
+            update: { content: discordMsg.content, editedAt: discordMsg.editedAt },
           });
         }
         
@@ -341,8 +343,8 @@ export async function executeToolHandler(
             
             const results = await classifyMessagesWithCache(msgs, issuesForMatch);
             
-            if (results.length > 0 && results[0].matched_issues?.length > 0) {
-              const topMatch = results[0].matched_issues[0];
+            if (results.length > 0 && results[0].relatedIssues?.length > 0) {
+              const topMatch = results[0].relatedIssues[0];
               const hasMatch = topMatch.similarity_score >= minSimilarity;
               
               await prisma.classifiedThread.upsert({
@@ -609,7 +611,7 @@ Body: ${issue.issueBody?.slice(0, 1000) || "No description"}`;
     
     case "match_issues_to_features": {
       const { PrismaClient } = await import("@prisma/client");
-      const { computeEmbedding } = await import("../../src/core/classify/classifier.js");
+      const { createEmbedding } = await import("../../src/core/classify/semantic.js");
       const prisma = new PrismaClient();
       
       try {
@@ -640,7 +642,9 @@ Body: ${issue.issueBody?.slice(0, 1000) || "No description"}`;
           let issueEmb = issue.embedding?.embedding as number[] | undefined;
           if (!issueEmb) {
             const text = `${issue.issueTitle}\n${issue.issueBody || ""}`;
-            issueEmb = await computeEmbedding(text);
+            const apiKey = process.env.OPENAI_API_KEY;
+            if (!apiKey) throw new Error("OPENAI_API_KEY required");
+            issueEmb = await createEmbedding(text, apiKey);
           }
           
           const matchedFeatures: { id: string; name: string; similarity: number }[] = [];

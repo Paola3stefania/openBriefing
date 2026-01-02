@@ -303,7 +303,7 @@ export async function createEmbeddings(
       if (!response.ok) {
         let errorData: { error?: { message?: string } } | undefined;
         try {
-          errorData = await response.json();
+          errorData = await response.json() as { error?: { message?: string } };
         } catch {
           const errorText = await response.text();
           errorData = { error: { message: errorText } };
@@ -332,9 +332,9 @@ export async function createEmbeddings(
         throw new Error(`OpenAI API error: ${response.status} ${JSON.stringify(errorData)}`);
       }
 
-      const data = await response.json();
+      const data = await response.json() as { data?: Array<{ embedding: number[] }> };
       // Return embeddings in the same order as input texts
-      return (data.data as Array<{ embedding: number[] }>).map((item) => item.embedding);
+      return (data.data || []).map((item) => item.embedding);
     } catch (error) {
       if (attempt === retries - 1) {
         throw error;

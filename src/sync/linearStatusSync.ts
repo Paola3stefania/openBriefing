@@ -210,7 +210,7 @@ async function checkAndUnarchiveIssue(
       }),
     });
     
-    const checkData = await checkResponse.json();
+    const checkData = await checkResponse.json() as { data?: { issue?: { archivedAt?: string; project?: { id: string }; cycle?: { id: string } } } };
     const issue = checkData.data?.issue;
     
     if (!issue?.archivedAt) {

@@ -111,7 +111,7 @@ export async function searchGitHubIssues(
     );
   }
 
-  const data = await response.json();
+  const data = await response.json() as GitHubSearchResult;
   return data;
 }
 

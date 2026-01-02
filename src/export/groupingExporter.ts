@@ -159,8 +159,8 @@ Return ONLY the title text, nothing else.`
       return generateFallbackTitle(group);
     }
 
-    const data = await response.json();
-    const title = data.choices[0]?.message?.content?.trim();
+    const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
+    const title = data.choices?.[0]?.message?.content?.trim();
     
     if (title && title.length > 0 && title.length <= 150) {
       // Truncate if slightly over limit

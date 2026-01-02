@@ -101,8 +101,8 @@ export async function fetchRepositoryCodeContext(
       throw new Error(`GitHub API error: ${branchesResponse.status} ${branchesResponse.statusText}`);
     }
 
-    const branches = await branchesResponse.json();
-    const defaultBranch = branches.find((b: { name: string }) => b.name === 'main' || b.name === 'master') || branches[0];
+    const branches = await branchesResponse.json() as Array<{ name: string; commit: { sha: string } }>;
+    const defaultBranch = branches.find((b) => b.name === 'main' || b.name === 'master') || branches[0];
     
     if (!defaultBranch) {
       throw new Error("No branches found in repository");
@@ -118,13 +118,13 @@ export async function fetchRepositoryCodeContext(
       throw new Error(`GitHub API error: ${treeResponse.status} ${treeResponse.statusText}`);
     }
 
-    const tree = await treeResponse.json();
+    const tree = await treeResponse.json() as { tree?: Array<{ path: string; type: string }> };
     
     // Filter for relevant code files (exclude node_modules, dist, etc.)
     const codeExtensions = ['.ts', '.tsx', '.js', '.jsx', '.py', '.go', '.rs', '.java', '.kt'];
     const excludeDirs = ['node_modules', 'dist', 'build', '.git', 'coverage', '.next', '.nuxt', 'vendor'];
     
-    const relevantFiles = tree.tree
+    const relevantFiles = (tree.tree || [])
       .filter((item: { path: string; type: string }) => {
         if (item.type !== 'blob') return false;
         const path = item.path.toLowerCase();
@@ -144,7 +144,7 @@ export async function fetchRepositoryCodeContext(
         );
 
         if (fileResponse.ok) {
-          const fileData = await fileResponse.json();
+          const fileData = await fileResponse.json() as { content?: string; encoding?: string };
           if (fileData.content && fileData.encoding === 'base64') {
             const content = Buffer.from(fileData.content, 'base64').toString('utf-8');
             // Extract key information: function names, class names, exports, API routes

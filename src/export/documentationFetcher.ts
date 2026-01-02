@@ -112,8 +112,8 @@ Preserve the logical structure and hierarchy of the content.`
       throw new Error(`OpenAI API error: ${response.status} ${errorText}`);
     }
 
-    const data = await response.json();
-    const content = data.choices[0]?.message?.content;
+    const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
+    const content = data.choices?.[0]?.message?.content;
     
     if (!content) {
       throw new Error("No content in OpenAI response");
