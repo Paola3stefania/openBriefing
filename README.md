@@ -175,6 +175,8 @@ UNMute supports two storage backends:
    See [docs/DATABASE_SETUP.md](docs/DATABASE_SETUP.md) for detailed setup instructions.
 
 5. Configure MCP server in `cursor-mcp-config.json` (or `~/.cursor/mcp.json`)
+   
+   See `cursor-mcp-config.json.example` for a complete example configuration with all available environment variables.
 
 ## Getting Started
 
@@ -503,7 +505,7 @@ Add to `cursor-mcp-config.json` (or `~/.cursor/mcp.json`) in your repository:
 - `OPENAI_API_KEY` - For semantic classification
 - `DATABASE_URL` - For production use (PostgreSQL)
 
-See `env.example` for all available variables.
+See `cursor-mcp-config.json.example` for a complete configuration example with all available environment variables. See `env.example` for detailed descriptions of each variable.
 
 ## Project Structure
 

@@ -1,21 +1,29 @@
 {
   "mcpServers": {
     "UnMute": {
-      "command": "/absolute/path/to/your/unmute-mcp/run-mcp.sh",
+      "command": "/absolute/path/to/discord-mcp/run-mcp.sh",
       "env": {
+        "MCP_LOG_FILE": "/absolute/path/to/discord-mcp/logs/mcp-server.log",
         "DISCORD_TOKEN": "your_discord_bot_token_here",
-        "GITHUB_TOKEN": "your_github_token_here_optional",
+        "GITHUB_TOKEN": "your_github_token_here",
+        "DISCORD_SERVER_ID": "your_discord_server_id_optional",
+        "DISCORD_DEFAULT_CHANNEL_ID": "your_discord_default_channel_id_optional",
         "GITHUB_OWNER": "your_org_or_username",
         "GITHUB_REPO": "your_repository_name",
+        "GITHUB_REPO_URL": "https://github.com/your-org/your-repo",
+        "LOCAL_REPO_PATH": "/absolute/path/to/local/repo_optional",
+        "GITHUB_OAUTH_CLIENT_ID": "your_oauth_client_id_optional",
+        "GITHUB_OAUTH_CLIENT_SECRET": "your_oauth_client_secret_optional",
         "OPENAI_API_KEY": "your_openai_api_key_here_optional",
-        "DATABASE_URL": "postgresql://user:password@localhost:5432/unmute_mcp_optional",
-        "DOCUMENTATION_URLS": "https://docs.example.com/docs_optional",
-        "GITHUB_REPO_URL": "https://github.com/owner/repo_optional",
-        "PM_TOOL_TYPE": "linear_optional",
+        "OPENAI_EMBEDDING_MODEL": "text-embedding-3-large_optional",
+        "SLACK_TOKEN": "your_slack_token_optional",
+        "DOCUMENTATION_URLS": "https://docs.example.com/docs",
         "PM_TOOL_API_KEY": "your_pm_tool_api_key_optional",
-        "PM_TOOL_TEAM_ID": "your_team_id_optional"
+        "PM_TOOL_TEAM_ID": "your_team_id_optional",
+        "PM_TOOL_TYPE": "linear",
+        "PM_TOOL_WORKSPACE_ID": "your_workspace_id_optional",
+        "DATABASE_URL": "postgresql://user:password@localhost:5432/unmute_mcp"
       }
     }
   }
 }
-
