@@ -926,6 +926,137 @@ export class LinearIntegration extends BasePMTool {
   }
 
   /**
+   * Update issue assignee
+   * @param issueId - Linear issue ID
+   * @param assigneeId - Linear user ID (null to unassign)
+   */
+  async updateIssueAssignee(issueId: string, assigneeId: string | null): Promise<void> {
+    const query = `
+      mutation UpdateIssueAssignee($id: String!, $assigneeId: String) {
+        issueUpdate(id: $id, input: { assigneeId: $assigneeId }) {
+          success
+          issue {
+            id
+            identifier
+            assignee {
+              id
+              name
+            }
+          }
+        }
+      }
+    `;
+
+    const response = await this.graphqlRequest<{
+      issueUpdate?: {
+        success: boolean;
+        issue?: {
+          id: string;
+          identifier: string;
+          assignee?: { id: string; name: string } | null;
+        };
+      };
+    }>(query, { id: issueId, assigneeId });
+
+    if (!response.data?.issueUpdate?.success) {
+      throw new Error(`Failed to update Linear issue assignee: ${JSON.stringify(response.errors)}`);
+    }
+
+    const assigneeName = response.data.issueUpdate.issue?.assignee?.name || "unassigned";
+    log(`Updated Linear issue ${response.data.issueUpdate.issue?.identifier} assignee: ${assigneeName}`);
+  }
+
+  /**
+   * Update issue state and assignee in one call
+   * @param issueId - Linear issue ID
+   * @param stateId - Workflow state ID (optional)
+   * @param assigneeId - Linear user ID (optional, null to unassign)
+   */
+  async updateIssueStateAndAssignee(
+    issueId: string,
+    stateId?: string,
+    assigneeId?: string | null
+  ): Promise<void> {
+    const input: Record<string, unknown> = {};
+    if (stateId !== undefined) input.stateId = stateId;
+    if (assigneeId !== undefined) input.assigneeId = assigneeId;
+
+    const query = `
+      mutation UpdateIssue($id: String!, $input: IssueUpdateInput!) {
+        issueUpdate(id: $id, input: $input) {
+          success
+          issue {
+            id
+            identifier
+            state {
+              name
+            }
+            assignee {
+              id
+              name
+            }
+          }
+        }
+      }
+    `;
+
+    const response = await this.graphqlRequest<{
+      issueUpdate?: {
+        success: boolean;
+        issue?: {
+          id: string;
+          identifier: string;
+          state?: { name: string };
+          assignee?: { id: string; name: string } | null;
+        };
+      };
+    }>(query, { id: issueId, input });
+
+    if (!response.data?.issueUpdate?.success) {
+      throw new Error(`Failed to update Linear issue state/assignee: ${JSON.stringify(response.errors)}`);
+    }
+
+    const stateName = response.data.issueUpdate.issue?.state?.name || "unknown";
+    const assigneeName = response.data.issueUpdate.issue?.assignee?.name || "unassigned";
+    log(`Updated Linear issue ${response.data.issueUpdate.issue?.identifier}: state=${stateName}, assignee=${assigneeName}`);
+  }
+
+  /**
+   * List all users in the Linear workspace
+   * Returns users with their ID, name, and email
+   */
+  async listUsers(): Promise<Array<{ id: string; name: string; email: string }>> {
+    const query = `
+      query GetUsers {
+        users {
+          nodes {
+            id
+            name
+            email
+          }
+        }
+      }
+    `;
+
+    try {
+      const response = await this.graphqlRequest<{
+        users?: {
+          nodes?: Array<{
+            id: string;
+            name: string;
+            email: string;
+          }>;
+        };
+      }>(query, {});
+
+      return response.data?.users?.nodes || [];
+    } catch (error) {
+      logError("Failed to list Linear users:", error);
+      throw error;
+    }
+  }
+
+  /**
    * Find workflow state by name or type
    * @param nameOrType - State name ("Done", "In Progress") or type ("completed", "started", "backlog", "canceled")
    */

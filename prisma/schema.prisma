@@ -215,7 +215,7 @@ model GitHubIssue {
   // Linear sync status
   linearStatus         String?  @map("linear_status") // 'backlog' | 'todo' | 'in_progress' | 'done' | 'canceled'
   linearStatusSyncedAt DateTime? @map("linear_status_synced_at")
-  closedByPR           String?  @map("closed_by_pr") // PR number/URL that closed this issue
+  closedByPR           String?  @map("closed_by_pr") // PR number/URL that closed this issue (legacy, use pullRequests relation)
   closedByPRMergedAt   DateTime? @map("closed_by_pr_merged_at")
   
   createdAt            DateTime @default(now()) @map("created_at")
@@ -224,6 +224,7 @@ model GitHubIssue {
   group                Group?   @relation(fields: [groupId], references: [id])
   embedding            IssueEmbedding?
   threadMatches        IssueThreadMatch[] // Issue-centered thread matches
+  pullRequests         GitHubPullRequest[] // PRs that reference this issue
 
   @@index([inGroup])
   @@index([matchedToThreads])
@@ -234,6 +235,32 @@ model GitHubIssue {
   @@index([linearStatus])
   @@index([linearIssueId])
   @@map("github_issues")
+}
+
+// GitHub Pull Requests
+model GitHubPullRequest {
+  prNumber             Int      @id @map("pr_number")
+  prTitle               String   @map("pr_title")
+  prUrl                 String   @unique @map("pr_url")
+  prState               String   @map("pr_state") // "open" | "closed"
+  prMerged              Boolean  @default(false) @map("pr_merged")
+  prAuthor              String   @map("pr_author") // GitHub username
+  prCreatedAt           DateTime @map("pr_created_at")
+  prUpdatedAt           DateTime @map("pr_updated_at")
+  prBody                String?  @map("pr_body")
+  prHeadRef             String?  @map("pr_head_ref")
+  prBaseRef             String?  @map("pr_base_ref")
+  
+  // Relations
+  linkedIssues          GitHubIssue[] // Issues that this PR references
+  
+  createdAt             DateTime @default(now()) @map("created_at")
+  updatedAt             DateTime @updatedAt @map("updated_at")
+
+  @@index([prState])
+  @@index([prMerged])
+  @@index([prAuthor])
+  @@map("github_pull_requests")
 }
 
 // Issue-centered thread matches (GitHub issue is primary, Discord threads are attached)

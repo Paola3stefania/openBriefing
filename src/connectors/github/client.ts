@@ -1135,6 +1135,177 @@ export async function fetchAllGitHubIssues(
 }
 
 /**
+ * Get pull requests linked to a GitHub issue
+ * Uses GitHub's search API to find PRs that reference the issue
+ * PRs are linked via "Closes #123", "Fixes #123", "Resolves #123" in PR description
+ */
+export interface GitHubPR {
+  number: number;
+  title: string;
+  state: "open" | "closed";
+  merged: boolean;
+  html_url: string;
+  user: {
+    login: string;
+    avatar_url: string;
+  };
+  created_at: string;
+  updated_at: string;
+  head: {
+    ref: string;
+  };
+  base: {
+    ref: string;
+  };
+  body?: string;
+}
+
+/**
+ * Get pull requests linked to a GitHub issue
+ * Uses the issue timeline API to find PRs that reference the issue
+ * This uses the same repository API endpoint pattern as fetchAllGitHubIssues
+ */
+export async function getPRsForIssue(
+  issueNumber: number,
+  tokenOrManager?: string | GitHubTokenManager,
+  owner?: string,
+  repo?: string
+): Promise<GitHubPR[]> {
+  const config = getConfig();
+  const repoOwner = owner || config.github.owner;
+  const repoName = repo || config.github.repo;
+  
+  let headers = await createHeaders(tokenOrManager);
+  
+  // Use repository pulls API to find PRs that reference the issue (same pattern as fetchAllGitHubIssues)
+  // We'll paginate through open PRs and check their body for issue references
+  // This uses the same repository API endpoint pattern, avoiding the search API
+  const linkedPRs: GitHubPR[] = [];
+  let page = 1;
+  let hasMore = true;
+  
+  // Filter pattern: PRs reference issues with patterns like: "Closes #123", "Fixes #123", "Resolves #123", or just "#123"
+  const issueRefPattern = new RegExp(`(?:closes?|fixes?|resolves?|refs?)\\s*#${issueNumber}\\b|#${issueNumber}\\b`, 'i');
+  
+  try {
+    while (hasMore) {
+      const pullsUrl = `https://api.github.com/repos/${repoOwner}/${repoName}/pulls?state=open&per_page=100&page=${page}&sort=updated&direction=desc`;
+      
+      let currentToken = await getToken(tokenOrManager);
+      headers = await createHeaders(tokenOrManager);
+      let response = await fetch(pullsUrl, { headers });
+      
+      // Update rate limit info if using token manager
+      if (response.ok && currentToken) {
+        updateRateLimit(response, tokenOrManager, currentToken);
+      }
+      
+      if (!response.ok) {
+        // Handle rate limits and token rotation (same pattern as fetchAllGitHubIssues)
+        if ((response.status === 403 || response.status === 429) && tokenOrManager && tokenOrManager instanceof GitHubTokenManager) {
+          if (currentToken) {
+            updateRateLimit(response, tokenOrManager, currentToken);
+          }
+          
+          const nextToken = await tokenOrManager.getNextAvailableToken();
+          if (nextToken) {
+            headers = await createHeaders(tokenOrManager, nextToken);
+            response = await fetch(pullsUrl, { headers });
+            
+            if (response.ok && nextToken) {
+              updateRateLimit(response, tokenOrManager, nextToken);
+            }
+          }
+        }
+        
+        if (!response.ok) {
+          if (page === 1) {
+            log(`Failed to fetch PRs for issue #${issueNumber}: ${response.status}`);
+          }
+          break;
+        }
+      }
+      
+      const pagePRs = await response.json() as GitHubPR[];
+      
+      if (pagePRs.length === 0) {
+        hasMore = false;
+        break;
+      }
+      
+      // Filter PRs that reference this issue in their body/description
+      for (const pr of pagePRs) {
+        const body = pr.body || '';
+        if (issueRefPattern.test(body)) {
+          linkedPRs.push(pr);
+        }
+      }
+      
+      // Stop if we got fewer than 100 PRs (last page)
+      if (pagePRs.length < 100) {
+        hasMore = false;
+      } else {
+        page++;
+        // Add a small delay between pages to be respectful
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+    }
+    
+    return linkedPRs;
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    log(`[ERROR] Failed to fetch PRs for issue #${issueNumber}: ${errorMsg}`);
+    return [];
+  }
+}
+
+/**
+ * Fetch full PR details for a list of PR numbers
+ */
+async function fetchPRDetails(
+  prNumbers: number[],
+  owner: string,
+  repo: string,
+  headers: Record<string, string>,
+  tokenOrManager?: string | GitHubTokenManager
+): Promise<GitHubPR[]> {
+  const prs: GitHubPR[] = [];
+  
+  for (const prNumber of prNumbers) {
+    try {
+      const prUrl = `https://api.github.com/repos/${owner}/${repo}/pulls/${prNumber}`;
+      let prResponse = await fetch(prUrl, { headers });
+      
+      if (!prResponse.ok) {
+        if (prResponse.status === 403 || prResponse.status === 429) {
+          // Try token rotation
+          if (tokenOrManager && tokenOrManager instanceof GitHubTokenManager) {
+            const nextToken = await tokenOrManager.getNextAvailableToken();
+            if (nextToken) {
+              headers.Authorization = `Bearer ${nextToken}`;
+              prResponse = await fetch(prUrl, { headers });
+            }
+          }
+        }
+        
+        if (!prResponse.ok) {
+          continue;
+        }
+      }
+      
+      const pr = await prResponse.json() as GitHubPR;
+      prs.push(pr);
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      log(`Warning: Failed to fetch PR #${prNumber}: ${errorMsg}`);
+      continue;
+    }
+  }
+  
+  return prs;
+}
+
+/**
  * Format GitHub issue for display
  */
 export function formatGitHubIssue(issue: GitHubIssue): string {

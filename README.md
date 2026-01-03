@@ -176,6 +176,69 @@ UNMute supports two storage backends:
 
 5. Configure MCP server in `cursor-mcp-config.json` (or `~/.cursor/mcp.json`)
 
+## Getting Started
+
+After completing setup, follow these steps for your first run:
+
+### 1. Validate Your Setup (Recommended)
+
+Before running workflows, validate your configuration:
+
+- **`validate_pm_setup`** - Validates PM tool (Linear/Jira) configuration, API keys, and environment variables. Run this first to ensure everything is configured correctly.
+
+### 2. Discover Your Environment (Optional but Recommended)
+
+Explore what's available before fetching data:
+
+- **`list_servers`** - List Discord servers your bot can access
+- **`list_channels`** - List channels in a Discord server (requires `server_id`)
+- **`list_linear_teams`** - List Linear teams (if using Linear export, helps you find your `PM_TOOL_TEAM_ID`)
+
+### 3. Fetch Initial Data
+
+Fetch and cache data from your sources:
+
+- **`fetch_github_issues`** - Fetch and cache GitHub issues (incremental, safe to rerun)
+- **`fetch_discord_messages`** - Fetch and cache Discord messages (incremental, safe to rerun)
+
+> **Note**: These tools are incremental - they only fetch new/updated data on subsequent runs, so they're safe to run multiple times.
+
+### 4. Choose a Workflow
+
+After fetching data, choose one of the workflows below (see [Usage Examples](#usage-examples) for details):
+
+**Issue-Centric Workflow (Recommended)** - Best if you primarily track work via GitHub issues:
+1. `group_github_issues`
+2. `match_issues_to_features`
+3. `label_github_issues`
+4. `match_issues_to_threads` (optional - adds Discord context)
+5. `export_to_pm_tool`
+
+**Thread-Centric Workflow** - Best if Discord is your primary source of feedback:
+1. `sync_and_classify` (auto-fetches messages and issues, then classifies)
+2. `suggest_grouping`
+3. `match_groups_to_features`
+4. `export_to_pm_tool`
+
+### Quick Start Summary
+
+For a quick test run:
+
+```bash
+# 1. Validate setup
+validate_pm_setup
+
+# 2. (Optional) Discover servers/channels
+list_servers
+list_channels(server_id: "your-server-id")
+
+# 3. Fetch data
+fetch_github_issues
+fetch_discord_messages
+
+# 4. Run your chosen workflow (see Usage Examples below)
+```
+
 ## MCP Tools
 
 These tool names are **stable** and will not change. Semantics may evolve, but names are fixed.
@@ -249,7 +312,9 @@ These tool names are **stable** and will not change. Semantics may evolve, but n
 
 | Tool | Description |
 |------|-------------|
-| `sync_linear_status` | Sync GitHub issue states to Linear tickets (GitHub -> Linear) |
+| `sync_linear_status` | Sync GitHub issue states to Linear tickets (GitHub -> Linear). Marks Linear as "Done" when GitHub issues are closed or have merged PRs. |
+| `sync_pr_based_status` | Sync Linear issue status and assignee based on open PRs. Updates Linear to "In Progress" and assigns user when open PRs exist. Only assigns if PR author is an organization engineer. |
+| `sync_combined` | Combined sync workflow: Runs both PR-based sync and Linear status sync in sequence. Step 1: Sets issues to "In Progress" when open PRs are found. Step 2: Marks issues as "Done" when closed/merged. |
 | `classify_linear_issues` | Classify Linear issues into projects/features |
 | `label_linear_issues` | Add missing labels to Linear issues using LLM |
 
@@ -261,6 +326,8 @@ These tool names are **stable** and will not change. Semantics may evolve, but n
 | `check_discord_classification_completeness` | Verify all Discord messages have been classified |
 
 ## Usage Examples
+
+> **Note**: For first-time users, we recommend completing the [Getting Started](#getting-started) steps above (validate setup, discover servers/channels) before running these workflows. The workflows below will fetch data automatically if needed.
 
 ### Issue-Centric Workflow (Recommended)
 
@@ -309,6 +376,92 @@ manage_documentation_cache(action: "extract_features")
 # 3. Compute embeddings
 manage_documentation_cache(action: "compute_embeddings")
 ```
+
+### PR-Based Status Sync
+
+Sync Linear issue status and assignee based on open PRs connected to GitHub issues. When an open PR exists for a GitHub issue that has a Linear ticket, this tool:
+- Updates Linear issue status to "In Progress"
+- Assigns the Linear issue to the PR author (if they're an organization engineer)
+
+**Prerequisites:**
+- User mappings: GitHub username → Linear user ID (auto-built from CSV if available, see [docs/CSV_SETUP.md](docs/CSV_SETUP.md))
+- Organization engineer list: Defines which GitHub users should trigger assignments
+
+**Usage:**
+
+```bash
+# Dry run to see what would be updated
+sync_pr_based_status(dry_run: true)
+
+# Run sync (auto-builds mappings from CSV if MEMBERS_CSV_PATH is set)
+sync_pr_based_status(dry_run: false)
+
+# Manual user mappings (optional, overrides CSV)
+sync_pr_based_status(
+  dry_run: false,
+  user_mappings: [
+    {"githubUsername": "engineer1", "linearUserId": "linear-user-id-1"},
+    {"githubUsername": "engineer2", "linearUserId": "linear-user-id-2"}
+  ],
+  organization_engineers: ["engineer1", "engineer2"],
+  default_assignee_id: "optional-default-linear-user-id"
+)
+```
+
+**Configuration Options:**
+- `MEMBERS_CSV_PATH`: Path to CSV file with organization members (see [docs/CSV_SETUP.md](docs/CSV_SETUP.md))
+- `ORGANIZATION_ENGINEERS`: Comma-separated list or JSON array of GitHub usernames
+- `USER_MAPPINGS`: JSON array of `{githubUsername, linearUserId}` mappings
+
+**Difference from `sync_linear_status`:**
+- `sync_linear_status`: Checks if issues are closed/merged → marks Linear as "Done"
+- `sync_pr_based_status`: Checks for open PRs → marks Linear as "In Progress" and assigns users
+
+### Combined Sync Workflow
+
+The `sync_combined` tool runs both PR-based sync and Linear status sync in sequence, providing a complete sync workflow in a single operation:
+
+**Step 1: PR-based sync**
+- Checks for open PRs connected to GitHub issues
+- Sets Linear issues to "In Progress" status
+- Assigns Linear issues to PR authors (if organization engineers)
+
+**Step 2: Linear status sync**
+- Checks if GitHub issues are closed or have merged PRs
+- Marks Linear issues as "Done" when issues are closed/merged
+
+This workflow ensures Linear issues accurately reflect the current state of GitHub work:
+- Issues with open PRs → "In Progress" with assignment
+- Issues that are closed/merged → "Done"
+
+**Usage:**
+
+```bash
+# Dry run to see what would be updated
+sync_combined(dry_run: true)
+
+# Run combined sync (auto-builds mappings from CSV if MEMBERS_CSV_PATH is set)
+sync_combined(dry_run: false)
+
+# With manual configuration
+sync_combined(
+  dry_run: false,
+  force: false,  # If true, re-checks all issues including those already marked as "done"
+  user_mappings: [
+    {"githubUsername": "engineer1", "linearUserId": "linear-user-id-1"}
+  ],
+  organization_engineers: ["engineer1", "engineer2"],
+  default_assignee_id: "optional-default-linear-user-id"
+)
+```
+
+**When to use:**
+- **Recommended for regular syncs**: Use `sync_combined` for your regular synchronization workflow to keep Linear in sync with GitHub
+- **Individual tools**: Use `sync_pr_based_status` or `sync_linear_status` individually if you only need one type of sync
+
+**Configuration Options:**
+- Same as `sync_pr_based_status` (see above)
+- `force`: If true, re-checks all issues including those already marked as "done" (only affects Step 2)
 
 ## Using from Another Repository
 
@@ -381,6 +534,7 @@ See the `docs/` folder for detailed documentation:
 - `DATABASE_SETUP.md`: PostgreSQL database setup
 - `LINEAR_GITHUB_CONTRACT.md`: How UNMute integrates with Linear's GitHub integration
 - `LINEAR_TEAM_SETUP.md`: Setting up Linear teams and projects
+- `CSV_SETUP.md`: Organization members CSV setup for PR-based sync user mappings
 - `explain-permissions.md`: Discord bot permissions setup
 
 ## License

@@ -5,6 +5,9 @@ dist/
 *.pem
 *.key
 
+# Team member data
+members.csv
+
 # IDE files
 .idea/
 .cursorrules

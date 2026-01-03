@@ -628,6 +628,85 @@ const tools: Tool[] = [
     },
   },
   {
+    name: "sync_pr_based_status",
+    description: "[Issue-centric] Sync Linear issue status and assignee based on open PRs connected to GitHub issues. Checks for open PRs and updates Linear issues to 'In Progress' status with assigned user. Only assigns if PR author is an organization engineer. Maps organization engineer GitHub usernames to Linear user IDs.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        dry_run: {
+          type: "boolean",
+          description: "If true, show what would be updated without actually changing Linear (default: false)",
+          default: false,
+        },
+        user_mappings: {
+          type: "array",
+          description: "Array of user mappings: [{githubUsername: string, linearUserId: string}]. Maps organization engineer GitHub usernames to Linear user IDs.",
+          items: {
+            type: "object",
+            properties: {
+              githubUsername: { type: "string" },
+              linearUserId: { type: "string" },
+            },
+            required: ["githubUsername", "linearUserId"],
+          },
+        },
+        organization_engineers: {
+          type: "array",
+          description: "Array of organization engineer GitHub usernames. Only PRs from these users will trigger assignment.",
+          items: {
+            type: "string",
+          },
+        },
+        default_assignee_id: {
+          type: "string",
+          description: "Default Linear user ID to assign if PR author is an organization engineer but no mapping is found",
+        },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "sync_combined",
+    description: "Combined sync workflow: Runs both PR-based sync and Linear status sync in sequence. Step 1: PR-based sync sets Linear issues to 'In Progress' when open PRs are found and assigns users. Step 2: Linear status sync marks Linear issues as 'Done' when issues are closed or PRs are merged.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        dry_run: {
+          type: "boolean",
+          description: "If true, show what would be updated without actually changing Linear (default: false)",
+          default: false,
+        },
+        force: {
+          type: "boolean",
+          description: "If true, re-check all issues including those already marked as 'done'. If false (default), only checks issues not in 'done' state.",
+          default: false,
+        },
+        user_mappings: {
+          type: "array",
+          description: "Array of user mappings: [{githubUsername: string, linearUserId: string}]. Maps organization engineer GitHub usernames to Linear user IDs.",
+          items: {
+            type: "object",
+            properties: {
+              githubUsername: { type: "string" },
+              linearUserId: { type: "string" },
+            },
+            required: ["githubUsername", "linearUserId"],
+          },
+        },
+        organization_engineers: {
+          type: "array",
+          description: "Array of organization engineer GitHub usernames. Only PRs from these users will trigger assignment.",
+          items: { type: "string" },
+        },
+        default_assignee_id: {
+          type: "string",
+          description: "Default Linear user ID to assign if PR author is an organization engineer but no mapping is found",
+        },
+      },
+      required: [],
+    },
+  },
+  {
     name: "classify_linear_issues",
     description: "Fetch all issues from Linear UNMute team and classify them with existing projects (features) or create new projects if needed. Requires PM_TOOL_API_KEY and PM_TOOL_TEAM_ID.",
     inputSchema: {
@@ -7888,6 +7967,162 @@ Example output:
       } catch (error) {
         logError("Linear status sync failed:", error);
         throw new Error(`Linear status sync failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    case "sync_pr_based_status": {
+      const { dry_run = false, user_mappings, organization_engineers, default_assignee_id } = args as {
+        dry_run?: boolean;
+        user_mappings?: Array<{ githubUsername: string; linearUserId: string }>;
+        organization_engineers?: string[];
+        default_assignee_id?: string;
+      };
+
+      try {
+        const config = getConfig();
+        
+        // Check required environment variables
+        if (!process.env.PM_TOOL_API_KEY) {
+          throw new Error("PM_TOOL_API_KEY is required for PR-based sync");
+        }
+        
+        if (!process.env.PM_TOOL_TEAM_ID) {
+          throw new Error("PM_TOOL_TEAM_ID is required for PR-based sync");
+        }
+
+        // Verify database is available
+        const { hasDatabaseConfig, getStorage } = await import("../storage/factory.js");
+        if (!hasDatabaseConfig()) {
+          throw new Error("Database is required. Please configure DATABASE_URL.");
+        }
+
+        const storage = getStorage();
+        const dbAvailable = await storage.isAvailable();
+        if (!dbAvailable) {
+          throw new Error("Database is not available. Please check your DATABASE_URL configuration.");
+        }
+
+        console.error(`[PR Sync] Starting PR-based Linear sync (dry_run: ${dry_run})...`);
+
+        // Import and run the sync
+        const { syncPRBasedStatus } = await import("../sync/prBasedSync.js");
+        const summary = await syncPRBasedStatus({ 
+          dryRun: dry_run, 
+          userMappings: user_mappings,
+          organizationEngineers: organization_engineers,
+          defaultAssigneeId: default_assignee_id,
+        });
+
+        console.error(`[PR Sync] Completed: ${summary.updated} updated, ${summary.unchanged} unchanged, ${summary.skipped} skipped, ${summary.errors} errors`);
+
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              success: summary.errors === 0,
+              dry_run,
+              message: dry_run 
+                ? `[DRY RUN] Would update ${summary.updated} Linear issues to In Progress`
+                : `Updated ${summary.updated} Linear issues to In Progress`,
+              summary: {
+                total_issues: summary.totalIssues,
+                updated: summary.updated,
+                unchanged: summary.unchanged,
+                skipped: summary.skipped,
+                errors: summary.errors,
+              },
+              details: summary.details.slice(0, 50), // Limit details to first 50
+              ...(summary.details.length > 50 && {
+                note: `Showing first 50 of ${summary.details.length} details`,
+              }),
+            }, null, 2),
+          }],
+        };
+
+      } catch (error) {
+        logError("PR-based sync failed:", error);
+        throw new Error(`PR-based sync failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    case "sync_combined": {
+      const { dry_run = false, force = false, user_mappings, organization_engineers, default_assignee_id } = args as {
+        dry_run?: boolean;
+        force?: boolean;
+        user_mappings?: Array<{ githubUsername: string; linearUserId: string }>;
+        organization_engineers?: string[];
+        default_assignee_id?: string;
+      };
+
+      try {
+        const config = getConfig();
+        
+        // Check required environment variables
+        if (!process.env.PM_TOOL_API_KEY) {
+          throw new Error("PM_TOOL_API_KEY is required for combined sync");
+        }
+        
+        if (!process.env.PM_TOOL_TEAM_ID) {
+          throw new Error("PM_TOOL_TEAM_ID is required for combined sync");
+        }
+
+        // Verify database is available
+        const { hasDatabaseConfig, getStorage } = await import("../storage/factory.js");
+        if (!hasDatabaseConfig()) {
+          throw new Error("Database is required. Please configure DATABASE_URL.");
+        }
+
+        const storage = getStorage();
+        const dbAvailable = await storage.isAvailable();
+        if (!dbAvailable) {
+          throw new Error("Database is not available. Please check your DATABASE_URL configuration.");
+        }
+
+        console.error(`[Combined Sync] Starting combined sync workflow (dry_run: ${dry_run})...`);
+
+        // Import and run the combined sync
+        const { runCombinedSync } = await import("../sync/combinedSync.js");
+        const result = await runCombinedSync({
+          dryRun: dry_run,
+          force,
+          userMappings: user_mappings,
+          organizationEngineers: organization_engineers,
+          defaultAssigneeId: default_assignee_id,
+        });
+
+        console.error(`[Combined Sync] Workflow complete: ${result.summary.totalUpdated} total updates (${result.summary.issuesSetToInProgress} In Progress, ${result.summary.ticketsMarkedAsDone} Done)`);
+
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              success: result.success,
+              dry_run: result.dryRun,
+              message: result.dryRun
+                ? `[DRY RUN] Would update ${result.summary.totalUpdated} Linear issues (${result.summary.issuesSetToInProgress} In Progress, ${result.summary.ticketsMarkedAsDone} Done)`
+                : `Updated ${result.summary.totalUpdated} Linear issues (${result.summary.issuesSetToInProgress} In Progress, ${result.summary.ticketsMarkedAsDone} Done)`,
+              summary: result.summary,
+              pr_sync: {
+                total_issues: result.prSync.totalIssues,
+                updated: result.prSync.updated,
+                unchanged: result.prSync.unchanged,
+                skipped: result.prSync.skipped,
+                errors: result.prSync.errors,
+              },
+              linear_sync: {
+                total_tickets: result.linearSync.totalLinearTickets,
+                marked_done: result.linearSync.markedDone,
+                unchanged: result.linearSync.unchanged,
+                skipped_no_links: result.linearSync.skippedNoLinks,
+                errors: result.linearSync.errors,
+              },
+            }, null, 2),
+          }],
+        };
+
+      } catch (error) {
+        logError("Combined sync failed:", error);
+        throw new Error(`Combined sync failed: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
 

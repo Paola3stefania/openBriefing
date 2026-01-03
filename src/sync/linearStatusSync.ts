@@ -16,6 +16,12 @@ import { LinearIntegration } from "../export/linear/client.js";
 import { log, logError } from "../mcp/logger.js";
 import { getConfig } from "../config/index.js";
 import { GitHubTokenManager } from "../connectors/github/tokenManager.js";
+// Reuse functions from prBasedSync
+import { 
+  savePRsToDatabase
+} from "./prBasedSync.js";
+// Import GitHubPR from client (same source as prBasedSync)
+import type { GitHubPR } from "../connectors/github/client.js";
 
 // ============================================================================
 // Constants
@@ -142,40 +148,6 @@ function extractGitHubPRUrls(text: string): GitHubPRUrl[] {
 // GitHub API Utilities
 // ============================================================================
 
-async function checkPRMerged(
-  owner: string,
-  repo: string,
-  prNumber: number,
-  tokenManager: GitHubTokenManager
-): Promise<{ merged: boolean; state: string }> {
-  try {
-    const token = await tokenManager.getCurrentToken();
-    const response = await fetch(
-      `https://api.github.com/repos/${owner}/${repo}/pulls/${prNumber}`,
-      {
-        headers: {
-          Accept: "application/vnd.github.v3+json",
-          Authorization: `Bearer ${token}`,
-        },
-      }
-    );
-    
-    tokenManager.updateRateLimitFromResponse(response, token);
-    
-    if (!response.ok) {
-      if (response.status === 404) {
-        return { merged: false, state: "not_found" };
-      }
-      return { merged: false, state: "error" };
-    }
-    
-    const pr = await response.json() as { merged: boolean; state: string };
-    return { merged: pr.merged, state: pr.state };
-  } catch (error) {
-    logError(`Failed to check PR #${prNumber}:`, error);
-    return { merged: false, state: "error" };
-  }
-}
 
 // ============================================================================
 // Linear API Utilities
@@ -218,12 +190,37 @@ async function checkAndUnarchiveIssue(
     }
     
     // Remove problematic project/cycle before unarchiving
+    // Note: We need to use GraphQL directly since updateIssue doesn't support projectId/cycleId
     if (issue.project || issue.cycle) {
       try {
-        const updateInput: Record<string, unknown> = {};
+        const updateQuery = `
+          mutation UpdateIssue($id: String!, $input: IssueUpdateInput!) {
+            issueUpdate(id: $id, input: $input) {
+              success
+            }
+          }
+        `;
+        
+        const updateInput: { projectId?: string | null; cycleId?: string | null } = {};
         if (issue.project) updateInput.projectId = null;
         if (issue.cycle) updateInput.cycleId = null;
-        await linear.updateIssue(linearId, updateInput as any);
+        
+        const response = await fetch(linearConfig.apiUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: linearConfig.apiKey,
+          },
+          body: JSON.stringify({
+            query: updateQuery,
+            variables: { id: linearId, input: updateInput },
+          }),
+        });
+        
+        const data = await response.json() as { data?: { issueUpdate?: { success?: boolean } } };
+        if (!data.data?.issueUpdate?.success) {
+          log(`[Sync] Warning: Could not remove project/cycle from ${linearId}`);
+        }
       } catch (e) {
         log(`[Sync] Warning: Could not remove project/cycle from ${linearId}`);
       }
@@ -358,9 +355,58 @@ async function getIssueStatesFromDB(
   return issueStates;
 }
 
-async function checkPRStates(
+/**
+ * Fetch PR details and save to database (reusing logic from prBasedSync)
+ */
+async function fetchAndSavePR(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  tokenManager: GitHubTokenManager,
+  prisma: PrismaClient,
+  linkedIssueNumbers: number[]
+): Promise<{ url: string; merged: boolean } | null> {
+  try {
+    const token = await tokenManager.getCurrentToken();
+    const response = await fetch(
+      `https://api.github.com/repos/${owner}/${repo}/pulls/${prNumber}`,
+      {
+        headers: {
+          Accept: "application/vnd.github.v3+json",
+          Authorization: `Bearer ${token}`,
+        },
+      }
+    );
+    
+    tokenManager.updateRateLimitFromResponse(response, token);
+    
+    if (!response.ok) {
+      if (response.status === 404) {
+        return null;
+      }
+      return null;
+    }
+    
+    const pr = await response.json() as GitHubPR;
+    
+    // Save/update PR in database using shared function from prBasedSync
+    await savePRsToDatabase([pr], prisma, linkedIssueNumbers);
+    
+    return { url: pr.html_url, merged: pr.merged };
+  } catch (error) {
+    logError(`Failed to fetch PR #${prNumber}:`, error);
+    return null;
+  }
+}
+
+/**
+ * Sync PRs from URLs and save to database (reusing logic from prBasedSync)
+ */
+async function syncAndCheckPRStates(
   prUrls: GitHubPRUrl[],
-  tokenManager: GitHubTokenManager | null
+  tokenManager: GitHubTokenManager | null,
+  prisma: PrismaClient,
+  linkedIssueNumbers: number[]
 ): Promise<Array<{ url: string; merged: boolean }>> {
   if (prUrls.length === 0 || !tokenManager) {
     return [];
@@ -368,9 +414,21 @@ async function checkPRStates(
   
   return processInBatches(
     prUrls,
-    async (pr) => {
-      const status = await checkPRMerged(pr.owner, pr.repo, pr.number, tokenManager);
-      return { url: pr.url, merged: status.merged };
+    async (prUrl) => {
+      const result = await fetchAndSavePR(
+        prUrl.owner,
+        prUrl.repo,
+        prUrl.number,
+        tokenManager,
+        prisma,
+        linkedIssueNumbers
+      );
+      
+      if (!result) {
+        return { url: prUrl.url, merged: false };
+      }
+      
+      return result;
     },
     CONCURRENCY_LIMIT
   );
@@ -429,7 +487,7 @@ async function processTicket(
   doneStateId: string,
   dryRun: boolean
 ): Promise<SyncDetail> {
-  const { prisma, linear, config, tokenManager } = deps;
+  const { prisma, linear, linearConfig, config, tokenManager } = deps;
     const identifier = ticket.identifier;
     
     try {
@@ -447,7 +505,7 @@ async function processTicket(
         },
       });
       
-    // Extract URLs from Linear description
+    // Extract URLs from Linear description (fallback for PRs not in DB yet)
       const issueUrls = extractGitHubIssueUrls(fullText);
       const prUrls = extractGitHubPRUrls(fullText);
       
@@ -462,8 +520,26 @@ async function processTicket(
         }
       }
       
+    // Get PRs from database - find PRs linked to the GitHub issues (not directly to Linear)
+      const dbPRs = await prisma.gitHubPullRequest.findMany({
+        where: {
+          linkedIssues: {
+            some: {
+              issueNumber: { in: Array.from(allIssueNumbers) },
+            },
+          },
+        },
+        select: {
+          prNumber: true,
+          prUrl: true,
+          prState: true,
+          prMerged: true,
+          prAuthor: true, // Need author for assignee mapping
+        },
+      });
+      
     // Skip if no connections
-      if (allIssueNumbers.size === 0 && prUrls.length === 0) {
+      if (allIssueNumbers.size === 0 && dbPRs.length === 0 && prUrls.length === 0) {
       return {
           linearIdentifier: identifier,
         action: SYNC_ACTIONS.SKIPPED,
@@ -473,18 +549,44 @@ async function processTicket(
       };
     }
     
-    // Get issue and PR states
-    const [issueStates, prStates] = await Promise.all([
-      getIssueStatesFromDB(Array.from(allIssueNumbers), dbIssues, prisma),
-      checkPRStates(prUrls, tokenManager),
-    ]);
+    // Get issue states
+    const issueStates = await getIssueStatesFromDB(Array.from(allIssueNumbers), dbIssues, prisma);
+    
+    // Note: PR-based sync (setting to In Progress and assignment) is handled by sync_pr_based_status
+    // This sync only handles marking issues as Done when all issues are closed or PRs are merged
+    
+    // Combine PR states from DB and URLs (prefer DB, fallback to URL parsing)
+    // Note: PRs from URLs will be fetched and saved to DB, updating their merged status
+    const prStatesFromDB = dbPRs.map(pr => ({
+      url: pr.prUrl,
+      merged: pr.prMerged,
+    }));
+    
+    // Only check PRs from URLs if not already in DB
+    // This will fetch PR details and save to DB, updating merged status if changed
+    const prUrlsToCheck = prUrls.filter(prUrl => 
+      !dbPRs.some(dbPR => dbPR.prUrl === prUrl.url)
+    );
+    const prStatesFromUrls = await syncAndCheckPRStates(
+      prUrlsToCheck,
+      tokenManager,
+      prisma,
+      Array.from(allIssueNumbers)
+    );
+    
+    const prStates = [...prStatesFromDB, ...prStatesFromUrls];
     
     // Determine action
     const decision = shouldMarkDone(issueStates, prStates);
     
     if (decision.shouldMark) {
       if (!dryRun) {
-        await linear.updateIssueState(ticket.id, doneStateId);
+        // Update state to Done (no assignment - that's handled by PR-based sync)
+        await linear.updateIssueStateAndAssignee(
+          ticket.id,
+          doneStateId,
+          undefined
+        );
         
         // Update DB records
         await prisma.gitHubIssue.updateMany({
