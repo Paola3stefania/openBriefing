@@ -1290,7 +1290,7 @@ export class DatabaseStorage implements IStorage {
     in_group?: boolean;
     matched_to_threads?: boolean;
   }>> {
-    const where: { groupId?: string | null; matchedToThreads?: boolean; issueState?: string } = {};
+    const where: Prisma.GitHubIssueWhereInput = {};
     if (options?.inGroup !== undefined) {
       // inGroup is redundant - use groupId instead: true = groupId IS NOT NULL, false = groupId IS NULL
       where.groupId = options.inGroup ? { not: null } : null;

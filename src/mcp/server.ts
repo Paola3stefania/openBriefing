@@ -356,7 +356,7 @@ const tools: Tool[] = [
   },
   {
     name: "sync_classify_and_export",
-    description: "Issue-centric workflow: 1) Fetch GitHub issues, 2) Check Discord messages, 3) Compute embeddings, 4) Group related issues, 5) Match Discord threads to issues, 6) Label issues, 7) Match to features, 8) Export to Linear, 9) Sync Linear status. All steps are incremental and use embeddings for matching. Requires DATABASE_URL and OPENAI_API_KEY.",
+    description: "Complete issue-centric workflow: 1) Fetch GitHub issues, 2) Check Discord messages, 3) Compute ALL embeddings (issues, threads, features, groups), 4) Group related issues, 5) Match Discord threads to issues, 6) Label issues, 7) Match to features (ungrouped issues, grouped issues, AND groups), 8) Export to Linear, 9) Sync Linear status, 10) Sync PR-based status. All steps are incremental and use embeddings for matching. Requires DATABASE_URL and OPENAI_API_KEY.",
     inputSchema: {
       type: "object",
       properties: {
@@ -433,6 +433,15 @@ const tools: Tool[] = [
           default: false,
         },
       },
+    },
+  },
+  {
+    name: "export_stats",
+    description: "Get comprehensive statistics and reporting about the system state. Returns statistics about GitHub issues (total, open, grouped, ungrouped, labeled, matched to features, exported), groups (total, with features, exported), features, Discord messages/threads, embeddings, and export/sync status. Useful for monitoring and understanding the current state of the system.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      required: [],
     },
   },
   {
@@ -843,6 +852,21 @@ const tools: Tool[] = [
         code_context: {
           type: "string",
           description: "Optional code context from the repository. If provided, this will be used instead of fetching from GitHub API or local filesystem. The agent can use codebase_search to find relevant code files (search for core features, authentication, main functionality, etc.) and pass the results here. If not provided and LOCAL_REPO_PATH is set, will use local filesystem. Otherwise, will use GitHub API.",
+        },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "compute_group_embeddings",
+    description: "Compute and update embeddings for database groups. Groups are matched based on their aggregated content (suggestedTitle + all issues in the group). This pre-computes embeddings for all groups, which improves performance for group-to-feature matching operations. By default, only computes embeddings for groups that don't have embeddings or have changed content. Set force=true to recompute all embeddings from scratch. Requires OPENAI_API_KEY.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        force: {
+          type: "boolean",
+          description: "If true, recompute all group embeddings from scratch. If false (default), only compute embeddings for groups that don't have embeddings or have changed content.",
+          default: false,
         },
       },
       required: [],
@@ -2042,6 +2066,40 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
               message: codeContext 
                 ? "Feature embeddings computed successfully with provided code context. Features now include documentation context, related GitHub issues, Discord conversations, and the provided code context."
                 : "Feature embeddings computed successfully. Features now include documentation context, related GitHub issues, Discord conversations, and code context from repository (if configured).",
+            }, null, 2),
+          },
+        ],
+      };
+    }
+
+    case "compute_group_embeddings": {
+      if (!process.env.OPENAI_API_KEY) {
+        throw new Error("OPENAI_API_KEY is required for computing group embeddings.");
+      }
+
+      const { computeAndSaveGroupEmbeddings } = await import("../storage/db/embeddings.js");
+      
+      const force = (args?.force === true);
+      
+      console.error("[Embeddings] Starting group embeddings computation...");
+      if (force) {
+        console.error("[Embeddings] Force mode enabled - will recompute all group embeddings from scratch");
+      } else {
+        console.error("[Embeddings] Incremental mode - will only compute embeddings for groups that don't have them or have changed content");
+      }
+      
+      const result = await computeAndSaveGroupEmbeddings(process.env.OPENAI_API_KEY, undefined, force);
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              success: true,
+              message: `Group embeddings computed: ${result.computed} computed, ${result.cached} cached, ${result.total} total`,
+              computed: result.computed,
+              cached: result.cached,
+              total: result.total,
             }, null, 2),
           },
         ],
@@ -3759,12 +3817,26 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         // =====================================================================
         // STEP 3: Compute embeddings (incremental - only new)
+        // Ensure ALL embeddings are computed: issues, threads, features, groups
         // =====================================================================
-        console.error("[Sync] Step 3: Computing embeddings for new issues and threads...");
-        const { computeAndSaveIssueEmbeddings, computeAndSaveThreadEmbeddings } = await import("../storage/db/embeddings.js");
+        console.error("[Sync] Step 3: Computing embeddings for new issues, threads, features, and groups...");
+        const { 
+          computeAndSaveIssueEmbeddings, 
+          computeAndSaveThreadEmbeddings,
+          computeAndSaveFeatureEmbeddings,
+          computeAndSaveGroupEmbeddings,
+        } = await import("../storage/db/embeddings.js");
         
         const issueEmbResult = await computeAndSaveIssueEmbeddings(apiKey, undefined, false);
         const threadEmbResult = await computeAndSaveThreadEmbeddings(apiKey, { channelId: actualChannelId });
+        
+        // Compute feature embeddings (required for feature matching)
+        console.error("[Sync] Step 3: Computing feature embeddings...");
+        const featureEmbResult = await computeAndSaveFeatureEmbeddings(apiKey, undefined, false);
+        
+        // Compute group embeddings (required for group feature matching)
+        console.error("[Sync] Step 3: Computing group embeddings...");
+        const groupEmbResult = await computeAndSaveGroupEmbeddings(apiKey, undefined, false);
         
           results.steps.push({
           step: "compute_embeddings",
@@ -3772,6 +3844,8 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             result: {
             issues: { computed: issueEmbResult.computed, cached: issueEmbResult.cached },
             threads: { computed: threadEmbResult.computed, cached: threadEmbResult.cached },
+            features: { computed: featureEmbResult.computed, cached: featureEmbResult.cached },
+            groups: { computed: groupEmbResult.computed, cached: groupEmbResult.cached },
             },
           });
 
@@ -4106,9 +4180,90 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         // STEP 7c: Match groups to features (group-level matching)
-        // Note: Groups are matched separately using match_database_groups_to_features tool
-        // This ensures groups get their own features based on aggregated content
-        console.error("[Sync] Step 7c: Groups should be matched separately using match_database_groups_to_features tool");
+        // Actually call match_database_groups_to_features to match groups
+        console.error("[Sync] Step 7c: Matching groups to features...");
+        let groupsMatched = 0;
+        let groupsChecked = 0;
+        
+        try {
+          // Get unexported groups (groups without features or force=true)
+          const allGroups = await prisma.group.findMany({
+            include: {
+              githubIssues: {
+                select: {
+                  issueNumber: true,
+                  issueTitle: true,
+                  issueBody: true,
+                  issueLabels: true,
+                },
+              },
+            },
+          });
+          
+          groupsChecked = allGroups.length;
+          
+          // Filter groups that need matching (no affectsFeatures or empty)
+          const groupsToMatch = allGroups.filter(group => {
+            const features = group.affectsFeatures as unknown[];
+            return !features || !Array.isArray(features) || features.length === 0;
+          });
+          
+          if (groupsToMatch.length > 0) {
+            // Load feature embeddings
+            const featuresWithEmbeddings = await prisma.feature.findMany({
+              include: { embedding: true },
+            });
+            
+            // Load group embeddings (should already be computed in Step 3)
+            const groupEmbeddings = await prisma.groupEmbedding.findMany({
+              where: { groupId: { in: groupsToMatch.map(g => g.id) } },
+            });
+            const groupEmbMap = new Map(groupEmbeddings.map(ge => [ge.groupId, ge.embedding as number[]]));
+            
+            // Build feature embedding map
+            const featureEmbeddingMap = new Map<string, number[]>();
+            for (const feature of featuresWithEmbeddings) {
+              if (feature.embedding?.embedding) {
+                featureEmbeddingMap.set(feature.id, feature.embedding.embedding as number[]);
+              }
+            }
+            
+            // Match each group to features
+            for (const group of groupsToMatch) {
+              const groupEmb = groupEmbMap.get(group.id);
+              if (!groupEmb) {
+                console.error(`[Sync] No embedding found for group ${group.id}, skipping`);
+                continue;
+              }
+              
+              const matchedFeatures: Array<{ id: string; name: string }> = [];
+              
+              for (const feature of featuresWithEmbeddings) {
+                if (!feature.embedding) continue;
+                const featureVec = feature.embedding.embedding as number[];
+                const sim = cosineSimilarity(groupEmb, featureVec);
+                if (sim >= 0.5) {
+                  matchedFeatures.push({ id: feature.id, name: feature.name });
+                }
+              }
+              
+              if (matchedFeatures.length > 0) {
+                await prisma.group.update({
+                  where: { id: group.id },
+                  data: { affectsFeatures: matchedFeatures },
+                });
+                groupsMatched++;
+              }
+            }
+          }
+        } catch (groupMatchError) {
+          console.error(`[Sync] Error matching groups to features:`, groupMatchError);
+          results.steps.push({
+            step: "match_groups_to_features",
+            status: "error",
+            error: groupMatchError instanceof Error ? groupMatchError.message : String(groupMatchError),
+          });
+        }
 
         results.steps.push({
           step: "match_features",
@@ -4118,7 +4273,8 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             ungrouped_issues_matched: ungroupedFeaturesMatched,
             grouped_issues_checked: unmatchedGroupedIssues.length,
             grouped_issues_matched: groupedIssuesFeaturesMatched,
-            note: "Groups should be matched separately using match_database_groups_to_features tool",
+            groups_checked: groupsChecked,
+            groups_matched: groupsMatched,
           },
         });
 
@@ -4229,22 +4385,76 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         // =====================================================================
+        // STEP 10: Sync PR-based status (set In Progress when PRs are open)
+        // =====================================================================
+        console.error("[Sync] Step 10: Syncing PR-based Linear status...");
+        
+        let prSyncUpdated = 0;
+        let prSyncError: string | undefined;
+
+        if (!pmApiKey || !pmTeamId) {
+          results.steps.push({
+            step: "sync_pr_status",
+            status: "skipped",
+            result: { message: "PM_TOOL_API_KEY or PM_TOOL_TEAM_ID not configured" },
+          });
+        } else {
+          try {
+            const { syncPRBasedStatus } = await import("../sync/prBasedSync.js");
+            const prSyncResult = await syncPRBasedStatus({ 
+              dryRun: false,
+              // Note: userMappings, organizationEngineers, defaultAssigneeId could be passed as options
+              // For now, using defaults (can be configured via environment or tool options)
+            });
+            prSyncUpdated = prSyncResult.updated || 0;
+            
+            results.steps.push({
+              step: "sync_pr_status",
+              status: "success",
+              result: {
+                total_issues: prSyncResult.totalIssues || 0,
+                updated: prSyncResult.updated || 0,
+                unchanged: prSyncResult.unchanged || 0,
+                skipped: prSyncResult.skipped || 0,
+                errors: prSyncResult.errors || 0,
+              },
+            });
+          } catch (err) {
+            prSyncError = err instanceof Error ? err.message : String(err);
+            results.steps.push({
+              step: "sync_pr_status",
+              status: "error",
+              error: prSyncError,
+            });
+          }
+        }
+
+        // =====================================================================
         // SUMMARY
         // =====================================================================
         results.summary = {
           github_issues: { total: totalIssues, open: openIssues, new_synced: newIssues.length },
           discord_messages: discordCount,
-          embeddings: { issues: issueEmbResult.computed + issueEmbResult.cached, threads: threadEmbResult.computed + threadEmbResult.cached },
+          embeddings: { 
+            issues: issueEmbResult.computed + issueEmbResult.cached, 
+            threads: threadEmbResult.computed + threadEmbResult.cached,
+            features: featureEmbResult.computed + featureEmbResult.cached,
+            groups: groupEmbResult.computed + groupEmbResult.cached,
+          },
           grouping: { groups_created: groupsCreated, issues_grouped: issuesGrouped },
           thread_matching: { matches_created: matchesCreated },
           labeling: { issues_labeled: issuesLabeled },
           feature_matching: { 
             ungrouped_issues_matched: ungroupedFeaturesMatched,
             grouped_issues_matched: groupedIssuesFeaturesMatched,
+            groups_matched: groupsMatched,
             total_issues_matched: ungroupedFeaturesMatched + groupedIssuesFeaturesMatched,
           },
           export: { issues_exported: issuesExported, skipped: exportSkipped },
-          linear_sync: { tickets_marked_done: ticketsMarkedDone },
+          linear_sync: { 
+            tickets_marked_done: ticketsMarkedDone,
+            pr_sync_updated: prSyncUpdated,
+          },
         };
 
         return {
@@ -4326,14 +4536,14 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           team_id: config.pmIntegration.pm_tool.team_id,
         };
 
-        // Check database availability first - we always want to use DB when available
-            const { hasDatabaseConfig, getStorage } = await import("../storage/factory.js");
+        // Check database availability - use database if available, JSON file as fallback
+        const { hasDatabaseConfig, getStorage } = await import("../storage/factory.js");
         const hasDb = hasDatabaseConfig();
         let dbAvailable = false;
             
         if (hasDb) {
           try {
-              const storage = getStorage();
+            const storage = getStorage();
             dbAvailable = await storage.isAvailable();
           } catch {
             console.error(`[Export] Database configured but not available`);
@@ -4341,7 +4551,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         if (!dbAvailable) {
-          throw new Error("Database is required for export. Please ensure DATABASE_URL is set and the database is accessible.");
+          console.error(`[Export] Database not available - will save export results to JSON file as fallback`);
         }
 
         let result: Awaited<ReturnType<typeof import("../export/groupingExporter.js").exportIssuesToPMTool>> | undefined;
@@ -4367,58 +4577,65 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           throw new Error("Export failed: No result returned from export operation");
         }
 
-        // Save export results to database and file
+        // Save export results - database preferred, JSON file as fallback
         const timestamp = Date.now();
         const exportResultId = `export-${pmToolConfig.type}-${timestamp}`;
-        const exportResultsPath = join(resultsDir, `export-${pmToolConfig.type}-${timestamp}.json`);
+        let exportResultsPath: string | undefined;
         
-        const exportResultData = {
-          timestamp: new Date().toISOString(),
-          pm_tool: pmToolConfig.type,
-          success: result.success,
-          features_extracted: result.features_extracted,
-          features_mapped: result.features_mapped,
-          issues_exported: result.issues_exported,
-          errors: result.errors,
-          source_file: sourceFile,
-          closed_items_count: result.closed_items_count,
-          closed_items_file: result.closed_items_file,
-        };
-        
-        // Save to file for backup
-        await mkdir(resultsDir, { recursive: true });
-        await writeFile(exportResultsPath, JSON.stringify(exportResultData, null, 2), "utf-8");
-        
-        // Always save to database (we verified it's available above)
+        if (dbAvailable) {
+          // Save to database (preferred)
           try {
             const storage = getStorage();
-              await storage.saveExportResult({
-                id: exportResultId,
-                channelId: actualChannelId,
-                pmTool: pmToolConfig.type,
-                sourceFile: sourceFile || undefined,
-                success: result.success,
-                featuresExtracted: result.features_extracted,
-                featuresMapped: result.features_mapped,
-                issuesCreated: result.issues_exported?.created,
-                issuesUpdated: result.issues_exported?.updated,
-                issuesSkipped: result.issues_exported?.skipped,
-                errors: result.errors,
-                exportMappings: result.group_export_mappings || result.ungrouped_thread_export_mappings || result.ungrouped_issue_export_mappings
-                  ? {
-                      group_export_mappings: result.group_export_mappings,
-                      ungrouped_thread_export_mappings: result.ungrouped_thread_export_mappings,
-                      ungrouped_issue_export_mappings: result.ungrouped_issue_export_mappings,
-                    }
-                  : undefined,
-                closedItemsCount: result.closed_items_count,
-                closedItemsFile: result.closed_items_file,
-              });
-              console.error(`[Export] Saved export result to database: ${exportResultId}`);
+            await storage.saveExportResult({
+              id: exportResultId,
+              channelId: actualChannelId,
+              pmTool: pmToolConfig.type,
+              sourceFile: sourceFile || undefined,
+              success: result.success,
+              featuresExtracted: result.features_extracted,
+              featuresMapped: result.features_mapped,
+              issuesCreated: result.issues_exported?.created,
+              issuesUpdated: result.issues_exported?.updated,
+              issuesSkipped: result.issues_exported?.skipped,
+              errors: result.errors,
+              exportMappings: result.group_export_mappings || result.ungrouped_thread_export_mappings || result.ungrouped_issue_export_mappings
+                ? {
+                    group_export_mappings: result.group_export_mappings,
+                    ungrouped_thread_export_mappings: result.ungrouped_thread_export_mappings,
+                    ungrouped_issue_export_mappings: result.ungrouped_issue_export_mappings,
+                  }
+                : undefined,
+              closedItemsCount: result.closed_items_count,
+              closedItemsFile: result.closed_items_file,
+            });
+            console.error(`[Export] Saved export result to database: ${exportResultId}`);
           } catch (dbError) {
-          // Log but don't fail if database save fails (export already succeeded)
+            // If database save fails, fall back to JSON file
             const errorMessage = dbError instanceof Error ? dbError.message : String(dbError);
-            console.error(`[Export] Failed to save export result to database:`, errorMessage);
+            console.error(`[Export] Failed to save export result to database: ${errorMessage}, falling back to JSON file`);
+            dbAvailable = false; // Force JSON fallback
+          }
+        }
+        
+        if (!dbAvailable) {
+          // Fallback: Save to JSON file only if database is not available
+          exportResultsPath = join(resultsDir, `export-${pmToolConfig.type}-${timestamp}.json`);
+          const exportResultData = {
+            timestamp: new Date().toISOString(),
+            pm_tool: pmToolConfig.type,
+            success: result.success,
+            features_extracted: result.features_extracted,
+            features_mapped: result.features_mapped,
+            issues_exported: result.issues_exported,
+            errors: result.errors,
+            source_file: sourceFile,
+            closed_items_count: result.closed_items_count,
+            closed_items_file: result.closed_items_file,
+          };
+          
+          await mkdir(resultsDir, { recursive: true });
+          await writeFile(exportResultsPath, JSON.stringify(exportResultData, null, 2), "utf-8");
+          console.error(`[Export] Saved export result to JSON file: ${exportResultsPath}`);
         }
 
         return {
@@ -4433,8 +4650,8 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 errors: result.errors,
                 closed_items_count: result.closed_items_count,
                 closed_items_file: result.closed_items_file,
-                results_saved_to: exportResultsPath,
-                database_record: exportResultId,
+                ...(dbAvailable ? { database_record: exportResultId } : {}),
+                ...(exportResultsPath ? { results_saved_to: exportResultsPath } : {}),
                 message: result.success
                   ? `Successfully exported to ${pmToolConfig.type}: ${result.issues_exported?.created || 0} created, ${result.issues_exported?.updated || 0} updated`
                   : `Export failed: ${result.errors?.join(", ")}`,
@@ -4715,6 +4932,156 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       } catch (error) {
         throw new Error(`Validation failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    case "export_stats": {
+      try {
+        const { hasDatabaseConfig, getStorage } = await import("../storage/factory.js");
+        if (!hasDatabaseConfig()) {
+          throw new Error("Database is required for statistics. Please configure DATABASE_URL.");
+        }
+
+        const storage = getStorage();
+        const dbAvailable = await storage.isAvailable();
+        if (!dbAvailable) {
+          throw new Error("Database is not available. Please check your DATABASE_URL configuration.");
+        }
+
+        const { prisma } = await import("../storage/db/prisma.js");
+
+        console.error("[Stats] Gathering comprehensive statistics...");
+
+        // GitHub Issues Statistics
+        const totalIssues = await prisma.gitHubIssue.count();
+        const openIssues = await prisma.gitHubIssue.count({ where: { issueState: "open" } });
+        const closedIssues = await prisma.gitHubIssue.count({ where: { issueState: "closed" } });
+        
+        const groupedIssues = await prisma.gitHubIssue.count({ where: { groupId: { not: null } } });
+        const ungroupedIssues = await prisma.gitHubIssue.count({ where: { groupId: null } });
+        
+        const labeledIssues = await prisma.gitHubIssue.count({ 
+          where: { 
+            detectedLabels: { isEmpty: false },
+          },
+        });
+        
+        const issuesWithFeatures = await prisma.gitHubIssue.count({
+          where: {
+            affectsFeatures: { not: { equals: [] } },
+          },
+        });
+        
+        const exportedIssues = await prisma.gitHubIssue.count({ 
+          where: { linearIssueId: { not: null } },
+        });
+        
+        const matchedToThreads = await prisma.gitHubIssue.count({
+          where: { matchedToThreads: true },
+        });
+
+        // Groups Statistics
+        const totalGroups = await prisma.group.count();
+        const groupsWithFeatures = await prisma.group.count({
+          where: {
+            affectsFeatures: { not: { equals: [] } },
+          },
+        });
+        const exportedGroups = await prisma.group.count({
+          where: { linearIssueId: { not: null } },
+        });
+        const pendingGroups = await prisma.group.count({
+          where: { status: "pending" },
+        });
+
+        // Features Statistics
+        const totalFeatures = await prisma.feature.count();
+        const featuresWithEmbeddings = await prisma.feature.count({
+          where: { embedding: { isNot: null } },
+        });
+
+        // Discord Statistics
+        const totalDiscordMessages = await prisma.discordMessage.count();
+        const totalThreads = await prisma.classifiedThread.count();
+        
+        // Thread Matches
+        const threadMatches = await prisma.issueThreadMatch.count();
+
+        // Embeddings Statistics
+        const issueEmbeddings = await prisma.issueEmbedding.count();
+        const threadEmbeddings = await prisma.threadEmbedding.count();
+        const featureEmbeddings = await prisma.featureEmbedding.count();
+        const groupEmbeddings = await prisma.groupEmbedding.count();
+
+        // Export Status Breakdown
+        const pendingExportIssues = await prisma.gitHubIssue.count({
+          where: {
+            issueState: "open",
+            OR: [
+              { exportStatus: null },
+              { exportStatus: "pending" },
+            ],
+          },
+        });
+
+        const stats = {
+          github_issues: {
+            total: totalIssues,
+            open: openIssues,
+            closed: closedIssues,
+            grouped: groupedIssues,
+            ungrouped: ungroupedIssues,
+            labeled: labeledIssues,
+            matched_to_features: issuesWithFeatures,
+            matched_to_threads: matchedToThreads,
+            exported: exportedIssues,
+            pending_export: pendingExportIssues,
+          },
+          groups: {
+            total: totalGroups,
+            with_features: groupsWithFeatures,
+            exported: exportedGroups,
+            pending: pendingGroups,
+          },
+          features: {
+            total: totalFeatures,
+            with_embeddings: featuresWithEmbeddings,
+          },
+          discord: {
+            messages: totalDiscordMessages,
+            threads: totalThreads,
+            thread_matches: threadMatches,
+          },
+          embeddings: {
+            issues: issueEmbeddings,
+            threads: threadEmbeddings,
+            features: featureEmbeddings,
+            groups: groupEmbeddings,
+          },
+          completion_rates: {
+            issues_labeled: totalIssues > 0 ? ((labeledIssues / totalIssues) * 100).toFixed(1) + "%" : "0%",
+            issues_matched_to_features: totalIssues > 0 ? ((issuesWithFeatures / totalIssues) * 100).toFixed(1) + "%" : "0%",
+            issues_exported: openIssues > 0 ? ((exportedIssues / openIssues) * 100).toFixed(1) + "%" : "0%",
+            groups_with_features: totalGroups > 0 ? ((groupsWithFeatures / totalGroups) * 100).toFixed(1) + "%" : "0%",
+            groups_exported: totalGroups > 0 ? ((exportedGroups / totalGroups) * 100).toFixed(1) + "%" : "0%",
+          },
+        };
+
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              success: true,
+              message: "Statistics retrieved successfully",
+              stats,
+              timestamp: new Date().toISOString(),
+            }, null, 2),
+          }],
+        };
+
+      } catch (error) {
+        logError("Export stats failed:", error);
+        throw new Error(`Export stats failed: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
 
