@@ -14,6 +14,7 @@ export interface LinearPMTool {
   createOrGetProject?(featureId: string, featureName: string, featureDescription?: string): Promise<string>;
   initializeLabels?(): Promise<void>;
   updateIssue?(issueId: string, updates: Partial<PMToolIssue>): Promise<void>;
+  getIssue?(issueId: string): Promise<{ id: string; identifier: string; url: string; title: string; description?: string; state: string; stateId?: string; assigneeId?: string; projectId?: string; projectName?: string; priority?: number; labelNames?: string[] } | null>;
 }
 
 export interface IPMTool {
