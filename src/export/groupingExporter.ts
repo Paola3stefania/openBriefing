@@ -2835,13 +2835,16 @@ export async function exportIssuesToPMTool(
     include_closed?: boolean;
     channelId?: string;
     dry_run?: boolean;
-    update_projects?: boolean; // Update existing Linear issues with correct project (feature) assignments
+    update_projects?: boolean; // Update existing Linear issues with correct project (feature) assignments (deprecated, use update)
+    update?: boolean; // Update existing Linear issues with all differences (projects, labels, priority, title, description)
   }
 ): Promise<ExportWorkflowResult> {
   const includeClosed = options?.include_closed ?? false;
   const channelId = options?.channelId;
   const dryRun = options?.dry_run ?? false;
-  const updateProjects = options?.update_projects ?? false;
+  // Support both update_projects (legacy) and update (new) - update takes precedence
+  const update = options?.update ?? options?.update_projects ?? false;
+  const updateProjects = update; // Keep for backward compatibility in the code
   const result: ExportWorkflowResult = {
     success: false,
     features_extracted: 0,
@@ -3396,11 +3399,12 @@ export async function exportIssuesToPMTool(
       log(`Mapped ${projectMappings.size} features to Linear projects`);
       
       // =============================================================
-      // STEP 4.6: Update existing Linear issues with correct projects (if update_projects flag set)
+      // STEP 4.6: Update existing Linear issues with differences (if update flag set)
       // =============================================================
       const updateIssueMethod = linearTool.updateIssue;
-      if (updateProjects && updateIssueMethod) {
-        log("Updating existing Linear issues with correct project assignments...");
+      const getIssueMethod = linearTool.getIssue;
+      if (update && updateIssueMethod && getIssueMethod) {
+        log("Updating existing Linear issues with all differences from database...");
         
         // Get all exported issues (groups and ungrouped) that have a linearIssueId
         const exportedGroups = await prisma.group.findMany({
@@ -3418,27 +3422,83 @@ export async function exportIssuesToPMTool(
         
         let updatedCount = 0;
         let skippedCount = 0;
+        let errorCount = 0;
         
         // Update groups
         for (const group of exportedGroups) {
           try {
-            // Get feature from group's issues
+            if (!group.linearIssueId) continue;
+            
+            // Get all issues in the group to build expected state
             const groupIssues = await prisma.gitHubIssue.findMany({
               where: { groupId: group.id },
-              take: 1,
             });
             
+            if (groupIssues.length === 0) {
+              skippedCount++;
+              continue;
+            }
+            
+            // Build expected labels from all issues in group
+            const allLabels = new Set<string>();
+            allLabels.add("issue-group");
+            for (const issue of groupIssues) {
+              issue.issueLabels?.forEach(l => allLabels.add(l));
+              issue.detectedLabels?.forEach(l => allLabels.add(l));
+            }
+            
+            // Calculate expected priority
+            const expectedPriority = calculatePriority({
+              labels: Array.from(allLabels),
+              title: group.suggestedTitle || groupIssues[0]?.issueTitle || "",
+              is_cross_cutting: group.isCrossCutting || false,
+              thread_count: group.threadCount || 0,
+            });
+            
+            // Get expected feature/project
             const primaryIssue = groupIssues[0];
             const issueFeatures = primaryIssue?.affectsFeatures as Array<{ id: string; name: string }> | null;
             const featureId = issueFeatures?.[0]?.id || "general";
-            const projectId = projectMappings.get(featureId) || projectMappings.get("general");
+            const expectedProjectId = projectMappings.get(featureId) || projectMappings.get("general");
             
-            if (projectId && group.linearIssueId) {
+            // Fetch current Linear state
+            const currentLinearIssue = await getIssueMethod.call(linearTool, group.linearIssueId);
+            if (!currentLinearIssue) {
+              logError(`  Linear issue ${group.linearIssueId} not found`);
+              errorCount++;
+              continue;
+            }
+            
+            // Build update object with only changed fields
+            const updates: Partial<PMToolIssue> = {};
+            let hasChanges = false;
+            
+            if (expectedProjectId && currentLinearIssue.projectId !== expectedProjectId) {
+              updates.project_id = expectedProjectId;
+              hasChanges = true;
+            }
+            
+            const expectedLabelNames = Array.from(allLabels).sort();
+            const currentLabelNames = (currentLinearIssue.labelNames || []).sort();
+            if (JSON.stringify(expectedLabelNames) !== JSON.stringify(currentLabelNames)) {
+              updates.labels = expectedLabelNames;
+              hasChanges = true;
+            }
+            
+            // Map priority to Linear number format for comparison
+            const linearPriorityMap: Record<string, number> = { urgent: 1, high: 2, medium: 3, low: 4 };
+            const expectedPriorityNumber = linearPriorityMap[expectedPriority] || 0;
+            if (currentLinearIssue.priority !== expectedPriorityNumber) {
+              updates.priority = expectedPriority;
+              hasChanges = true;
+            }
+            
+            if (hasChanges) {
               if (dryRun) {
-                log(`  [DRY RUN] Would update group ${group.id} (${group.linearIssueId}) with project ${projectId}`);
+                log(`  [DRY RUN] Would update group ${group.id} (${group.linearIssueId}) with: ${JSON.stringify(updates)}`);
               } else {
-                await updateIssueMethod.call(linearTool, group.linearIssueId, { project_id: projectId });
-                log(`  Updated group ${group.id} (${group.linearIssueId}) with project ${projectId}`);
+                await updateIssueMethod.call(linearTool, group.linearIssueId, updates);
+                log(`  Updated group ${group.id} (${group.linearIssueId}) with changes: ${Object.keys(updates).join(", ")}`);
               }
               updatedCount++;
             } else {
@@ -3446,22 +3506,68 @@ export async function exportIssuesToPMTool(
             }
           } catch (error) {
             logError(`  Failed to update group ${group.id}:`, error);
+            errorCount++;
           }
         }
         
         // Update ungrouped issues
         for (const issue of exportedIssues) {
           try {
+            if (!issue.linearIssueId) continue;
+            
+            // Build expected labels
+            const labels = [...(issue.issueLabels || []), ...(issue.detectedLabels || [])];
+            
+            // Calculate expected priority
+            const expectedPriority = calculatePriority({
+              labels,
+              title: issue.issueTitle || "",
+              is_ungrouped: true,
+            });
+            
+            // Get expected feature/project
             const issueFeatures = issue.affectsFeatures as Array<{ id: string; name: string }> | null;
             const featureId = issueFeatures?.[0]?.id || "general";
-            const projectId = projectMappings.get(featureId) || projectMappings.get("general");
+            const expectedProjectId = projectMappings.get(featureId) || projectMappings.get("general");
             
-            if (projectId && issue.linearIssueId) {
+            // Fetch current Linear state
+            const currentLinearIssue = await getIssueMethod.call(linearTool, issue.linearIssueId);
+            if (!currentLinearIssue) {
+              logError(`  Linear issue ${issue.linearIssueId} not found`);
+              errorCount++;
+              continue;
+            }
+            
+            // Build update object with only changed fields
+            const updates: Partial<PMToolIssue> = {};
+            let hasChanges = false;
+            
+            if (expectedProjectId && currentLinearIssue.projectId !== expectedProjectId) {
+              updates.project_id = expectedProjectId;
+              hasChanges = true;
+            }
+            
+            const expectedLabelNames = labels.sort();
+            const currentLabelNames = (currentLinearIssue.labelNames || []).sort();
+            if (JSON.stringify(expectedLabelNames) !== JSON.stringify(currentLabelNames)) {
+              updates.labels = expectedLabelNames;
+              hasChanges = true;
+            }
+            
+            // Map priority to Linear number format for comparison
+            const linearPriorityMap: Record<string, number> = { urgent: 1, high: 2, medium: 3, low: 4 };
+            const expectedPriorityNumber = linearPriorityMap[expectedPriority] || 0;
+            if (currentLinearIssue.priority !== expectedPriorityNumber) {
+              updates.priority = expectedPriority;
+              hasChanges = true;
+            }
+            
+            if (hasChanges) {
               if (dryRun) {
-                log(`  [DRY RUN] Would update issue #${issue.issueNumber} (${issue.linearIssueId}) with project ${projectId}`);
+                log(`  [DRY RUN] Would update issue #${issue.issueNumber} (${issue.linearIssueId}) with: ${JSON.stringify(updates)}`);
               } else {
-                await updateIssueMethod.call(linearTool, issue.linearIssueId, { project_id: projectId });
-                log(`  Updated issue #${issue.issueNumber} (${issue.linearIssueId}) with project ${projectId}`);
+                await updateIssueMethod.call(linearTool, issue.linearIssueId, updates);
+                log(`  Updated issue #${issue.issueNumber} (${issue.linearIssueId}) with changes: ${Object.keys(updates).join(", ")}`);
               }
               updatedCount++;
             } else {
@@ -3469,13 +3575,16 @@ export async function exportIssuesToPMTool(
             }
           } catch (error) {
             logError(`  Failed to update issue #${issue.issueNumber}:`, error);
+            errorCount++;
           }
         }
         
-        log(`Project update complete: ${updatedCount} updated, ${skippedCount} skipped`);
+        log(`Update complete: ${updatedCount} updated, ${skippedCount} unchanged, ${errorCount} errors`);
         
         // Add to result
-        (result as ExportWorkflowResult & { projects_updated?: number }).projects_updated = updatedCount;
+        (result as ExportWorkflowResult & { issues_updated?: number; issues_unchanged?: number; issues_errors?: number }).issues_updated = updatedCount;
+        (result as ExportWorkflowResult & { issues_updated?: number; issues_unchanged?: number; issues_errors?: number }).issues_unchanged = skippedCount;
+        (result as ExportWorkflowResult & { issues_updated?: number; issues_unchanged?: number; issues_errors?: number }).issues_errors = errorCount;
       }
     }
 

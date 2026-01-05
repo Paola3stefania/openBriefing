@@ -397,7 +397,12 @@ const tools: Tool[] = [
         },
         update_projects: {
           type: "boolean",
-          description: "If true, updates existing Linear issues with their correct project (feature) assignments. Use this to fix issues that were exported before project mapping was added.",
+          description: "If true, updates existing Linear issues with their correct project (feature) assignments. Use this to fix issues that were exported before project mapping was added. (Deprecated: use 'update' instead)",
+          default: false,
+        },
+        update: {
+          type: "boolean",
+          description: "If true, updates existing Linear issues with all differences from database (projects, labels, priority). Compares database state with Linear and updates any differences.",
           default: false,
         },
       },
@@ -4496,12 +4501,14 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         include_closed,
         dry_run = false,
         update_projects = false,
+        update = false,
       } = args as {
         use_issue_centric?: boolean;
         channel_id?: string;
         include_closed?: boolean;
         dry_run?: boolean;
         update_projects?: boolean;
+        update?: boolean;
       };
 
       try {
@@ -4566,11 +4573,14 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         console.error(`[Export] Using issue-centric export from database (GitHub issues primary, Discord context attached)`);
         
         const { exportIssuesToPMTool } = await import("../export/groupingExporter.js");
+        // Support both update (new) and update_projects (legacy) - update takes precedence
+        const updateFlag = update || update_projects;
         result = await exportIssuesToPMTool(pmToolConfig, {
           include_closed: include_closed ?? false,
           channelId: actualChannelId,
           dry_run: dry_run,
-          update_projects: update_projects,
+          update: updateFlag,
+          update_projects: update_projects, // Keep for backward compatibility
         });
 
         if (!result) {

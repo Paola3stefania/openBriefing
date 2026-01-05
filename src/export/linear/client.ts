@@ -661,7 +661,7 @@ export class LinearIntegration extends BasePMTool {
    * Get Linear issue by ID (for reading status/updates)
    * Useful for back-propagating Linear state to internal tracking
    */
-  async getIssue(issueId: string): Promise<{ id: string; identifier: string; url: string; title: string; description?: string; state: string; stateId?: string; assigneeId?: string; projectId?: string; projectName?: string } | null> {
+  async getIssue(issueId: string): Promise<{ id: string; identifier: string; url: string; title: string; description?: string; state: string; stateId?: string; assigneeId?: string; projectId?: string; projectName?: string; priority?: number; labelNames?: string[] } | null> {
     const query = `
       query GetIssue($id: String!) {
         issue(id: $id) {
@@ -681,6 +681,13 @@ export class LinearIntegration extends BasePMTool {
             id
             name
           }
+          priority
+          labels {
+            nodes {
+              id
+              name
+            }
+          }
         }
       }
     `;
@@ -696,6 +703,8 @@ export class LinearIntegration extends BasePMTool {
           state?: { id: string; name: string };
           assignee?: { id: string } | null;
           project?: { id: string; name: string } | null;
+          priority?: number | null;
+          labels?: { nodes: Array<{ id: string; name: string }> };
         };
       }>(query, { id: issueId });
       
@@ -711,6 +720,8 @@ export class LinearIntegration extends BasePMTool {
           assigneeId: response.data.issue.assignee?.id,
           projectId: response.data.issue.project?.id ?? undefined,
           projectName: response.data.issue.project?.name ?? undefined,
+          priority: response.data.issue.priority ?? undefined,
+          labelNames: response.data.issue.labels?.nodes.map(l => l.name) ?? [],
         };
       }
       
