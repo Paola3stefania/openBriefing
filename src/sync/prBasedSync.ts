@@ -1363,3 +1363,268 @@ export async function syncPRBasedStatus(options: SyncOptions = {}): Promise<Sync
   }
 }
 
+// ============================================================================
+// Audit and Fix Function
+// ============================================================================
+
+export interface AuditResult {
+  totalChecked: number;
+  incorrectlyAssigned: number;
+  fixed: number;
+  errors: number;
+  details: Array<{
+    issueNumber: number;
+    linearIdentifier: string;
+    currentState: string;
+    assignee?: string;
+    reason: string;
+    fixed?: boolean;
+  }>;
+}
+
+/**
+ * Audit and fix Linear issues that are incorrectly in Review/In Progress status
+ * without valid PR links. Reverts them to Todo/Backlog state and clears assignees.
+ */
+export async function auditAndFixIncorrectlyAssignedIssues(options: SyncOptions = {}): Promise<AuditResult> {
+  const { dryRun = false, userMappings, organizationEngineers, defaultAssigneeId } = options;
+
+  const config = getConfig();
+  const prisma = new PrismaClient();
+
+  try {
+    // Validate configuration
+    const linearConfig: LinearConfig = {
+      apiKey: process.env.PM_TOOL_API_KEY || "",
+      teamId: process.env.PM_TOOL_TEAM_ID || "",
+      apiUrl: "https://api.linear.app/graphql",
+    };
+
+    if (!linearConfig.apiKey || !linearConfig.teamId) {
+      throw new Error("PM_TOOL_API_KEY and PM_TOOL_TEAM_ID are required for audit");
+    }
+
+    const linear = new LinearIntegration({
+      type: "linear",
+      api_key: linearConfig.apiKey,
+      team_id: linearConfig.teamId,
+      api_url: linearConfig.apiUrl,
+    });
+
+    // Get workflow states
+    const workflowStates = await linear.getWorkflowStates(linearConfig.teamId);
+    const inProgressState = workflowStates.find(
+      s => s.type === "started" || s.name.toLowerCase().includes("in progress") || s.name.toLowerCase().includes("inprogress")
+    );
+    const reviewState = workflowStates.find(
+      s => s.type === "review" || s.name.toLowerCase().includes("review")
+    );
+    const todoState = workflowStates.find(
+      s => s.type === "unstarted" || s.name.toLowerCase().includes("todo") || s.name.toLowerCase().includes("backlog")
+    );
+
+    if (!todoState) {
+      throw new Error("Could not find 'Todo' or 'Backlog' workflow state in Linear");
+    }
+
+    // Initialize token manager
+    const tokenManager = await GitHubTokenManager.fromEnvironment();
+    
+    if (!tokenManager) {
+      throw new Error("GitHub token manager is required for audit");
+    }
+
+    // Get all GitHub issues with Linear issues linked
+    const issues = await prisma.gitHubIssue.findMany({
+      where: {
+        linearIssueId: { not: null },
+        issueState: "open",
+      },
+      select: {
+        issueNumber: true,
+        linearIssueId: true,
+        linearIssueIdentifier: true,
+        issueState: true,
+      },
+    });
+
+    log(`[Audit] Checking ${issues.length} GitHub issues with Linear links...`);
+
+    // Fetch all PRs and build mapping (same logic as sync)
+    const allOpenPRs = await fetchAllOpenPRs(tokenManager, config);
+    const mergedPRs = await fetchRecentlyMergedPRs(tokenManager, config);
+    const allPRs = [...allOpenPRs, ...mergedPRs];
+
+    // Build PR mapping using stricter pattern
+    const issueToPRsMap = new Map<number, GitHubPR[]>();
+    const issueRefPattern = /(?:closes?|fixes?|resolves?|refs?)\s+(?:[\w-]+)?#(\d+)\b|#(\d+)\b|[\w-]+#(\d+)\b|@PR\s*[#-]?(\d+)\b|(?:https?:\/\/)?(?:www\.)?github\.com\/[\w-]+\/[\w-]+\/issues\/(\d+)(?:\?[^\s]*)?(?:#[^\s]*)?/gi;
+
+    for (const pr of allPRs) {
+      const title = pr.title || '';
+      const body = pr.body || '';
+      const fullText = `${title}\n${body}`;
+      const matches = [...fullText.matchAll(issueRefPattern)];
+      const issueNumbers = new Set<number>();
+
+      for (const match of matches) {
+        const issueNum = parseInt(match[1] || match[2] || match[3] || match[4] || match[5] || '', 10);
+        if (issueNum && !isNaN(issueNum)) {
+          issueNumbers.add(issueNum);
+        }
+      }
+
+      for (const issueNum of issueNumbers) {
+        const issueExists = issues.some(issue => issue.issueNumber === issueNum);
+        if (issueExists) {
+          if (!issueToPRsMap.has(issueNum)) {
+            issueToPRsMap.set(issueNum, []);
+          }
+          issueToPRsMap.get(issueNum)!.push(pr);
+        }
+      }
+    }
+
+    const details: AuditResult['details'] = [];
+    let incorrectlyAssigned = 0;
+    let fixed = 0;
+    let errors = 0;
+
+    // Check each issue
+    for (const issue of issues) {
+      if (!issue.linearIssueId) continue;
+
+      try {
+        // Get current Linear issue state
+        const linearIssue = await linear.getIssue(issue.linearIssueId);
+        if (!linearIssue) continue;
+
+        const isInProgress = linearIssue.stateId === inProgressState?.id;
+        const isInReview = reviewState && linearIssue.stateId === reviewState.id;
+
+        if (!isInProgress && !isInReview) {
+          // Not in a state we care about, skip
+          continue;
+        }
+
+        // Check if this issue has valid PRs
+        const prsForIssue = issueToPRsMap.get(issue.issueNumber) || [];
+        const openPRs = prsForIssue.filter(pr => pr.state === "open" && !pr.merged);
+        const mergedPRsForIssue = prsForIssue.filter(pr => pr.merged);
+
+        // Special case for issue #7014 - check better-call repo
+        let allPRsForIssue = prsForIssue;
+        if (issue.issueNumber === 7014 && tokenManager) {
+          try {
+            const token = await tokenManager.getCurrentToken();
+            const betterCallResponse = await fetch(`https://api.github.com/repos/${config.github.owner}/better-call/pulls/92`, {
+              headers: {
+                Accept: "application/vnd.github.v3+json",
+                Authorization: `Bearer ${token}`,
+              },
+            });
+            tokenManager.updateRateLimitFromResponse(betterCallResponse, token);
+            if (betterCallResponse.ok) {
+              const pr = await betterCallResponse.json() as GitHubPR;
+              allPRsForIssue = [pr];
+              if (pr.merged) {
+                mergedPRsForIssue.push(pr);
+              } else if (pr.state === "open") {
+                openPRs.push(pr);
+              }
+            }
+          } catch (error) {
+            // Ignore errors for better-call check
+          }
+        }
+
+        // Determine if issue should be in this state
+        const shouldBeInProgress = openPRs.length > 0;
+        const shouldBeInReview = mergedPRsForIssue.length > 0 && issue.issueState === "open";
+
+        const isCorrectlyAssigned = 
+          (isInProgress && shouldBeInProgress) || 
+          (isInReview && shouldBeInReview);
+
+        if (!isCorrectlyAssigned) {
+          incorrectlyAssigned++;
+
+          const currentStateName = isInProgress ? "In Progress" : "Review";
+          const reason = isInProgress
+            ? "In In Progress but no open PRs found"
+            : "In Review but no merged PRs found or issue is closed";
+
+          if (!dryRun) {
+            try {
+              // Revert to Todo state and clear assignee
+              await linear.updateIssueStateAndAssignee(
+                issue.linearIssueId,
+                todoState.id,
+                null // Clear assignee
+              );
+
+              // Update database
+              await prisma.gitHubIssue.updateMany({
+                where: { issueNumber: issue.issueNumber },
+                data: {
+                  linearStatus: null,
+                  linearStatusSyncedAt: new Date(),
+                },
+              });
+
+              fixed++;
+              log(`[Audit] Fixed issue #${issue.issueNumber} (${issue.linearIssueIdentifier || issue.linearIssueId}): reverted from ${currentStateName} to ${todoState.name}`);
+
+              details.push({
+                issueNumber: issue.issueNumber,
+                linearIdentifier: issue.linearIssueIdentifier || issue.linearIssueId || "",
+                currentState: currentStateName,
+                assignee: linearIssue.assigneeId || undefined,
+                reason,
+                fixed: true,
+              });
+            } catch (error) {
+              errors++;
+              logError(`[Audit] Error fixing issue #${issue.issueNumber}:`, error);
+              details.push({
+                issueNumber: issue.issueNumber,
+                linearIdentifier: issue.linearIssueIdentifier || issue.linearIssueId || "",
+                currentState: currentStateName,
+                assignee: linearIssue.assigneeId || undefined,
+                reason: `${reason} (error: ${error instanceof Error ? error.message : String(error)})`,
+                fixed: false,
+              });
+            }
+          } else {
+            details.push({
+              issueNumber: issue.issueNumber,
+              linearIdentifier: issue.linearIssueIdentifier || issue.linearIssueId || "",
+              currentState: currentStateName,
+              assignee: linearIssue.assigneeId || undefined,
+              reason,
+              fixed: false,
+            });
+          }
+        }
+      } catch (error) {
+        errors++;
+        logError(`[Audit] Error checking issue #${issue.issueNumber}:`, error);
+      }
+    }
+
+    const result: AuditResult = {
+      totalChecked: issues.length,
+      incorrectlyAssigned,
+      fixed: dryRun ? 0 : fixed,
+      errors,
+      details,
+    };
+
+    log(`[Audit] Complete: checked ${result.totalChecked}, found ${result.incorrectlyAssigned} incorrectly assigned, ${dryRun ? 'would fix' : 'fixed'} ${result.fixed}, ${result.errors} errors`);
+
+    return result;
+
+  } finally {
+    await prisma.$disconnect();
+  }
+}
+

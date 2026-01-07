@@ -789,6 +789,42 @@ const tools: Tool[] = [
     },
   },
   {
+    name: "audit_and_fix_incorrectly_assigned",
+    description: "Audit and fix Linear issues that are incorrectly in Review/In Progress status without valid PR links. Uses stricter matching logic to verify PR links, then reverts incorrectly assigned issues to Todo/Backlog state and clears assignees. This fixes false positives from previous syncs.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        dry_run: {
+          type: "boolean",
+          description: "If true, show what would be fixed without actually changing Linear (default: false)",
+          default: false,
+        },
+        user_mappings: {
+          type: "array",
+          description: "Array of user mappings: [{githubUsername: string, linearUserId: string}]. Maps organization engineer GitHub usernames to Linear user IDs.",
+          items: {
+            type: "object",
+            properties: {
+              githubUsername: { type: "string" },
+              linearUserId: { type: "string" },
+            },
+            required: ["githubUsername", "linearUserId"],
+          },
+        },
+        organization_engineers: {
+          type: "array",
+          description: "Array of organization engineer GitHub usernames. Only PRs from these users will trigger assignment.",
+          items: { type: "string" },
+        },
+        default_assignee_id: {
+          type: "string",
+          description: "Default Linear user ID to assign if PR author is an organization engineer but no mapping is found",
+        },
+      },
+      required: [],
+    },
+  },
+  {
     name: "classify_linear_issues",
     description: "Fetch all issues from Linear UNMute team and classify them with existing projects (features) or create new projects if needed. Requires PM_TOOL_API_KEY and PM_TOOL_TEAM_ID.",
     inputSchema: {
@@ -9572,6 +9608,80 @@ Example output:
       } catch (error) {
         logError("PR-based sync failed:", error);
         throw new Error(`PR-based sync failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    case "audit_and_fix_incorrectly_assigned": {
+      const { dry_run = false, user_mappings, organization_engineers, default_assignee_id } = args as {
+        dry_run?: boolean;
+        user_mappings?: Array<{ githubUsername: string; linearUserId: string }>;
+        organization_engineers?: string[];
+        default_assignee_id?: string;
+      };
+
+      try {
+        const config = getConfig();
+        
+        // Check required environment variables
+        if (!process.env.PM_TOOL_API_KEY) {
+          throw new Error("PM_TOOL_API_KEY is required for audit");
+        }
+        
+        if (!process.env.PM_TOOL_TEAM_ID) {
+          throw new Error("PM_TOOL_TEAM_ID is required for audit");
+        }
+
+        // Verify database is available
+        const { hasDatabaseConfig, getStorage } = await import("../storage/factory.js");
+        if (!hasDatabaseConfig()) {
+          throw new Error("Database is required. Please configure DATABASE_URL.");
+        }
+
+        const storage = getStorage();
+        const dbAvailable = await storage.isAvailable();
+        if (!dbAvailable) {
+          throw new Error("Database is not available. Please check your DATABASE_URL configuration.");
+        }
+
+        console.error(`[Audit] Starting audit and fix for incorrectly assigned issues (dry_run: ${dry_run})...`);
+
+        // Import and run the audit
+        const { auditAndFixIncorrectlyAssignedIssues } = await import("../sync/prBasedSync.js");
+        const result = await auditAndFixIncorrectlyAssignedIssues({ 
+          dryRun: dry_run, 
+          userMappings: user_mappings,
+          organizationEngineers: organization_engineers,
+          defaultAssigneeId: default_assignee_id,
+        });
+
+        console.error(`[Audit] Completed: checked ${result.totalChecked}, found ${result.incorrectlyAssigned} incorrectly assigned, ${dry_run ? 'would fix' : 'fixed'} ${result.fixed}, ${result.errors} errors`);
+
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              success: result.errors === 0,
+              dry_run,
+              message: dry_run 
+                ? `[DRY RUN] Would fix ${result.incorrectlyAssigned} incorrectly assigned Linear issues`
+                : `Fixed ${result.fixed} incorrectly assigned Linear issues`,
+              summary: {
+                total_checked: result.totalChecked,
+                incorrectly_assigned: result.incorrectlyAssigned,
+                fixed: result.fixed,
+                errors: result.errors,
+              },
+              details: result.details.slice(0, 100), // Limit details to first 100
+              ...(result.details.length > 100 && {
+                note: `Showing first 100 of ${result.details.length} details`,
+              }),
+            }, null, 2),
+          }],
+        };
+
+      } catch (error) {
+        logError("Audit and fix failed:", error);
+        throw new Error(`Audit and fix failed: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
 
