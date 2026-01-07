@@ -897,16 +897,17 @@ export async function fetchAllOpenPRs(
 }
 
 async function processIssueWithPRs(
-  issue: { issueNumber: number; linearIssueId: string | null; linearIssueIdentifier: string | null; issueState: string | null },
+  issue: { issueNumber: number; linearIssueId: string | null; linearIssueIdentifier: string | null; issueState: string | null; issueAssignees?: string[] | null },
   openPRs: GitHubPR[],
   mergedPRs: GitHubPR[],
   deps: SyncDependencies,
   inProgressStateId: string,
   reviewStateId: string | null,
+  todoStateId: string,
   dryRun: boolean
 ): Promise<SyncDetail> {
   const { prisma, linear, linearConfig, userMappings, organizationEngineers, defaultAssigneeId } = deps;
-  const { issueNumber, linearIssueId, linearIssueIdentifier } = issue;
+  const { issueNumber, linearIssueId, linearIssueIdentifier, issueAssignees } = issue;
 
   try {
     // Skip if no Linear issue linked
@@ -928,74 +929,246 @@ async function processIssueWithPRs(
       };
     }
 
-    // Priority 1: Check for merged PRs first (set to Review)
-    if (mergedPRs.length > 0 && reviewStateId) {
-      const mergedResult = await checkAndSetReviewForMergedPRs(
-        mergedPRs,
-        linearIssueId,
-        [issueNumber],
-        linear,
-        reviewStateId,
-        prisma,
-        userMappings,
-        organizationEngineers,
-        defaultAssigneeId,
-        dryRun,
-        linearIssueIdentifier || `#${issueNumber}`
-      );
+    // Get current Linear issue state
+    const currentIssue = await linear.getIssue(linearIssueId);
+    const currentStateId = currentIssue?.stateId || todoStateId;
+    let assigneeFromGitHub: string | null = null;
+    let linearUserIdFromGitHub: string | null = null;
 
-      if (mergedResult.updated) {
-      return {
-        issueNumber,
-        linearIdentifier: linearIssueIdentifier || undefined,
-          action: SYNC_ACTIONS.UPDATED,
-          reason: mergedResult.reason,
-          mergedPRs: mergedPRs.map(pr => ({
-            number: pr.number,
-            url: pr.html_url,
-            author: pr.user.login,
-          })),
-        };
+    // Priority 0: Check GitHub issue assignees first (highest priority)
+    // If GitHub issue has assignees, use them for assignment
+    // Note: GitHub can have multiple assignees, but Linear supports only one
+    // Priority: organization engineer > first assignee
+    if (issueAssignees && issueAssignees.length > 0) {
+      if (issueAssignees.length > 1) {
+        log(`[PR Sync] ${linearIssueIdentifier || issueNumber}: GitHub issue has ${issueAssignees.length} assignees (${issueAssignees.join(', ')}), Linear supports one assignee - will select best match`);
+      }
+
+      // Try to find an organization engineer first (preferred)
+      let githubAssignee: string | null = null;
+      let linearUserId: string | null = null;
+
+      for (const assignee of issueAssignees) {
+        const userId = findLinearUserId(
+          assignee,
+          userMappings,
+          organizationEngineers,
+          defaultAssigneeId
+        );
+
+        if (userId) {
+          // Check if this assignee is an organization engineer (preferred)
+          const isOrgEngineer = organizationEngineers.has(assignee.toLowerCase());
+          if (isOrgEngineer || !githubAssignee) {
+            githubAssignee = assignee;
+            linearUserId = userId;
+            
+            // If we found an organization engineer, prefer them and stop searching
+            if (isOrgEngineer) {
+              log(`[PR Sync] ${linearIssueIdentifier || issueNumber}: Selected organization engineer from ${issueAssignees.length} GitHub assignees: ${assignee}`);
+              break;
+            }
+          }
+        }
+      }
+
+      // If no organization engineer found, use the first assignee that has a mapping
+      if (!linearUserId && issueAssignees.length > 0) {
+        const firstAssignee = issueAssignees[0];
+        const userId = findLinearUserId(
+          firstAssignee,
+          userMappings,
+          organizationEngineers,
+          defaultAssigneeId
+        );
+
+        if (userId) {
+          githubAssignee = firstAssignee;
+          linearUserId = userId;
+          log(`[PR Sync] ${linearIssueIdentifier || issueNumber}: Selected first assignee from ${issueAssignees.length} GitHub assignees: ${firstAssignee}`);
+        }
+      }
+
+      if (linearUserId && githubAssignee) {
+        assigneeFromGitHub = githubAssignee;
+        linearUserIdFromGitHub = linearUserId;
+        
+        if (issueAssignees.length > 1) {
+          const otherAssignees = issueAssignees.filter(a => a !== githubAssignee);
+          log(`[PR Sync] ${linearIssueIdentifier || issueNumber}: Using ${githubAssignee} (other assignees not synced: ${otherAssignees.join(', ')})`);
+        }
+      } else if (issueAssignees.length > 0) {
+        log(`[PR Sync] ${linearIssueIdentifier || issueNumber}: GitHub issue has ${issueAssignees.length} assignee(s) but none could be mapped to Linear users`);
       }
     }
 
-    // Priority 2: Check for open PRs (set to In Progress)
+    // Priority 1: Check for merged PRs (set to Review) - use GitHub assignee if available, otherwise PR author
+    if (mergedPRs.length > 0 && reviewStateId) {
+      // Use GitHub assignee if available, otherwise use PR author
+      const assigneeToUse = linearUserIdFromGitHub || 
+        findLinearUserId(
+          mergedPRs[0].user.login,
+          userMappings,
+          organizationEngineers,
+          defaultAssigneeId
+        );
+
+      if (assigneeToUse) {
+        const isAlreadyInReview = currentIssue?.stateId === reviewStateId;
+        const isAlreadyAssigned = currentIssue?.assigneeId === assigneeToUse;
+
+        if (!isAlreadyInReview || !isAlreadyAssigned) {
+          // Save PRs to database
+          if (!dryRun) {
+            await savePRsToDatabase(mergedPRs, prisma, [issueNumber]);
+          }
+
+          if (!dryRun) {
+            await linear.updateIssueStateAndAssignee(
+              linearIssueId,
+              reviewStateId,
+              assigneeToUse
+            );
+
+            await prisma.gitHubIssue.updateMany({
+              where: { issueNumber },
+              data: {
+                linearStatus: LINEAR_STATUS.REVIEW,
+                linearStatusSyncedAt: new Date(),
+              },
+            });
+
+            const assigneeSource = linearUserIdFromGitHub ? `GitHub assignee (${assigneeFromGitHub})` : `PR author (${mergedPRs[0].user.login})`;
+            log(`[PR Sync] ${linearIssueIdentifier || issueNumber}: Set to Review and assigned from ${assigneeSource}`);
+          }
+
+          const assigneeSource = linearUserIdFromGitHub ? `GitHub assignee: ${assigneeFromGitHub}` : `merged PR by ${mergedPRs[0].user.login}`;
+      return {
+        issueNumber,
+        linearIdentifier: linearIssueIdentifier || undefined,
+            action: SYNC_ACTIONS.UPDATED,
+            reason: dryRun
+              ? `[DRY RUN] Would set to Review and assign from ${assigneeSource}`
+              : `Set to Review and assigned from ${assigneeSource}`,
+            mergedPRs: mergedPRs.map(pr => ({
+              number: pr.number,
+              url: pr.html_url,
+              author: pr.user.login,
+            })),
+          };
+        }
+      }
+    }
+
+    // Priority 2: Check for open PRs (set to In Progress) - use GitHub assignee if available, otherwise PR author
     if (openPRs.length > 0) {
-      const openResult = await checkAndSetInProgressForOpenPRs(
-      openPRs,
-      linearIssueId,
-      [issueNumber],
-      linear,
-      inProgressStateId,
-      prisma,
+      // Use GitHub assignee if available, otherwise use PR author
+      const assigneeToUse = linearUserIdFromGitHub || 
+        findLinearUserId(
+          openPRs[0].user.login,
       userMappings,
       organizationEngineers,
-      defaultAssigneeId,
-      dryRun,
-      linearIssueIdentifier || `#${issueNumber}`
-    );
+          defaultAssigneeId
+        );
 
-      const action = openResult.updated ? SYNC_ACTIONS.UPDATED : SYNC_ACTIONS.UNCHANGED;
+      if (assigneeToUse) {
+        const isAlreadyInProgress = currentIssue?.stateId === inProgressStateId;
+        const isAlreadyAssigned = currentIssue?.assigneeId === assigneeToUse;
 
+        if (!isAlreadyInProgress || !isAlreadyAssigned) {
+          // Save PRs to database
+          if (!dryRun) {
+            await savePRsToDatabase(openPRs, prisma, [issueNumber]);
+          }
+
+          if (!dryRun) {
+            await linear.updateIssueStateAndAssignee(
+              linearIssueId,
+              inProgressStateId,
+              assigneeToUse
+            );
+
+            await prisma.gitHubIssue.updateMany({
+              where: { issueNumber },
+              data: {
+                linearStatus: LINEAR_STATUS.IN_PROGRESS,
+                linearStatusSyncedAt: new Date(),
+              },
+            });
+
+            const assigneeSource = linearUserIdFromGitHub ? `GitHub assignee (${assigneeFromGitHub})` : `PR author (${openPRs[0].user.login})`;
+            log(`[PR Sync] ${linearIssueIdentifier || issueNumber}: Set to In Progress and assigned from ${assigneeSource}`);
+          }
+
+          const assigneeSource = linearUserIdFromGitHub ? `GitHub assignee: ${assigneeFromGitHub}` : `open PR by ${openPRs[0].user.login}`;
     return {
       issueNumber,
       linearIdentifier: linearIssueIdentifier || undefined,
-      action,
-        reason: openResult.reason,
+            action: SYNC_ACTIONS.UPDATED,
+            reason: dryRun
+              ? `[DRY RUN] Would set to In Progress and assign from ${assigneeSource}`
+              : `Set to In Progress and assigned from ${assigneeSource}`,
       openPRs: openPRs.map(pr => ({
         number: pr.number,
         url: pr.html_url,
         author: pr.user.login,
       })),
-      };
+          };
+        } else {
+          return {
+            issueNumber,
+            linearIdentifier: linearIssueIdentifier || undefined,
+            action: SYNC_ACTIONS.UNCHANGED,
+            reason: "Already in correct state and assigned",
+            openPRs: openPRs.map(pr => ({
+              number: pr.number,
+              url: pr.html_url,
+              author: pr.user.login,
+            })),
+          };
+        }
+      }
     }
 
-    // No PRs found
+    // Priority 3: If GitHub issue has assignee but no PRs, still assign from GitHub
+    if (linearUserIdFromGitHub) {
+      const isAlreadyAssigned = currentIssue?.assigneeId === linearUserIdFromGitHub;
+
+      if (!isAlreadyAssigned) {
+        if (!dryRun) {
+          await linear.updateIssueStateAndAssignee(
+            linearIssueId,
+            currentStateId, // Preserve current state
+            linearUserIdFromGitHub // Assign from GitHub
+          );
+
+          await prisma.gitHubIssue.updateMany({
+            where: { issueNumber },
+            data: {
+              linearStatusSyncedAt: new Date(),
+            },
+          });
+
+          log(`[PR Sync] ${linearIssueIdentifier || issueNumber}: Assigned from GitHub issue assignee (${assigneeFromGitHub})`);
+        }
+
+        return {
+          issueNumber,
+          linearIdentifier: linearIssueIdentifier || undefined,
+          action: SYNC_ACTIONS.UPDATED,
+          reason: dryRun
+            ? `[DRY RUN] Would assign from GitHub issue assignee: ${assigneeFromGitHub}`
+            : `Assigned from GitHub issue assignee: ${assigneeFromGitHub}`,
+        };
+      }
+    }
+
+    // No PRs found and no GitHub assignee
     return {
       issueNumber,
       linearIdentifier: linearIssueIdentifier || undefined,
       action: SYNC_ACTIONS.UNCHANGED,
-      reason: "No open or merged PRs found",
+      reason: "No open or merged PRs found and no GitHub issue assignee",
     };
 
   } catch (error) {
@@ -1082,6 +1255,17 @@ export async function syncPRBasedStatus(options: SyncOptions = {}): Promise<Sync
       log(`[PR Sync] Found Review state: ${reviewState.name} (${reviewState.id})`);
     }
 
+    // Get Todo/Backlog state (for preserving status when assigning from GitHub)
+    const todoState = workflowStates.find(
+      s => s.type === "unstarted" || s.name.toLowerCase().includes("todo") || s.name.toLowerCase().includes("backlog")
+    );
+
+    if (!todoState) {
+      throw new Error("Could not find 'Todo' or 'Backlog' workflow state in Linear");
+    }
+
+    log(`[PR Sync] Found Todo state: ${todoState.name} (${todoState.id})`);
+
     // Initialize token manager
     const tokenManager = await GitHubTokenManager.fromEnvironment();
 
@@ -1109,6 +1293,7 @@ export async function syncPRBasedStatus(options: SyncOptions = {}): Promise<Sync
         linearIssueId: true,
         linearIssueIdentifier: true,
         issueState: true,
+        issueAssignees: true, // Get assignees from database
       },
     });
 
@@ -1325,14 +1510,15 @@ export async function syncPRBasedStatus(options: SyncOptions = {}): Promise<Sync
         log(`[PR Sync] Saved ${mergedPRs.length} merged PR(s) to database for issue #${issue.issueNumber}`);
       }
       
-      // Process issue: check merged PRs first (Review), then open PRs (In Progress)
+      // Process issue: check GitHub assignees first, then merged PRs (Review), then open PRs (In Progress)
       const result = await processIssueWithPRs(
         issue, 
         openPRs, 
         mergedPRs, 
         deps, 
         inProgressState.id, 
-        reviewState?.id || null, 
+        reviewState?.id || null,
+        todoState.id,
         dryRun
       );
       details.push(result);
