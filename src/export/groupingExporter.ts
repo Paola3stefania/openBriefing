@@ -3740,12 +3740,30 @@ export async function exportIssuesToPMTool(
             const featureId = issueFeatures?.[0]?.id || "general";
             const expectedProjectId = projectMappings.get(featureId) || projectMappings.get("general");
             
-            // Fetch current Linear state
-            const currentLinearIssue = await getIssueMethod.call(linearTool, group.linearIssueId);
-            if (!currentLinearIssue) {
-              logError(`  Linear issue ${group.linearIssueId} not found`);
-              errorCount++;
-              continue;
+            // Use DB labels instead of fetching from Linear every time
+            // Only fetch from Linear if labels are missing in DB (first time or manual update)
+            let currentLabelNames = new Set<string>(group.linearLabels || []);
+            let currentLinearIssue: Awaited<ReturnType<typeof getIssueMethod>> | null = null;
+            
+            // Only fetch from Linear if we need title/project/priority check OR if labels are missing
+            const needsLinearFetch = updateAllTitles || group.linearLabels.length === 0;
+            if (needsLinearFetch) {
+              currentLinearIssue = await getIssueMethod.call(linearTool, group.linearIssueId);
+              if (!currentLinearIssue) {
+                logError(`  Linear issue ${group.linearIssueId} not found`);
+                errorCount++;
+                continue;
+              }
+              
+              // Update DB labels from Linear if they were missing
+              if (group.linearLabels.length === 0 && currentLinearIssue.labelNames && Array.isArray(currentLinearIssue.labelNames)) {
+                currentLabelNames = new Set(currentLinearIssue.labelNames);
+                // Save to DB
+                await prisma.group.update({
+                  where: { id: group.id },
+                  data: { linearLabels: Array.from(currentLabelNames) },
+                });
+              }
             }
             
             // Build expected title with last comment info
@@ -3757,11 +3775,12 @@ export async function exportIssuesToPMTool(
             const updates: Partial<PMToolIssue> = {};
             let hasChanges = false;
             
-            // Check if title needs updating
-            const currentTitle = currentLinearIssue.title || "";
-            if (currentTitle !== expectedTitle) {
-              updates.title = expectedTitle;
-              hasChanges = true;
+            // Check if title needs updating (only if we fetched from Linear)
+            if (currentLinearIssue && currentLinearIssue.title) {
+              if (currentLinearIssue.title !== expectedTitle) {
+                updates.title = expectedTitle;
+                hasChanges = true;
+              }
             }
             
             // If update_all_titles, only update title (skip other fields)
@@ -3775,15 +3794,14 @@ export async function exportIssuesToPMTool(
               }
             } else {
               // Normal update: check all fields
-              if (expectedProjectId && currentLinearIssue.projectId !== expectedProjectId) {
+              if (currentLinearIssue && expectedProjectId && currentLinearIssue.projectId !== expectedProjectId) {
                 updates.project_id = expectedProjectId;
                 hasChanges = true;
               }
               
-              // Merge labels: combine existing Linear labels with expected labels (from GitHub + detected)
+              // Merge labels: combine existing DB labels with expected labels (from GitHub + detected)
               // Only add new labels, don't remove existing ones
               const expectedLabelNames = Array.from(allLabels);
-              const currentLabelNames = new Set(currentLinearIssue.labelNames || []);
               const mergedLabels = new Set([...currentLabelNames, ...expectedLabelNames]);
               
               // Only update if there are new labels to add
@@ -3793,12 +3811,14 @@ export async function exportIssuesToPMTool(
                 hasChanges = true;
               }
               
-              // Map priority to Linear number format for comparison
-              const linearPriorityMap: Record<string, number> = { urgent: 1, high: 2, medium: 3, low: 4 };
-              const expectedPriorityNumber = linearPriorityMap[expectedPriority] || 0;
-              if (currentLinearIssue.priority !== expectedPriorityNumber) {
-                updates.priority = expectedPriority;
-                hasChanges = true;
+              // Map priority to Linear number format for comparison (only if we fetched from Linear)
+              if (currentLinearIssue && currentLinearIssue.priority !== undefined) {
+                const linearPriorityMap: Record<string, number> = { urgent: 1, high: 2, medium: 3, low: 4 };
+                const expectedPriorityNumber = linearPriorityMap[expectedPriority] || 0;
+                if (currentLinearIssue.priority !== expectedPriorityNumber) {
+                  updates.priority = expectedPriority;
+                  hasChanges = true;
+                }
               }
             }
             
@@ -3809,12 +3829,21 @@ export async function exportIssuesToPMTool(
               } else {
                 try {
                   await updateIssueMethod.call(linearTool, group.linearIssueId, updates);
+                  
+                  // Save updated labels to DB
+                  if (updates.labels) {
+                    await prisma.group.update({
+                      where: { id: group.id },
+                      data: { linearLabels: updates.labels },
+                    });
+                  }
+                  
                   log(`  Updated group ${group.id} (${group.linearIssueId}) with changes: ${Object.keys(updates).join(", ")}`);
                   updatedCount++;
                 } catch (updateError) {
                   // If project assignment fails due to team mismatch, try to fix the project
                   const errorMsg = updateError instanceof Error ? updateError.message : String(updateError);
-                  if (errorMsg.includes("Discrepancy between issue team") && updates.project_id) {
+                  if (errorMsg.includes("Discrepancy between issue team") && updates.project_id && currentLinearIssue) {
                     const issueTeam = currentLinearIssue.teamName || currentLinearIssue.teamId || "unknown";
                     log(`  Project assignment failed for group ${group.id} (team mismatch: issue belongs to team "${issueTeam}"), attempting to update project to associate with UnMute team...`);
                     
@@ -3901,12 +3930,30 @@ export async function exportIssuesToPMTool(
             const featureId = issueFeatures?.[0]?.id || "general";
             const expectedProjectId = projectMappings.get(featureId) || projectMappings.get("general");
             
-            // Fetch current Linear state
-            const currentLinearIssue = await getIssueMethod.call(linearTool, issue.linearIssueId);
-            if (!currentLinearIssue) {
-              logError(`  Linear issue ${issue.linearIssueId} not found`);
-              errorCount++;
-              continue;
+            // Use DB labels instead of fetching from Linear every time
+            // Only fetch from Linear if labels are missing in DB (first time or manual update)
+            let currentLabelNames = new Set<string>(issue.linearLabels || []);
+            let currentLinearIssue: Awaited<ReturnType<typeof getIssueMethod>> | null = null;
+            
+            // Only fetch from Linear if we need title/project/priority check OR if labels are missing
+            const needsLinearFetch = updateAllTitles || issue.linearLabels.length === 0;
+            if (needsLinearFetch) {
+              currentLinearIssue = await getIssueMethod.call(linearTool, issue.linearIssueId);
+              if (!currentLinearIssue) {
+                logError(`  Linear issue ${issue.linearIssueId} not found`);
+                errorCount++;
+                continue;
+              }
+              
+              // Update DB labels from Linear if they were missing
+              if (issue.linearLabels.length === 0 && currentLinearIssue.labelNames && Array.isArray(currentLinearIssue.labelNames)) {
+                currentLabelNames = new Set(currentLinearIssue.labelNames);
+                // Save to DB
+                await prisma.gitHubIssue.update({
+                  where: { issueNumber: issue.issueNumber },
+                  data: { linearLabels: Array.from(currentLabelNames) },
+                });
+              }
             }
             
             // Build expected title with last comment info
@@ -3918,11 +3965,12 @@ export async function exportIssuesToPMTool(
             const updates: Partial<PMToolIssue> = {};
             let hasChanges = false;
             
-            // Check if title needs updating
-            const currentTitle = currentLinearIssue.title || "";
-            if (currentTitle !== expectedTitle) {
-              updates.title = expectedTitle;
-              hasChanges = true;
+            // Check if title needs updating (only if we fetched from Linear)
+            if (currentLinearIssue && currentLinearIssue.title) {
+              if (currentLinearIssue.title !== expectedTitle) {
+                updates.title = expectedTitle;
+                hasChanges = true;
+              }
             }
             
             // If update_all_titles, only update title (skip other fields)
@@ -3936,14 +3984,13 @@ export async function exportIssuesToPMTool(
               }
             } else {
               // Normal update: check all fields
-              if (expectedProjectId && currentLinearIssue.projectId !== expectedProjectId) {
+              if (currentLinearIssue && expectedProjectId && currentLinearIssue.projectId !== expectedProjectId) {
                 updates.project_id = expectedProjectId;
                 hasChanges = true;
               }
               
-              // Merge labels: combine existing Linear labels with expected labels (from GitHub + detected)
+              // Merge labels: combine existing DB labels with expected labels (from GitHub + detected)
               // Only add new labels, don't remove existing ones
-              const currentLabelNames = new Set(currentLinearIssue.labelNames || []);
               const mergedLabels = new Set([...currentLabelNames, ...labels]);
               
               // Only update if there are new labels to add
@@ -3953,12 +4000,14 @@ export async function exportIssuesToPMTool(
                 hasChanges = true;
               }
               
-              // Map priority to Linear number format for comparison
-              const linearPriorityMap: Record<string, number> = { urgent: 1, high: 2, medium: 3, low: 4 };
-              const expectedPriorityNumber = linearPriorityMap[expectedPriority] || 0;
-              if (currentLinearIssue.priority !== expectedPriorityNumber) {
-                updates.priority = expectedPriority;
-                hasChanges = true;
+              // Map priority to Linear number format for comparison (only if we fetched from Linear)
+              if (currentLinearIssue && currentLinearIssue.priority !== undefined) {
+                const linearPriorityMap: Record<string, number> = { urgent: 1, high: 2, medium: 3, low: 4 };
+                const expectedPriorityNumber = linearPriorityMap[expectedPriority] || 0;
+                if (currentLinearIssue.priority !== expectedPriorityNumber) {
+                  updates.priority = expectedPriority;
+                  hasChanges = true;
+                }
               }
             }
             
@@ -3969,12 +4018,21 @@ export async function exportIssuesToPMTool(
               } else {
                 try {
                   await updateIssueMethod.call(linearTool, issue.linearIssueId, updates);
+                  
+                  // Save updated labels to DB
+                  if (updates.labels) {
+                    await prisma.gitHubIssue.update({
+                      where: { issueNumber: issue.issueNumber },
+                      data: { linearLabels: updates.labels },
+                    });
+                  }
+                  
                   log(`  Updated issue #${issue.issueNumber} (${issue.linearIssueId}) with changes: ${Object.keys(updates).join(", ")}`);
                   updatedCount++;
                 } catch (updateError) {
                   // If project assignment fails due to team mismatch, try to fix the project
                   const errorMsg = updateError instanceof Error ? updateError.message : String(updateError);
-                  if (errorMsg.includes("Discrepancy between issue team") && updates.project_id) {
+                  if (errorMsg.includes("Discrepancy between issue team") && updates.project_id && currentLinearIssue) {
                     const issueTeam = currentLinearIssue.teamName || currentLinearIssue.teamId || "unknown";
                     log(`  Project assignment failed for issue #${issue.issueNumber} (team mismatch: issue belongs to team "${issueTeam}"), attempting to update project to associate with UnMute team...`);
                     
@@ -4088,16 +4146,17 @@ export async function exportIssuesToPMTool(
         let updatedCount = 0;
         for (const pmIssue of pmIssues) {
           log(`  Issue ${pmIssue.source_id}: linear_issue_id=${pmIssue.linear_issue_id || 'NOT SET'}`);
-          if (pmIssue.linear_issue_id) {
-            if (pmIssue.source_id.startsWith("group-")) {
-              // Update group export status
-              const groupId = pmIssue.source_id.replace("group-", "");
-              await prisma.group.update({
-                where: { id: groupId },
-                data: {
-                  status: "exported",
-                  exportedAt: new Date(),
-                  linearIssueId: pmIssue.linear_issue_id,
+            if (pmIssue.linear_issue_id) {
+              if (pmIssue.source_id.startsWith("group-")) {
+                // Update group export status
+                const groupId = pmIssue.source_id.replace("group-", "");
+                await prisma.group.update({
+                  where: { id: groupId },
+                  data: {
+                    status: "exported",
+                    exportedAt: new Date(),
+                    linearIssueId: pmIssue.linear_issue_id,
+                    linearLabels: pmIssue.labels || [],
                   linearIssueUrl: pmIssue.linear_issue_url || null,
                   linearIssueIdentifier: pmIssue.linear_issue_identifier || null,
                 },
@@ -4116,6 +4175,7 @@ export async function exportIssuesToPMTool(
                     linearIssueId: pmIssue.linear_issue_id,
                     linearIssueUrl: pmIssue.linear_issue_url || null,
                     linearIssueIdentifier: pmIssue.linear_issue_identifier || null,
+                    linearLabels: pmIssue.labels || [],
                   },
                 });
                 updatedCount++;

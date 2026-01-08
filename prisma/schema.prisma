@@ -102,6 +102,7 @@ model Group {
   linearIssueId         String?   @map("linear_issue_id")
   linearIssueUrl        String?   @map("linear_issue_url")
   linearIssueIdentifier String?   @map("linear_issue_identifier")
+  linearLabels          String[]  @default([]) @map("linear_labels") // Labels from Linear (stored to avoid fetching every time)
   linearProjectIds      String[]  @map("linear_project_ids")
   affectsFeatures       Json      @default("[]") @map("affects_features")
 
@@ -216,6 +217,7 @@ model GitHubIssue {
   linearIssueId        String?  @map("linear_issue_id")
   linearIssueUrl       String?  @map("linear_issue_url")
   linearIssueIdentifier String? @map("linear_issue_identifier")
+  linearLabels         String[] @default([]) @map("linear_labels") // Labels from Linear (stored to avoid fetching every time)
   
   // Linear sync status
   linearStatus         String?  @map("linear_status") // 'backlog' | 'todo' | 'in_progress' | 'done' | 'canceled'
