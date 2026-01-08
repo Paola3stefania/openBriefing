@@ -368,11 +368,12 @@ export async function mapGroupsToFeatures(
     const groupSearchText = groupText.toLowerCase();
     const issueTitle = group.github_issue?.title?.toLowerCase() || "";
     const issueLabelsArray = group.github_issue?.labels || [];
-    const issueLabels = issueLabelsArray.map((l: string | { name: string }) => {
-      if (typeof l === 'string') return l.toLowerCase();
-      if (typeof l === 'object' && l !== null && 'name' in l) return l.name.toLowerCase();
+    const issueLabelsNormalized = issueLabelsArray.map((l: string | { name: string }) => {
+      if (typeof l === 'string') return l.toLowerCase().trim();
+      if (typeof l === 'object' && l !== null && 'name' in l) return l.name.toLowerCase().trim();
       return "";
-    }).filter(Boolean).join(" ");
+    }).filter(Boolean);
+    const issueLabels = issueLabelsNormalized.join(" ");
     const allSearchText = `${groupSearchText} ${issueTitle} ${issueLabels}`.toLowerCase();
     
     for (const feature of features) {
@@ -381,27 +382,83 @@ export async function mapGroupsToFeatures(
       let ruleBasedMatch = false;
       
       // Rule-based matching: Check if feature name or keywords appear in group/issue text
-      const featureNameLower = feature.name.toLowerCase();
-      const featureKeywords = (feature.related_keywords || []).map(k => k.toLowerCase());
+      const featureNameLower = feature.name.toLowerCase().trim();
+      // Normalize feature name for matching (remove common prefixes/suffixes)
+      const featureNameNormalized = featureNameLower
+        .replace(/^feature[:\s]+/i, "")
+        .replace(/[:\s]+$/, "")
+        .trim();
+      const featureKeywords = (feature.related_keywords || []).map(k => k.toLowerCase().trim());
       
-      // Check if feature name appears in group/issue text
+      // Step 1: Check GitHub labels for direct feature name matching (ADDITIONAL signal)
+      // If any GitHub label exactly matches a feature name, boost similarity
+      let labelBasedMatch = false;
+      let labelSimilarity = 0;
+      for (const label of issueLabelsNormalized) {
+        const labelNormalized = label
+          .replace(/^feature[:\s]+/i, "")
+          .replace(/[:\s]+$/, "")
+          .trim();
+        
+        // Direct name match (e.g., "social" label matches "social" feature)
+        if (labelNormalized === featureNameNormalized || label === featureNameLower) {
+          labelBasedMatch = true;
+          labelSimilarity = 0.95; // Very high confidence for direct label match
+          log(`[DEBUG] Group ${group.id}: Label-based match - GitHub label "${label}" directly matches feature "${feature.name}"`);
+          break;
+        }
+        
+        // Also check if label matches any feature keywords
+        for (const keyword of featureKeywords) {
+          const keywordNormalized = keyword
+            .replace(/^feature[:\s]+/i, "")
+            .replace(/[:\s]+$/, "")
+            .trim();
+          if (labelNormalized === keywordNormalized || label === keyword) {
+            labelBasedMatch = true;
+            labelSimilarity = 0.9; // High confidence for label-keyword match
+            log(`[DEBUG] Group ${group.id}: Label-based match - GitHub label "${label}" matches feature keyword "${keyword}" for feature "${feature.name}"`);
+            break;
+          }
+        }
+        if (labelBasedMatch) break;
+      }
+      
+      // Step 2: Rule-based matching - Check if feature name appears in group/issue text
       if (allSearchText.includes(featureNameLower)) {
         ruleBasedMatch = true;
-        similarity = 0.9; // High confidence for exact name match
+        if (labelSimilarity === 0) {
+          similarity = 0.9; // High confidence for exact name match
+        }
         log(`[DEBUG] Group ${group.id}: Rule-based match - feature name "${feature.name}" found in group/issue text`);
       } else {
         // Check if any keywords match
         for (const keyword of featureKeywords) {
           if (keyword.length > 2 && allSearchText.includes(keyword)) {
             ruleBasedMatch = true;
-            similarity = 0.8; // High confidence for keyword match
+            if (labelSimilarity === 0) {
+              similarity = 0.8; // High confidence for keyword match
+            }
             log(`[DEBUG] Group ${group.id}: Rule-based match - keyword "${keyword}" found in group/issue text`);
             break;
           }
         }
       }
       
-      // Check code-to-feature mapping (if code was indexed for this group)
+      // Step 3: Semantic similarity (always check, combine with label/rule-based if present)
+      let semanticSimilarity = 0;
+      if (featureEmb && groupEmbedding) {
+        semanticSimilarity = cosineSimilarity(groupEmbedding, featureEmb);
+        allSimilarities.push({ id: feature.id, name: feature.name, similarity: semanticSimilarity });
+      } else {
+        if (!groupEmbedding) {
+          log(`[DEBUG] Group ${group.id}: No group embedding available, skipping semantic similarity`);
+        } else {
+          log(`[DEBUG] Group ${group.id}: Feature ${feature.id} has no embedding, skipping semantic similarity`);
+        }
+      }
+      
+      // Step 4: Code-based matching (ADDITIONAL signal)
       let codeBasedMatch = false;
       let codeSimilarity = 0;
       if (codeToFeatureMappings.has(feature.id)) {
@@ -410,39 +467,40 @@ export async function mapGroupsToFeatures(
         log(`[DEBUG] Group ${group.id}: Code-based match - feature "${feature.name}" has similarity ${codeSimilarity.toFixed(3)} from code`);
       }
       
-      // If no rule-based match, use semantic similarity (if available)
-      if (!ruleBasedMatch) {
-        if (featureEmb && groupEmbedding) {
-          // Both embeddings available - use semantic similarity
-          similarity = cosineSimilarity(groupEmbedding, featureEmb);
-          allSimilarities.push({ id: feature.id, name: feature.name, similarity });
-        } else {
-          // No semantic similarity available (embedding failed or missing)
-          // Still continue to check code-based matching below
-          if (!groupEmbedding) {
-            log(`[DEBUG] Group ${group.id}: No group embedding available, skipping semantic similarity (will try code-based only)`);
-          } else {
-            log(`[DEBUG] Group ${group.id}: Feature ${feature.id} has no embedding, skipping semantic similarity`);
-          }
-          // Don't continue here - we still want to check code-based matching
+      // Step 5: Combine all signals (label-based, rule-based, semantic, code-based)
+      // Priority: label > code > semantic > rule-based text matching
+      if (labelSimilarity > 0) {
+        // Label match is strongest - use it as base, boost with others
+        similarity = labelSimilarity;
+        if (codeSimilarity > 0.5) {
+          similarity = Math.max(similarity, codeSimilarity * 0.95); // Code can boost label match slightly
         }
-      } else {
-        // Rule-based match found - include in allSimilarities for debugging
+        if (semanticSimilarity > 0.7) {
+          similarity = Math.max(similarity, semanticSimilarity * 0.95); // High semantic similarity can boost
+        }
+      } else if (codeSimilarity > 0.5) {
+        // Code match is second strongest
+        similarity = codeSimilarity * 0.9;
+        if (semanticSimilarity > 0) {
+          similarity = Math.max(similarity, semanticSimilarity); // Use higher of code or semantic
+        }
+        if (ruleBasedMatch && similarity < 0.8) {
+          similarity = 0.8; // Rule-based match boosts minimum to 0.8
+        }
+      } else if (semanticSimilarity > 0) {
+        // Semantic similarity as base
+        similarity = semanticSimilarity;
+        if (ruleBasedMatch && similarity < 0.7) {
+          similarity = 0.7; // Rule-based match boosts minimum to 0.7
+        }
+      } else if (ruleBasedMatch) {
+        // Rule-based match only (already set above)
         allSimilarities.push({ id: feature.id, name: feature.name, similarity });
       }
       
-      // Use code-based matching (code is strong signal, works even without embeddings)
-      if (codeBasedMatch && codeSimilarity > 0.5) {
-        // If we have semantic similarity, boost it with code
-        // If no semantic similarity (embedding failed), use code similarity directly
-        if (similarity > 0) {
-          similarity = Math.max(similarity, codeSimilarity * 0.9); // Code match is 90% weight
-          log(`[DEBUG] Group ${group.id}: Boosted similarity for "${feature.name}" from ${similarity.toFixed(3)} to ${similarity.toFixed(3)} (code match: ${codeSimilarity.toFixed(3)})`);
-        } else {
-          // No semantic similarity available - use code similarity directly
-          similarity = codeSimilarity * 0.9; // Code match is 90% weight
-          log(`[DEBUG] Group ${group.id}: Using code-based similarity for "${feature.name}" (${similarity.toFixed(3)}) - embedding unavailable`);
-        }
+      // Include rule-based flag if label or text matching found
+      if (labelBasedMatch) {
+        ruleBasedMatch = true;
       }
       
       // Add to affected features if above threshold OR if rule-based match OR if strong code match
@@ -1113,45 +1171,105 @@ export async function mapUngroupedIssuesToFeatures(
     
     // Now match all issues in batch to features
     for (const data of issueData) {
-      // Find matching features using issue embedding + code matching
-      // Even if embedding failed, we can still try code-based matching
-      const affectedFeatures: Array<{ id: string; similarity: number; codeBased?: boolean }> = [];
+      // Find matching features using issue embedding + code matching + GitHub labels
+      // Even if embedding failed, we can still try code-based and label-based matching
+      const affectedFeatures: Array<{ id: string; similarity: number; codeBased?: boolean; labelBased?: boolean }> = [];
 
       // Reuse pre-loaded code-to-feature mappings (loaded once before the loop)
       // This avoids calling matchTextToFeaturesUsingCode for every issue
       const codeToFeatureMappings = sharedCodeToFeatureMappings;
 
+      // Normalize GitHub labels for matching
+      const issueLabelsNormalized = (data.issue.issue_labels || []).map(l => l.toLowerCase().trim());
+
       for (const feature of features) {
         const featureEmb = featureEmbeddings.get(feature.id);
         let similarity = 0;
         let codeBased = false;
+        let labelBased = false;
         
-        // Try semantic similarity if embeddings are available
-        if (data.embedding && featureEmb) {
-          similarity = cosineSimilarity(data.embedding, featureEmb);
-        } else if (!data.embedding) {
-          log(`[FeatureMapper] Issue ${data.issue.issue_number}: No embedding available, will try code-based matching only`);
+        // Step 1: Check GitHub labels for direct feature name matching (ADDITIONAL signal)
+        const featureNameLower = feature.name.toLowerCase().trim();
+        const featureNameNormalized = featureNameLower
+          .replace(/^feature[:\s]+/i, "")
+          .replace(/[:\s]+$/, "")
+          .trim();
+        const featureKeywords = (feature.related_keywords || []).map(k => k.toLowerCase().trim());
+        
+        let labelSimilarity = 0;
+        for (const label of issueLabelsNormalized) {
+          const labelNormalized = label
+            .replace(/^feature[:\s]+/i, "")
+            .replace(/[:\s]+$/, "")
+            .trim();
+          
+          // Direct name match (e.g., "social" label matches "social" feature)
+          if (labelNormalized === featureNameNormalized || label === featureNameLower) {
+            labelBased = true;
+            labelSimilarity = 0.95; // Very high confidence for direct label match
+            log(`[FeatureMapper] Issue ${data.issue.issue_number}: Label-based match - GitHub label "${label}" directly matches feature "${feature.name}"`);
+            break;
+          }
+          
+          // Also check if label matches any feature keywords
+          for (const keyword of featureKeywords) {
+            const keywordNormalized = keyword
+              .replace(/^feature[:\s]+/i, "")
+              .replace(/[:\s]+$/, "")
+              .trim();
+            if (labelNormalized === keywordNormalized || label === keyword) {
+              labelBased = true;
+              labelSimilarity = 0.9; // High confidence for label-keyword match
+              log(`[FeatureMapper] Issue ${data.issue.issue_number}: Label-based match - GitHub label "${label}" matches feature keyword "${keyword}" for feature "${feature.name}"`);
+              break;
+            }
+          }
+          if (labelBased) break;
         }
         
-        // Use code-based matching (works even without embeddings)
+        // Step 2: Semantic similarity (always check, combine with label if present)
+        let semanticSimilarity = 0;
+        if (data.embedding && featureEmb) {
+          semanticSimilarity = cosineSimilarity(data.embedding, featureEmb);
+        } else if (!data.embedding) {
+          log(`[FeatureMapper] Issue ${data.issue.issue_number}: No embedding available, will try code-based and label-based matching`);
+        }
+        
+        // Step 3: Code-based matching (ADDITIONAL signal)
+        let codeSimilarity = 0;
         if (codeToFeatureMappings.has(feature.id)) {
-          const codeSimilarity = codeToFeatureMappings.get(feature.id) || 0;
+          codeSimilarity = codeToFeatureMappings.get(feature.id) || 0;
           if (codeSimilarity > 0.5) {
-            // If we have semantic similarity, boost it with code
-            // If no semantic similarity (embedding failed), use code similarity directly
-            if (similarity > 0) {
-              similarity = Math.max(similarity, codeSimilarity * 0.9); // Code match is 90% weight
-            } else {
-              similarity = codeSimilarity * 0.9; // Use code similarity directly
-              log(`[FeatureMapper] Issue ${data.issue.issue_number}: Using code-based similarity for "${feature.name}" (${similarity.toFixed(3)}) - embedding unavailable`);
-            }
             codeBased = true;
           }
         }
         
-        // Include if above threshold OR if strong code match (even without semantic similarity)
-        if (similarity >= minSimilarity || (codeBased && codeToFeatureMappings.get(feature.id)! > 0.6)) {
-          affectedFeatures.push({ id: feature.id, similarity, codeBased });
+        // Step 4: Combine all signals (label-based, semantic, code-based)
+        // Priority: label > code > semantic
+        if (labelSimilarity > 0) {
+          // Label match is strongest - use it as base, boost with others
+          similarity = labelSimilarity;
+          if (codeSimilarity > 0.5) {
+            similarity = Math.max(similarity, codeSimilarity * 0.95); // Code can boost label match slightly
+          }
+          if (semanticSimilarity > 0.7) {
+            similarity = Math.max(similarity, semanticSimilarity * 0.95); // High semantic similarity can boost
+          }
+        } else if (codeSimilarity > 0.5) {
+          // Code match is second strongest
+          similarity = codeSimilarity * 0.9;
+          if (semanticSimilarity > 0) {
+            similarity = Math.max(similarity, semanticSimilarity); // Use higher of code or semantic
+          }
+          log(`[FeatureMapper] Issue ${data.issue.issue_number}: Using code-based similarity for "${feature.name}" (${similarity.toFixed(3)})${semanticSimilarity > 0 ? `, boosted from semantic ${semanticSimilarity.toFixed(3)}` : ''}`);
+        } else if (semanticSimilarity > 0) {
+          // Semantic similarity as base
+          similarity = semanticSimilarity;
+        }
+        
+        // Include if above threshold OR if strong code match OR if label-based match (even without semantic similarity)
+        if (similarity >= minSimilarity || labelBased || (codeBased && codeSimilarity > 0.6)) {
+          affectedFeatures.push({ id: feature.id, similarity, codeBased, labelBased });
         }
       }
       
