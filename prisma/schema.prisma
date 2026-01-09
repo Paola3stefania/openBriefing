@@ -563,7 +563,9 @@ model FeatureCodeMapping {
 model CodeOwnership {
   id            String   @id @default(uuid())
   filePath      String   @map("file_path")
-  engineer      String   // GitHub username
+  engineer      String   // GitHub username or email prefix (for matching)
+  engineerEmail String?  @map("engineer_email") // Full email for Linear user matching
+  engineerName  String?  @map("engineer_name") // Display name from git
   linesAdded    Int      @default(0) @map("lines_added")
   linesDeleted  Int      @default(0) @map("lines_deleted")
   commitsCount  Int      @default(0) @map("commits_count")
@@ -576,6 +578,7 @@ model CodeOwnership {
   @@unique([filePath, engineer])
   @@index([filePath])
   @@index([engineer])
+  @@index([engineerEmail])
   @@index([ownershipPercent(sort: Desc)])
   @@map("code_ownership")
 }
@@ -584,7 +587,9 @@ model CodeOwnership {
 model FeatureOwnership {
   id            String   @id @default(uuid())
   featureId     String   @map("feature_id")
-  engineer      String   // GitHub username
+  engineer      String   // GitHub username or email prefix (for matching)
+  engineerEmail String?  @map("engineer_email") // Full email for Linear user matching
+  engineerName  String?  @map("engineer_name") // Display name from git
   ownershipPercent Decimal @db.Decimal(5, 2) @map("ownership_percent") // 0.00-100.00
   filesCount    Int      @default(0) @map("files_count")
   totalLines    Int      @default(0) @map("total_lines")
@@ -597,6 +602,7 @@ model FeatureOwnership {
   @@unique([featureId, engineer])
   @@index([featureId])
   @@index([engineer])
+  @@index([engineerEmail])
   @@index([ownershipPercent(sort: Desc)])
   @@map("feature_ownership")
 }

@@ -837,8 +837,322 @@ Example output:
 }
 
 /**
- * Get numeric priority for sorting (lower = higher priority)
+ * Get the best feature ID for code ownership lookup
+ * Prefers "feature-*" IDs over "linear-project-*" IDs because feature ownership is calculated for feature-* IDs
  */
+function getBestFeatureIdForOwnership(features: Array<{ id: string; name: string }> | null): { id: string; name: string } {
+  if (!features || features.length === 0) {
+    return { id: "general", name: "General" };
+  }
+  
+  // First, try to find a feature-* ID (these have ownership data)
+  const featureIdMatch = features.find(f => f.id.startsWith("feature-"));
+  if (featureIdMatch) {
+    return featureIdMatch;
+  }
+  
+  // Otherwise, return the first one (might be a linear-project-* ID)
+  return features[0];
+}
+
+/**
+ * Build recommended assignees section text
+ * Tries multiple feature IDs to find ownership data
+ */
+async function buildRecommendedAssigneesSection(features: Array<{ id: string; name: string }> | null): Promise<string | null> {
+  try {
+    if (!features || features.length === 0) {
+      log(`  [RecommendedAssignees] No features provided`);
+      return null;
+    }
+    
+    const { getRecommendedAssignees } = await import("../analysis/codeOwnership.js");
+    
+    // Try feature-* IDs first, then linear-project-* IDs
+    const sortedFeatures = [...features].sort((a, b) => {
+      const aIsFeature = a.id.startsWith("feature-") ? 0 : 1;
+      const bIsFeature = b.id.startsWith("feature-") ? 0 : 1;
+      return aIsFeature - bIsFeature;
+    });
+    
+    for (const feature of sortedFeatures) {
+      if (feature.id === "general") {
+        continue;
+      }
+      
+      const recommendedAssignees = await getRecommendedAssignees(feature.id, 5);
+      
+      if (recommendedAssignees.length > 0) {
+        log(`  [RecommendedAssignees] Found ${recommendedAssignees.length} assignees for featureId "${feature.id}" (${feature.name}): ${recommendedAssignees.map(a => `${a.engineerName || a.engineer} (${a.ownershipPercent.toFixed(1)}%)`).join(", ")}`);
+        
+        const assigneeList = recommendedAssignees.map((a, index) => {
+          const percent = a.ownershipPercent.toFixed(1);
+          // Display name if available, with email/username for matching
+          const displayName = a.engineerName || a.engineer;
+          const emailInfo = a.engineerEmail ? ` <${a.engineerEmail}>` : "";
+          return `${index + 1}. ${displayName}${emailInfo} (${percent}% - ${a.filesCount} file${a.filesCount !== 1 ? 's' : ''})`;
+        }).join("\n");
+        
+        return `## Owner/Recommended Assignee\n\n${assigneeList}\n`;
+      }
+    }
+    
+    log(`  [RecommendedAssignees] No assignees found for any of ${features.length} features`);
+    return null;
+  } catch (error) {
+    log(`[Export] Could not fetch recommended assignees: ${error instanceof Error ? error.message : String(error)}`);
+    return null;
+  }
+}
+
+/**
+ * Rebuild description from database data (for groups)
+ * This rebuilds the description the same way it's built during initial export
+ */
+async function rebuildGroupDescription(
+  group: { id: string; suggestedTitle: string; isCrossCutting: boolean | null },
+  groupIssues: Array<{
+    issueNumber: number;
+    issueUrl: string;
+    issueTitle: string;
+    issueLabels?: string[] | null;
+    detectedLabels?: string[] | null;
+    issueComments?: unknown;
+    affectsFeatures?: unknown;
+  }>,
+  threadMatches: Array<{ threadId: string; threadName?: string | null; threadUrl?: string | null; similarityScore: number; messageCount?: number | null }>,
+  discordThreads: Record<string, any>,
+  linkedPRs: Array<{
+    prNumber: number;
+    prUrl: string;
+    prTitle: string;
+    prState: string;
+    prMerged: boolean;
+    prBody?: string | null;
+    linkedIssues: Array<{ issueNumber: number }>;
+  }>,
+  features: Array<{ id: string; name: string }> | null
+): Promise<string> {
+  const descriptionParts: string[] = [];
+  
+  descriptionParts.push(`# ${group.suggestedTitle}`);
+  descriptionParts.push("");
+  descriptionParts.push(`**Group ID:** ${group.id}`);
+  descriptionParts.push(`**Issues in group:** ${groupIssues.length}`);
+  descriptionParts.push(`**Related Discord threads:** ${threadMatches.length}`);
+  descriptionParts.push("");
+
+  // List all GitHub issues in the group
+  descriptionParts.push("## GitHub Issues");
+  descriptionParts.push("");
+  for (const issue of groupIssues.slice(0, 20)) {
+    descriptionParts.push(`- [#${issue.issueNumber}](${issue.issueUrl}) - ${issue.issueTitle}`);
+    if (issue.issueLabels && issue.issueLabels.length > 0) {
+      descriptionParts.push(`  Labels: ${issue.issueLabels.join(", ")}`);
+    }
+  }
+  if (groupIssues.length > 20) {
+    descriptionParts.push(`- ... and ${groupIssues.length - 20} more issues`);
+  }
+  descriptionParts.push("");
+
+  // Add Discord thread context
+  const threadIds = [...new Set(threadMatches.map(m => m.threadId))];
+  if (threadIds.length > 0) {
+    descriptionParts.push("## Related Discord Discussions");
+    descriptionParts.push("");
+    
+    for (const threadId of threadIds.slice(0, 5)) {
+      const threadMatch = threadMatches.find(m => m.threadId === threadId);
+      const threadData = discordThreads[threadId];
+      const threadName = threadMatch?.threadName || threadId;
+      
+      if (threadMatch?.threadUrl) {
+        descriptionParts.push(`### [${threadName}](${threadMatch.threadUrl})`);
+        descriptionParts.push(`> **Discord Thread:** ${threadMatch.threadUrl}`);
+      } else {
+        descriptionParts.push(`### ${threadName}`);
+      }
+      descriptionParts.push(`- **Similarity:** ${threadMatch?.similarityScore || 0}%`);
+      descriptionParts.push(`- **Messages:** ${threadMatch?.messageCount || threadData?.message_count || 0}`);
+      
+      if (threadData?.messages && threadData.messages.length > 0) {
+        const firstMsg = threadData.messages[0];
+        descriptionParts.push(`- **First message:** ${firstMsg.author.username}: ${firstMsg.content.substring(0, 150)}...`);
+      }
+      descriptionParts.push("");
+    }
+    if (threadIds.length > 5) {
+      descriptionParts.push(`... and ${threadIds.length - 5} more threads`);
+    }
+  }
+
+  // Add PR context
+  if (linkedPRs.length > 0) {
+    descriptionParts.push("## Related Pull Requests");
+    descriptionParts.push("");
+    
+    const issueNumbers = groupIssues.map(i => i.issueNumber);
+    for (const pr of linkedPRs) {
+      const prStateLabel = pr.prMerged ? "merged" : pr.prState;
+      const relatedIssueNumbers = pr.linkedIssues.map(i => i.issueNumber);
+      const relatedIssuesText = relatedIssueNumbers.map(num => `#${num}`).join(", ");
+      descriptionParts.push(`- Related to ${relatedIssuesText} - [PR #${pr.prNumber}](${pr.prUrl}) - ${pr.prTitle} (${prStateLabel})`);
+    }
+    
+    // Also check PR bodies for additional issue numbers
+    const additionalIssues = new Set<number>();
+    for (const pr of linkedPRs) {
+      if (pr.prBody) {
+        const issueMatches = pr.prBody.matchAll(/#(\d+)/g);
+        for (const match of issueMatches) {
+          const issueNum = parseInt(match[1], 10);
+          if (!issueNumbers.includes(issueNum)) {
+            additionalIssues.add(issueNum);
+          }
+        }
+      }
+    }
+    
+    if (additionalIssues.size > 0) {
+      descriptionParts.push("");
+      const issueBaseUrl = groupIssues[0]?.issueUrl?.replace(/\d+$/, "") || "";
+      const relatedIssuesLinks = Array.from(additionalIssues).map(num => {
+        const issueUrl = issueBaseUrl ? `${issueBaseUrl}${num}` : `#${num}`;
+        return `[#${num}](${issueUrl})`;
+      }).join(", ");
+      descriptionParts.push(`**Also relates to:** ${relatedIssuesLinks}`);
+    }
+    
+    descriptionParts.push("");
+  }
+
+  // Add recommended assignees
+  const assigneesSection = await buildRecommendedAssigneesSection(features);
+  if (assigneesSection) {
+    descriptionParts.push(assigneesSection.trim());
+  }
+
+  return descriptionParts.join("\n");
+}
+
+/**
+ * Rebuild description from database data (for ungrouped issues)
+ */
+async function rebuildUngroupedIssueDescription(
+  issue: {
+    issueNumber: number;
+    issueUrl: string;
+    issueTitle: string;
+    issueState: string | null;
+    issueAuthor: string | null;
+    issueLabels?: string[] | null;
+    issueBody?: string | null;
+    issueComments?: unknown;
+    affectsFeatures?: unknown;
+  },
+  threadMatches: Array<{ threadId: string; threadName?: string | null; threadUrl?: string | null; similarityScore: number; messageCount?: number | null }>,
+  discordThreads: Record<string, any>,
+  linkedPRs: Array<{
+    prNumber: number;
+    prUrl: string;
+    prTitle: string;
+    prState: string;
+    prMerged: boolean;
+    prBody?: string | null;
+  }>,
+  features: Array<{ id: string; name: string }> | null
+): Promise<string> {
+  const descriptionParts: string[] = [];
+  
+  descriptionParts.push("## GitHub Issue");
+  descriptionParts.push("");
+  descriptionParts.push(`**Issue:** [#${issue.issueNumber}](${issue.issueUrl}) - ${issue.issueTitle}`);
+  descriptionParts.push(`**State:** ${issue.issueState || "open"}`);
+  descriptionParts.push(`**Author:** ${issue.issueAuthor || "unknown"}`);
+  if (issue.issueLabels && issue.issueLabels.length > 0) {
+    descriptionParts.push(`**Labels:** ${issue.issueLabels.join(", ")}`);
+  }
+  descriptionParts.push("");
+  
+  if (issue.issueBody) {
+    descriptionParts.push("### Description");
+    descriptionParts.push(issue.issueBody.substring(0, 2000));
+    descriptionParts.push("");
+  }
+
+  // Add Discord context
+  if (threadMatches.length > 0) {
+    descriptionParts.push("## Related Discord Discussions");
+    descriptionParts.push("");
+    
+    for (const match of threadMatches.slice(0, 3)) {
+      const threadData = discordThreads[match.threadId];
+      const threadName = match.threadName || match.threadId;
+      
+      if (match.threadUrl) {
+        descriptionParts.push(`### [${threadName}](${match.threadUrl})`);
+        descriptionParts.push(`> **Discord Thread:** ${match.threadUrl}`);
+      } else {
+        descriptionParts.push(`### ${threadName}`);
+      }
+      descriptionParts.push(`- **Similarity:** ${match.similarityScore}%`);
+      descriptionParts.push(`- **Messages:** ${match.messageCount || threadData?.message_count || 0}`);
+      
+      if (threadData?.messages && threadData.messages.length > 0) {
+        const firstMsg = threadData.messages[0];
+        descriptionParts.push(`- **First message:** ${firstMsg.author.username}: ${firstMsg.content.substring(0, 150)}...`);
+      }
+      descriptionParts.push("");
+    }
+  }
+
+  // Add PR context
+  if (linkedPRs.length > 0) {
+    descriptionParts.push("## Related Pull Requests");
+    descriptionParts.push("");
+    
+    for (const pr of linkedPRs) {
+      const prStateLabel = pr.prMerged ? "merged" : pr.prState;
+      descriptionParts.push(`- Related to [#${issue.issueNumber}](${issue.issueUrl}) - [PR #${pr.prNumber}](${pr.prUrl}) - ${pr.prTitle} (${prStateLabel})`);
+    }
+    
+    // Also check PR bodies for additional issue numbers
+    const additionalIssues = new Set<number>();
+    for (const pr of linkedPRs) {
+      if (pr.prBody) {
+        const issueMatches = pr.prBody.matchAll(/#(\d+)/g);
+        for (const match of issueMatches) {
+          const issueNum = parseInt(match[1], 10);
+          if (issueNum !== issue.issueNumber) {
+            additionalIssues.add(issueNum);
+          }
+        }
+      }
+    }
+    
+    if (additionalIssues.size > 0) {
+      descriptionParts.push("");
+      const issueBaseUrl = issue.issueUrl.replace(String(issue.issueNumber), "");
+      const relatedIssuesLinks = Array.from(additionalIssues).map(num => {
+        const issueUrl = `${issueBaseUrl}${num}`;
+        return `[#${num}](${issueUrl})`;
+      }).join(", ");
+      descriptionParts.push(`**Also relates to:** ${relatedIssuesLinks}`);
+    }
+    
+    descriptionParts.push("");
+  }
+
+  // Add recommended assignees
+  const assigneesSection = await buildRecommendedAssigneesSection(features);
+  if (assigneesSection) {
+    descriptionParts.push(assigneesSection.trim());
+  }
+
+  return descriptionParts.join("\n");
+}
+
 function getPriorityOrder(priority?: "urgent" | "high" | "medium" | "low"): number {
   switch (priority) {
     case "urgent": return 0;
@@ -2959,6 +3273,7 @@ export async function exportIssuesToPMTool(
     update_projects?: boolean; // Update existing Linear issues with correct project (feature) assignments (deprecated, use update)
     update?: boolean; // Update existing Linear issues with all differences (projects, labels, priority, title, description)
     update_all_titles?: boolean; // One-time migration: Update ALL existing Linear issues with last comment info in titles (format: "X days ago - Title")
+    update_descriptions?: boolean; // Force update descriptions to add recommended assignees section based on code ownership
   }
 ): Promise<ExportWorkflowResult> {
   const includeClosed = options?.include_closed ?? false;
@@ -2968,6 +3283,7 @@ export async function exportIssuesToPMTool(
   const update = options?.update ?? options?.update_projects ?? false;
   const updateProjects = update; // Keep for backward compatibility in the code
   const updateAllTitles = options?.update_all_titles ?? false;
+  const updateDescriptions = options?.update_descriptions ?? false;
   const result: ExportWorkflowResult = {
     success: false,
     features_extracted: 0,
@@ -3407,29 +3723,13 @@ export async function exportIssuesToPMTool(
         // Get features from issues in the group (use first issue's features, or aggregate)
         const primaryIssue = groupIssueList[0];
         const issueFeatures = primaryIssue?.affectsFeatures as Array<{ id: string; name: string }> | null;
-        const topFeature = issueFeatures && issueFeatures.length > 0 
-          ? issueFeatures[0] 
-          : { id: "general", name: "General" };
+        const topFeature = getBestFeatureIdForOwnership(issueFeatures);
 
         // Add recommended assignees based on code ownership
-        try {
-          const { getRecommendedAssignees } = await import("../analysis/codeOwnership.js");
-          if (topFeature.id !== "general") {
-            const recommendedAssignees = await getRecommendedAssignees(topFeature.id, 5);
-            if (recommendedAssignees.length > 0) {
-              descriptionParts.push("## Owner/Recommended Assignee");
-              descriptionParts.push("");
-              const assigneeList = recommendedAssignees.map((a, index) => {
-                const percent = a.ownershipPercent.toFixed(1);
-                return `${index + 1}. @${a.engineer} (${percent}% - ${a.filesCount} file${a.filesCount !== 1 ? 's' : ''})`;
-              }).join("\n");
-              descriptionParts.push(assigneeList);
-              descriptionParts.push("");
-            }
-          }
-        } catch (error) {
-          // Silently fail if ownership analysis not available
-          log(`[Export] Could not fetch recommended assignees: ${error instanceof Error ? error.message : String(error)}`);
+        const assigneesSection = await buildRecommendedAssigneesSection(issueFeatures);
+        if (assigneesSection) {
+          descriptionParts.push(assigneesSection.trim());
+          descriptionParts.push("");
         }
 
         // Build discord_threads array with full details
@@ -3609,29 +3909,13 @@ export async function exportIssuesToPMTool(
 
         // Get features from issue's affectsFeatures field
         const issueFeatures = issue.affectsFeatures as Array<{ id: string; name: string }> | null;
-        const topFeature = issueFeatures && issueFeatures.length > 0 
-          ? issueFeatures[0] 
-          : { id: "general", name: "General" };
+        const topFeature = getBestFeatureIdForOwnership(issueFeatures);
 
         // Add recommended assignees based on code ownership
-        try {
-          const { getRecommendedAssignees } = await import("../analysis/codeOwnership.js");
-          if (topFeature.id !== "general") {
-            const recommendedAssignees = await getRecommendedAssignees(topFeature.id, 5);
-            if (recommendedAssignees.length > 0) {
-              descriptionParts.push("## Owner/Recommended Assignee");
-              descriptionParts.push("");
-              const assigneeList = recommendedAssignees.map((a, index) => {
-                const percent = a.ownershipPercent.toFixed(1);
-                return `${index + 1}. @${a.engineer} (${percent}% - ${a.filesCount} file${a.filesCount !== 1 ? 's' : ''})`;
-              }).join("\n");
-              descriptionParts.push(assigneeList);
-              descriptionParts.push("");
-            }
-          }
-        } catch (error) {
-          // Silently fail if ownership analysis not available
-          log(`[Export] Could not fetch recommended assignees: ${error instanceof Error ? error.message : String(error)}`);
+        const assigneesSection = await buildRecommendedAssigneesSection(issueFeatures);
+        if (assigneesSection) {
+          descriptionParts.push(assigneesSection.trim());
+          descriptionParts.push("");
         }
 
         // Build discord_threads array with full details
@@ -3749,9 +4033,90 @@ export async function exportIssuesToPMTool(
       const getIssueMethod = linearTool.getIssue;
       if ((update || updateAllTitles) && updateIssueMethod && getIssueMethod) {
         if (updateAllTitles) {
-          log("Updating ALL existing Linear issues with last comment info in titles (one-time migration)...");
+          log("[UPDATE] Updating ALL existing Linear issues with last comment info in titles (one-time migration)...");
         } else {
-          log("Updating existing Linear issues with all differences from database...");
+          log("[UPDATE] Updating existing Linear issues with all differences from database...");
+          log(`[UPDATE] update flag: ${update}, updateIssueMethod: ${!!updateIssueMethod}, getIssueMethod: ${!!getIssueMethod}`);
+        }
+        
+        // Load Discord cache for rebuilding descriptions (same as export)
+        let updateDiscordCache: import("../storage/cache/discordCache.js").DiscordCache | null = null;
+        if (channelId) {
+          try {
+            const dbMessages = await prisma.discordMessage.findMany({
+              where: { channelId },
+              orderBy: { createdAt: 'asc' },
+            });
+            
+            if (dbMessages.length > 0) {
+              const threads: Record<string, import("../storage/cache/discordCache.js").ThreadMessages> = {};
+              const mainMessages: import("../storage/cache/discordCache.js").DiscordMessage[] = [];
+              
+              for (const msg of dbMessages) {
+                const discordMsg: import("../storage/cache/discordCache.js").DiscordMessage = {
+                  id: msg.id,
+                  content: msg.content,
+                  author: {
+                    id: msg.authorId,
+                    username: msg.authorUsername || "unknown",
+                    discriminator: msg.authorDiscriminator || "0",
+                    bot: msg.authorBot,
+                    avatar: msg.authorAvatar || null,
+                  },
+                  timestamp: msg.timestamp,
+                  created_at: msg.createdAt.toISOString(),
+                  edited_at: msg.editedAt?.toISOString() || null,
+                  channel_id: msg.channelId,
+                  channel_name: msg.channelName || undefined,
+                  guild_id: msg.guildId || undefined,
+                  guild_name: msg.guildName || undefined,
+                  attachments: msg.attachments as import("../storage/cache/discordCache.js").DiscordMessage["attachments"],
+                  embeds: msg.embeds,
+                  mentions: msg.mentions,
+                  reactions: msg.reactions as import("../storage/cache/discordCache.js").DiscordMessage["reactions"],
+                  url: msg.url || undefined,
+                };
+                
+                if (msg.threadId) {
+                  if (!threads[msg.threadId]) {
+                    threads[msg.threadId] = {
+                      thread_id: msg.threadId,
+                      thread_name: msg.threadName || "Unknown Thread",
+                      message_count: 0,
+                      oldest_message_date: null,
+                      newest_message_date: null,
+                      messages: [],
+                    };
+                  }
+                  threads[msg.threadId].messages.push(discordMsg);
+                  threads[msg.threadId].message_count = threads[msg.threadId].messages.length;
+                  const msgDate = msg.createdAt.toISOString();
+                  if (!threads[msg.threadId].oldest_message_date || msgDate < threads[msg.threadId].oldest_message_date!) {
+                    threads[msg.threadId].oldest_message_date = msgDate;
+                  }
+                  if (!threads[msg.threadId].newest_message_date || msgDate > threads[msg.threadId].newest_message_date!) {
+                    threads[msg.threadId].newest_message_date = msgDate;
+                  }
+                } else {
+                  mainMessages.push(discordMsg);
+                }
+              }
+              
+              const dates = dbMessages.map(m => m.createdAt);
+              updateDiscordCache = {
+                fetched_at: new Date().toISOString(),
+                channel_id: channelId,
+                channel_name: dbMessages[0]?.channelName || undefined,
+                total_count: dbMessages.length,
+                oldest_message_date: dates.length > 0 ? new Date(Math.min(...dates.map(d => d.getTime()))).toISOString() : null,
+                newest_message_date: dates.length > 0 ? new Date(Math.max(...dates.map(d => d.getTime()))).toISOString() : null,
+                threads,
+                main_messages: mainMessages,
+              };
+            }
+          } catch (error) {
+            logError("Error loading Discord messages for update:", error);
+          }
         }
         
         // Get all exported issues (groups and ungrouped) that have a linearIssueId
@@ -3777,7 +4142,12 @@ export async function exportIssuesToPMTool(
         // Update groups
         for (const group of exportedGroups) {
           try {
-            if (!group.linearIssueId) continue;
+            if (!group.linearIssueId) {
+              log(`  [SKIP] Group ${group.id}: No linearIssueId`);
+              continue;
+            }
+            
+            log(`  [GROUP] Processing group ${group.id} (Linear: ${group.linearIssueId})`);
             
             // Get all issues in the group to build expected state
             const groupIssues = await prisma.gitHubIssue.findMany({
@@ -3785,9 +4155,12 @@ export async function exportIssuesToPMTool(
             });
             
             if (groupIssues.length === 0) {
+              log(`  [SKIP] Group ${group.id}: No issues in group`);
               skippedCount++;
               continue;
             }
+            
+            log(`  [GROUP] Group ${group.id} has ${groupIssues.length} issues`);
             
             // Build expected labels from all issues in group
             const allLabels = new Set<string>();
@@ -3825,12 +4198,10 @@ export async function exportIssuesToPMTool(
             const expectedProjectId = projectMappings.get(featureId) || projectMappings.get("general");
             
             // Use DB labels as source of truth instead of fetching from Linear every time
-            // But we still need to fetch from Linear to check title/priority/project
             let currentLabelNames = new Set<string>(group.linearLabels || []);
             let currentLinearIssue: Awaited<ReturnType<typeof getIssueMethod>> | null = null;
             
-            // Always fetch from Linear when updating (to check title/priority/project)
-            // The optimization is using DB labels instead of API labels for comparison
+            // Fetch from Linear only to check title/priority/project (not for description)
             currentLinearIssue = await getIssueMethod.call(linearTool, group.linearIssueId);
             if (!currentLinearIssue) {
               logError(`  Linear issue ${group.linearIssueId} not found`);
@@ -3854,15 +4225,93 @@ export async function exportIssuesToPMTool(
             const expectedTitleBase = group.suggestedTitle || `Issue Group ${group.id}`;
             const expectedTitle = lastCommentText ? `${lastCommentText} - ${expectedTitleBase}` : expectedTitleBase;
             
+            // Rebuild description from DB data (same way as during export)
+            // Get thread matches and Discord data
+            const groupThreadMatchesForDesc = await prisma.issueThreadMatch.findMany({
+              where: {
+                issueNumber: { in: groupIssues.map(i => i.issueNumber) },
+              },
+              orderBy: { similarityScore: 'desc' },
+            });
+            
+            // Get Discord threads from cache (same as export)
+            const threadIdsForDesc = [...new Set(groupThreadMatchesForDesc.map(m => m.threadId))];
+            const discordThreadsForDesc = updateDiscordCache?.threads || {};
+            
+            // Get PRs
+            const linkedPRsForDesc = await prisma.gitHubPullRequest.findMany({
+              where: {
+                linkedIssues: {
+                  some: {
+                    issueNumber: { in: groupIssues.map(i => i.issueNumber) },
+                  },
+                },
+              },
+              select: {
+                prNumber: true,
+                prUrl: true,
+                prTitle: true,
+                prState: true,
+                prMerged: true,
+                prBody: true,
+                linkedIssues: {
+                  select: {
+                    issueNumber: true,
+                  },
+                },
+              },
+              orderBy: {
+                prCreatedAt: 'desc',
+              },
+            });
+            
+            // Rebuild description from DB (includes recommended assignees)
+            // Convert Decimal to number for similarityScore
+            const groupThreadMatchesForDescConverted = groupThreadMatchesForDesc.map(m => ({
+              threadId: m.threadId,
+              threadName: m.threadName,
+              threadUrl: m.threadUrl,
+              similarityScore: Number(m.similarityScore),
+              messageCount: m.messageCount,
+            }));
+            
+            const rebuiltDescription = await rebuildGroupDescription(
+              group,
+              groupIssues,
+              groupThreadMatchesForDescConverted,
+              discordThreadsForDesc,
+              linkedPRsForDesc,
+              issueFeatures
+            );
+            
             // Build update object with only changed fields
             const updates: Partial<PMToolIssue> = {};
             let hasChanges = false;
             
-            // Check if title needs updating (only if we fetched from Linear)
+            // Check if title needs updating
             if (currentLinearIssue && currentLinearIssue.title) {
               if (currentLinearIssue.title !== expectedTitle) {
-                updates.title = expectedTitle;
+              updates.title = expectedTitle;
+              hasChanges = true;
+              }
+            }
+            
+            // Check if description needs updating (compare rebuilt with current)
+            if (currentLinearIssue && currentLinearIssue.description !== undefined) {
+              const currentDesc = currentLinearIssue.description || "";
+              const rebuiltDesc = rebuiltDescription || "";
+              const currentHasRecommended = currentDesc.includes("## Owner/Recommended Assignee");
+              const rebuiltHasRecommended = rebuiltDesc.includes("## Owner/Recommended Assignee");
+              
+              // Force update if updateDescriptions flag is set and recommended section is missing
+              const shouldForceUpdate = updateDescriptions && !currentHasRecommended && rebuiltHasRecommended;
+              
+              if (currentDesc !== rebuiltDesc || shouldForceUpdate) {
+                log(`  [GROUP] Group ${group.id}: Description ${shouldForceUpdate ? 'force update (update_descriptions flag)' : 'differs'} - Current length: ${currentDesc.length}, Rebuilt length: ${rebuiltDesc.length}, Current has recommended: ${currentHasRecommended}, Rebuilt has recommended: ${rebuiltHasRecommended}`);
+                updates.description = rebuiltDescription;
                 hasChanges = true;
+              } else {
+                log(`  [GROUP] Group ${group.id}: Description matches (length: ${currentDesc.length})`);
               }
             }
             
@@ -3878,8 +4327,11 @@ export async function exportIssuesToPMTool(
             } else {
               // Normal update: check all fields
               if (currentLinearIssue && expectedProjectId && currentLinearIssue.projectId !== expectedProjectId) {
+                log(`  [GROUP] Group ${group.id}: Project differs - Current: ${currentLinearIssue.projectId}, Expected: ${expectedProjectId}`);
                 updates.project_id = expectedProjectId;
                 hasChanges = true;
+              } else {
+                log(`  [GROUP] Group ${group.id}: Project matches (${expectedProjectId})`);
               }
               
               // Merge labels: combine existing DB labels with expected labels (from GitHub + detected)
@@ -3890,19 +4342,25 @@ export async function exportIssuesToPMTool(
               // Only update if there are new labels to add
               const hasNewLabels = expectedLabelNames.some(label => !currentLabelNames.has(label));
               if (hasNewLabels) {
+                const newLabels = expectedLabelNames.filter(label => !currentLabelNames.has(label));
+                log(`  [GROUP] Group ${group.id}: Has new labels to add: ${newLabels.join(", ")}`);
                 updates.labels = Array.from(mergedLabels).sort();
                 hasChanges = true;
+              } else {
+                log(`  [GROUP] Group ${group.id}: Labels match (current: ${Array.from(currentLabelNames).join(", ")})`);
               }
               
               // Map priority to Linear number format for comparison (only if we fetched from Linear)
               if (currentLinearIssue && currentLinearIssue.priority !== undefined) {
-                const linearPriorityMap: Record<string, number> = { urgent: 1, high: 2, medium: 3, low: 4 };
-                const expectedPriorityNumber = linearPriorityMap[expectedPriority] || 0;
-                if (currentLinearIssue.priority !== expectedPriorityNumber) {
-                  updates.priority = expectedPriority;
-                  hasChanges = true;
-                }
+              const linearPriorityMap: Record<string, number> = { urgent: 1, high: 2, medium: 3, low: 4 };
+              const expectedPriorityNumber = linearPriorityMap[expectedPriority] || 0;
+              if (currentLinearIssue.priority !== expectedPriorityNumber) {
+                updates.priority = expectedPriority;
+                hasChanges = true;
               }
+              }
+              
+              // Description is already rebuilt above and checked for changes
             }
             
             if (hasChanges) {
@@ -3977,6 +4435,7 @@ export async function exportIssuesToPMTool(
                 }
               }
             } else {
+              log(`  [GROUP] Group ${group.id}: No changes needed, skipping`);
               skippedCount++;
             }
           } catch (error) {
@@ -3985,10 +4444,17 @@ export async function exportIssuesToPMTool(
           }
         }
         
+        log(`[UPDATE] Groups processed: ${updatedCount} updated, ${skippedCount} skipped, ${errorCount} errors`);
+        
         // Update ungrouped issues
         for (const issue of exportedIssues) {
           try {
-            if (!issue.linearIssueId) continue;
+            if (!issue.linearIssueId) {
+              log(`  [ISSUE] Issue #${issue.issueNumber}: No linearIssueId`);
+              continue;
+            }
+            
+            log(`  [ISSUE] Processing issue #${issue.issueNumber} (Linear: ${issue.linearIssueId})`);
             
             // Build expected labels - check for Discord thread matches
             const threadMatches = await prisma.issueThreadMatch.findMany({
@@ -4043,15 +4509,87 @@ export async function exportIssuesToPMTool(
             const expectedTitleBase = issue.issueTitle || `GitHub Issue #${issue.issueNumber}`;
             const expectedTitle = lastCommentText ? `${lastCommentText} - ${expectedTitleBase}` : expectedTitleBase;
             
+            // Rebuild description from DB data (same way as during export)
+            // Get thread matches
+            const threadMatchesForDesc = await prisma.issueThreadMatch.findMany({
+              where: { issueNumber: issue.issueNumber },
+              orderBy: { similarityScore: 'desc' },
+            });
+            
+            // Get Discord threads from cache
+            const discordThreadsForDesc = updateDiscordCache?.threads || {};
+            
+            // Get PRs
+            const linkedPRsForDesc = await prisma.gitHubPullRequest.findMany({
+              where: {
+                linkedIssues: {
+                  some: {
+                    issueNumber: issue.issueNumber,
+                  },
+                },
+              },
+              select: {
+                prNumber: true,
+                prUrl: true,
+                prTitle: true,
+                prState: true,
+                prMerged: true,
+                prBody: true,
+              },
+              orderBy: {
+                prCreatedAt: 'desc',
+              },
+            });
+            
+            // Rebuild description from DB (includes recommended assignees)
+            // Convert Decimal to number for similarityScore
+            const threadMatchesForDescConverted = threadMatchesForDesc.map(m => ({
+              threadId: m.threadId,
+              threadName: m.threadName,
+              threadUrl: m.threadUrl,
+              similarityScore: Number(m.similarityScore),
+              messageCount: m.messageCount,
+            }));
+            
+            const rebuiltDescription = await rebuildUngroupedIssueDescription(
+              issue,
+              threadMatchesForDescConverted,
+              discordThreadsForDesc,
+              linkedPRsForDesc,
+              issueFeatures
+            );
+            
             // Build update object with only changed fields
             const updates: Partial<PMToolIssue> = {};
             let hasChanges = false;
             
-            // Check if title needs updating (only if we fetched from Linear)
+            // Check if title needs updating
             if (currentLinearIssue && currentLinearIssue.title) {
               if (currentLinearIssue.title !== expectedTitle) {
-                updates.title = expectedTitle;
+                log(`  [ISSUE] Issue #${issue.issueNumber}: Title differs - Current: "${currentLinearIssue.title.substring(0, 50)}..." Expected: "${expectedTitle.substring(0, 50)}..."`);
+              updates.title = expectedTitle;
+              hasChanges = true;
+              } else {
+                log(`  [ISSUE] Issue #${issue.issueNumber}: Title matches`);
+              }
+            }
+            
+            // Check if description needs updating (compare rebuilt with current)
+            if (currentLinearIssue && currentLinearIssue.description !== undefined) {
+              const currentDesc = currentLinearIssue.description || "";
+              const rebuiltDesc = rebuiltDescription || "";
+              const currentHasRecommended = currentDesc.includes("## Owner/Recommended Assignee");
+              const rebuiltHasRecommended = rebuiltDesc.includes("## Owner/Recommended Assignee");
+              
+              // Force update if updateDescriptions flag is set and recommended section is missing
+              const shouldForceUpdate = updateDescriptions && !currentHasRecommended && rebuiltHasRecommended;
+              
+              if (currentDesc !== rebuiltDesc || shouldForceUpdate) {
+                log(`  [ISSUE] Issue #${issue.issueNumber}: Description ${shouldForceUpdate ? 'force update (update_descriptions flag)' : 'differs'} - Current length: ${currentDesc.length}, Rebuilt length: ${rebuiltDesc.length}, Current has recommended: ${currentHasRecommended}, Rebuilt has recommended: ${rebuiltHasRecommended}`);
+                updates.description = rebuiltDescription;
                 hasChanges = true;
+              } else {
+                log(`  [ISSUE] Issue #${issue.issueNumber}: Description matches (length: ${currentDesc.length})`);
               }
             }
             
@@ -4061,14 +4599,18 @@ export async function exportIssuesToPMTool(
                 // Only update title
               } else {
                 // Title is already correct, skip
+                log(`  [ISSUE] Issue #${issue.issueNumber}: Title already correct, skipping (update_all_titles mode)`);
                 skippedCount++;
                 continue;
               }
             } else {
               // Normal update: check all fields
               if (currentLinearIssue && expectedProjectId && currentLinearIssue.projectId !== expectedProjectId) {
+                log(`  [ISSUE] Issue #${issue.issueNumber}: Project differs - Current: ${currentLinearIssue.projectId}, Expected: ${expectedProjectId}`);
                 updates.project_id = expectedProjectId;
                 hasChanges = true;
+              } else {
+                log(`  [ISSUE] Issue #${issue.issueNumber}: Project matches (${expectedProjectId})`);
               }
               
               // Merge labels: combine existing DB labels with expected labels (from GitHub + detected)
@@ -4078,22 +4620,32 @@ export async function exportIssuesToPMTool(
               // Only update if there are new labels to add
               const hasNewLabels = labels.some(label => !currentLabelNames.has(label));
               if (hasNewLabels) {
+                const newLabels = labels.filter(label => !currentLabelNames.has(label));
+                log(`  [ISSUE] Issue #${issue.issueNumber}: Has new labels to add: ${newLabels.join(", ")}`);
                 updates.labels = Array.from(mergedLabels).sort();
                 hasChanges = true;
+              } else {
+                log(`  [ISSUE] Issue #${issue.issueNumber}: Labels match (current: ${Array.from(currentLabelNames).join(", ")})`);
               }
               
               // Map priority to Linear number format for comparison (only if we fetched from Linear)
               if (currentLinearIssue && currentLinearIssue.priority !== undefined) {
-                const linearPriorityMap: Record<string, number> = { urgent: 1, high: 2, medium: 3, low: 4 };
-                const expectedPriorityNumber = linearPriorityMap[expectedPriority] || 0;
-                if (currentLinearIssue.priority !== expectedPriorityNumber) {
-                  updates.priority = expectedPriority;
-                  hasChanges = true;
-                }
+              const linearPriorityMap: Record<string, number> = { urgent: 1, high: 2, medium: 3, low: 4 };
+              const expectedPriorityNumber = linearPriorityMap[expectedPriority] || 0;
+              if (currentLinearIssue.priority !== expectedPriorityNumber) {
+                  log(`  [ISSUE] Issue #${issue.issueNumber}: Priority differs - Current: ${currentLinearIssue.priority}, Expected: ${expectedPriorityNumber} (${expectedPriority})`);
+                updates.priority = expectedPriority;
+                hasChanges = true;
+                } else {
+                  log(`  [ISSUE] Issue #${issue.issueNumber}: Priority matches (${expectedPriority})`);
               }
+              }
+              
+              // Description is already rebuilt above and checked for changes
             }
             
             if (hasChanges) {
+              log(`  [ISSUE] Issue #${issue.issueNumber}: Has changes - ${Object.keys(updates).join(", ")}`);
               if (dryRun) {
                 log(`  [DRY RUN] Would update issue #${issue.issueNumber} (${issue.linearIssueId}) with: ${JSON.stringify(updates)}`);
                 updatedCount++;
@@ -4165,6 +4717,7 @@ export async function exportIssuesToPMTool(
                 }
               }
             } else {
+              log(`  [ISSUE] Issue #${issue.issueNumber}: No changes needed, skipping`);
               skippedCount++;
             }
           } catch (error) {
@@ -4173,12 +4726,14 @@ export async function exportIssuesToPMTool(
           }
         }
         
+        log(`[UPDATE] Issues processed: ${updatedCount} updated, ${skippedCount} skipped, ${errorCount} errors`);
         log(`Update complete: ${updatedCount} updated, ${skippedCount} unchanged, ${errorCount} errors`);
         
-        // Add to result
-        (result as ExportWorkflowResult & { issues_updated?: number; issues_unchanged?: number; issues_errors?: number }).issues_updated = updatedCount;
-        (result as ExportWorkflowResult & { issues_updated?: number; issues_unchanged?: number; issues_errors?: number }).issues_unchanged = skippedCount;
-        (result as ExportWorkflowResult & { issues_updated?: number; issues_unchanged?: number; issues_errors?: number }).issues_errors = errorCount;
+        // Add to result with summary
+        (result as ExportWorkflowResult & { issues_updated?: number; issues_unchanged?: number; issues_errors?: number; update_summary?: string }).issues_updated = updatedCount;
+        (result as ExportWorkflowResult & { issues_updated?: number; issues_unchanged?: number; issues_errors?: number; update_summary?: string }).issues_unchanged = skippedCount;
+        (result as ExportWorkflowResult & { issues_updated?: number; issues_unchanged?: number; issues_errors?: number; update_summary?: string }).issues_errors = errorCount;
+        (result as ExportWorkflowResult & { issues_updated?: number; issues_unchanged?: number; issues_errors?: number; update_summary?: string }).update_summary = `Processed ${exportedGroups.length} groups and ${exportedIssues.length} ungrouped issues: ${updatedCount} updated, ${skippedCount} skipped (no changes), ${errorCount} errors`;
       }
     }
 
@@ -4228,16 +4783,16 @@ export async function exportIssuesToPMTool(
         let updatedCount = 0;
         for (const pmIssue of pmIssues) {
           log(`  Issue ${pmIssue.source_id}: linear_issue_id=${pmIssue.linear_issue_id || 'NOT SET'}`);
-            if (pmIssue.linear_issue_id) {
-              if (pmIssue.source_id.startsWith("group-")) {
-                // Update group export status
-                const groupId = pmIssue.source_id.replace("group-", "");
-                await prisma.group.update({
-                  where: { id: groupId },
-                  data: {
-                    status: "exported",
-                    exportedAt: new Date(),
-                    linearIssueId: pmIssue.linear_issue_id,
+          if (pmIssue.linear_issue_id) {
+            if (pmIssue.source_id.startsWith("group-")) {
+              // Update group export status
+              const groupId = pmIssue.source_id.replace("group-", "");
+              await prisma.group.update({
+                where: { id: groupId },
+                data: {
+                  status: "exported",
+                  exportedAt: new Date(),
+                  linearIssueId: pmIssue.linear_issue_id,
                     linearLabels: pmIssue.labels || [],
                   linearIssueUrl: pmIssue.linear_issue_url || null,
                   linearIssueIdentifier: pmIssue.linear_issue_identifier || null,

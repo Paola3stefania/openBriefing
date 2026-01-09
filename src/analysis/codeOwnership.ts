@@ -1,249 +1,193 @@
 /**
- * Code ownership analysis based on commit history
- * Analyzes commits to determine which engineers own which files/features
+ * Code ownership analysis based on git blame
+ * Analyzes local codebase to determine which engineers own which files/features
+ * Uses git blame for accurate line-by-line ownership - NO API calls needed
  */
 
 import { PrismaClient } from "@prisma/client";
 import { log } from "../mcp/logger.js";
-import { getConfig } from "../config/index.js";
-import { GitHubTokenManager } from "../connectors/github/tokenManager.js";
+import { exec } from "child_process";
+import { promisify } from "util";
+import { readdir, stat } from "fs/promises";
+import { join } from "path";
 
+const execAsync = promisify(exec);
 const prisma = new PrismaClient();
 
-interface CommitFile {
-  filename: string;
-  additions: number;
-  deletions: number;
-  changes: number;
-  status: "added" | "removed" | "modified" | "renamed";
-  previous_filename?: string;
-}
+// Directories to skip during analysis
+const SKIP_DIRS = new Set([
+  "node_modules",
+  ".git",
+  ".next",
+  ".turbo",
+  "dist",
+  "build",
+  "coverage",
+  ".cache",
+  ".output",
+  "vendor",
+]);
 
-interface GitHubCommit {
-  sha: string;
-  commit: {
-    author: {
-      name: string;
-      email: string;
-      date: string;
-    };
-    committer: {
-      name: string;
-      email: string;
-      date: string;
-    };
-    message: string;
-  };
-  author: {
-    login: string;
-    id: number;
-  } | null;
-  committer: {
-    login: string;
-    id: number;
-  } | null;
-  files: CommitFile[];
-}
+// File extensions to analyze
+const ALLOWED_EXTENSIONS = new Set([
+  ".ts",
+  ".tsx",
+  ".js",
+  ".jsx",
+  ".mjs",
+  ".cjs",
+  ".json",
+  ".md",
+  ".css",
+  ".scss",
+  ".html",
+  ".vue",
+  ".svelte",
+]);
 
-interface FileOwnership {
-  filePath: string;
-  engineer: string;
-  linesAdded: number;
-  linesDeleted: number;
-  commitsCount: number;
-  ownershipPercent: number;
-  lastCommitSha: string;
-  lastCommitDate: Date;
+interface BlameResult {
+  engineer: string;      // GitHub username or email prefix (for matching)
+  engineerEmail: string; // Full email address
+  engineerName: string;  // Display name from git
+  linesOwned: number;
 }
 
 /**
- * Fetch commits for a repository
+ * Get all files in a directory recursively
  */
-async function fetchCommits(
-  tokenManager: GitHubTokenManager,
-  owner: string,
-  repo: string,
-  since?: string,
-  perPage: number = 100
-): Promise<GitHubCommit[]> {
-  const commits: GitHubCommit[] = [];
-  let page = 1;
-  let hasMore = true;
-
-  while (hasMore) {
-    try {
-      const token = await tokenManager.getCurrentToken();
-      const url = new URL(`https://api.github.com/repos/${owner}/${repo}/commits`);
-      url.searchParams.set("per_page", String(perPage));
-      url.searchParams.set("page", String(page));
-      if (since) {
-        url.searchParams.set("since", since);
-      }
-
-      const response = await fetch(url.toString(), {
-        headers: {
-          Accept: "application/vnd.github.v3+json",
-          Authorization: `Bearer ${token}`,
-        },
-      });
-
-      tokenManager.updateRateLimitFromResponse(response, token);
-
-      if (!response.ok) {
-        if (response.status === 404) {
-          log(`[CodeOwnership] Repository ${owner}/${repo} not found`);
-          break;
-        }
-        if (response.status === 403 || response.status === 429) {
-          log(`[CodeOwnership] Rate limited, waiting...`);
-          await new Promise((resolve) => setTimeout(resolve, 60000)); // Wait 1 minute
-          continue;
-        }
-        throw new Error(`GitHub API error: ${response.status} ${response.statusText}`);
-      }
-
-      const pageCommits = (await response.json()) as GitHubCommit[];
-      
-      if (pageCommits.length === 0) {
-        hasMore = false;
-      } else {
-        // Fetch full commit details with file changes
-        for (const commit of pageCommits) {
-          try {
-            const commitResponse = await fetch(
-              `https://api.github.com/repos/${owner}/${repo}/commits/${commit.sha}`,
-              {
-                headers: {
-                  Accept: "application/vnd.github.v3+json",
-                  Authorization: `Bearer ${token}`,
-                },
-              }
-            );
-
-            tokenManager.updateRateLimitFromResponse(commitResponse, token);
-
-            if (commitResponse.ok) {
-              const fullCommit = (await commitResponse.json()) as GitHubCommit;
-              commits.push(fullCommit);
-            }
-          } catch (error) {
-            log(`[CodeOwnership] Failed to fetch commit ${commit.sha}: ${error instanceof Error ? error.message : String(error)}`);
-          }
-        }
-
-        page++;
-        if (pageCommits.length < perPage) {
-          hasMore = false;
-        }
-      }
-    } catch (error) {
-      log(`[CodeOwnership] Error fetching commits page ${page}: ${error instanceof Error ? error.message : String(error)}`);
-      hasMore = false;
-    }
-  }
-
-  return commits;
-}
-
-/**
- * Analyze commits and calculate file ownership
- */
-function calculateFileOwnership(commits: GitHubCommit[]): Map<string, FileOwnership[]> {
-  const ownershipMap = new Map<string, Map<string, FileOwnership>>();
-
-  for (const commit of commits) {
-    const engineer = commit.author?.login || commit.commit.author.email;
-    if (!engineer) continue;
-
-    const commitDate = new Date(commit.commit.author.date);
-
-    for (const file of commit.files || []) {
-      // Handle renamed files - count ownership for both old and new names
-      const filePaths = [file.filename];
-      if (file.status === "renamed" && file.previous_filename) {
-        filePaths.push(file.previous_filename);
-      }
-
-      for (const filePath of filePaths) {
-        if (!ownershipMap.has(filePath)) {
-          ownershipMap.set(filePath, new Map());
-        }
-
-        const fileOwners = ownershipMap.get(filePath)!;
-        
-        if (!fileOwners.has(engineer)) {
-          fileOwners.set(engineer, {
-            filePath,
-            engineer,
-            linesAdded: 0,
-            linesDeleted: 0,
-            commitsCount: 0,
-            ownershipPercent: 0, // Will be calculated later
-            lastCommitSha: commit.sha,
-            lastCommitDate: commitDate,
-          });
-        }
-
-        const ownership = fileOwners.get(engineer)!;
-        ownership.linesAdded += file.additions || 0;
-        ownership.linesDeleted += file.deletions || 0;
-        ownership.commitsCount += 1;
-        
-        // Update last commit if this is more recent
-        if (commitDate > ownership.lastCommitDate) {
-          ownership.lastCommitSha = commit.sha;
-          ownership.lastCommitDate = commitDate;
-        }
-      }
-    }
-  }
-
-  // Calculate percentages for each file
-  const result = new Map<string, FileOwnership[]>();
+async function getAllFiles(dir: string, baseDir: string): Promise<string[]> {
+  const files: string[] = [];
   
-  for (const [filePath, owners] of ownershipMap) {
-    // Calculate total lines for this file
-    let totalLines = 0;
-    for (const owner of owners.values()) {
-      totalLines += owner.linesAdded + owner.linesDeleted;
-    }
-
-    const ownershipList: FileOwnership[] = [];
-    for (const owner of owners.values()) {
-      const ownerLines = owner.linesAdded + owner.linesDeleted;
-      const percent = totalLines > 0 ? (ownerLines / totalLines) * 100 : 0;
+  try {
+    const entries = await readdir(dir, { withFileTypes: true });
+    
+    for (const entry of entries) {
+      const fullPath = join(dir, entry.name);
+      const relativePath = fullPath.replace(baseDir + "/", "");
       
-      ownershipList.push({
-        ...owner,
-        ownershipPercent: percent,
-      });
+      if (entry.isDirectory()) {
+        if (!SKIP_DIRS.has(entry.name) && !entry.name.startsWith(".")) {
+          const subFiles = await getAllFiles(fullPath, baseDir);
+          files.push(...subFiles);
+        }
+      } else if (entry.isFile()) {
+        const ext = "." + entry.name.split(".").pop()?.toLowerCase();
+        if (ALLOWED_EXTENSIONS.has(ext)) {
+          files.push(relativePath);
+        }
+      }
     }
-
-    // Sort by ownership percentage (descending)
-    ownershipList.sort((a, b) => b.ownershipPercent - a.ownershipPercent);
-    result.set(filePath, ownershipList);
+  } catch (error) {
+    log(`[CodeOwnership] Error reading directory ${dir}: ${error instanceof Error ? error.message : String(error)}`);
   }
-
-  return result;
+  
+  return files;
 }
 
 /**
- * Analyze codebase and calculate ownership
+ * Run git blame on a file and parse the results
+ */
+async function getFileBlame(repoPath: string, filePath: string): Promise<Map<string, BlameResult>> {
+  const ownershipMap = new Map<string, BlameResult>();
+  
+  try {
+    // Use git blame with porcelain format for easier parsing
+    // -e shows email, -w ignores whitespace
+    const { stdout } = await execAsync(
+      `git blame --line-porcelain -e "${filePath}"`,
+      { 
+        cwd: repoPath,
+        maxBuffer: 10 * 1024 * 1024, // 10MB buffer for large files
+      }
+    );
+    
+    // Parse porcelain output
+    const lines = stdout.split("\n");
+    let currentAuthorName = "";
+    let currentAuthorEmail = "";
+    
+    for (const line of lines) {
+      if (line.startsWith("author ")) {
+        // Capture author name
+        currentAuthorName = line.replace("author ", "").trim();
+      } else if (line.startsWith("author-mail ")) {
+        // Capture author email
+        const match = line.match(/author-mail <(.+)>/);
+        if (match) {
+          currentAuthorEmail = match[1];
+        }
+      } else if (line.startsWith("\t")) {
+        // This is a code line - count it for the current author
+        if (currentAuthorName || currentAuthorEmail) {
+          // Extract GitHub username from email, fallback to name
+          const engineer = extractGitHubUsername(currentAuthorEmail, currentAuthorName);
+          
+          if (!ownershipMap.has(engineer)) {
+            ownershipMap.set(engineer, {
+              engineer,
+              engineerEmail: currentAuthorEmail,
+              engineerName: currentAuthorName,
+              linesOwned: 0,
+            });
+          }
+          ownershipMap.get(engineer)!.linesOwned++;
+        }
+        // Reset for next block
+        currentAuthorName = "";
+        currentAuthorEmail = "";
+      }
+    }
+  } catch (error) {
+    // File might be new (not committed) or binary
+    // This is expected for some files, don't log as error
+  }
+  
+  return ownershipMap;
+}
+
+/**
+ * Extract GitHub username from email or author info
+ * For GitHub noreply emails: 145994855+bekacru@users.noreply.github.com -> bekacru
+ * For regular emails: user@domain.com -> user
+ */
+function extractGitHubUsername(email: string, authorName: string): string {
+  // GitHub noreply format: 145994855+username@users.noreply.github.com
+  if (email.includes("@users.noreply.github.com")) {
+    const localPart = email.split("@")[0];
+    // Extract username after the + sign
+    if (localPart.includes("+")) {
+      const username = localPart.split("+")[1];
+      if (username && username.length > 0) {
+        return username.toLowerCase();
+      }
+    }
+    // Old format without numeric prefix: username@users.noreply.github.com
+    if (!/^\d+$/.test(localPart)) {
+      return localPart.toLowerCase();
+    }
+  }
+  
+  // For regular emails, use the part before @
+  if (email.includes("@")) {
+    const username = email.split("@")[0];
+    return username.toLowerCase();
+  }
+  
+  // Fallback to author name (convert spaces to hyphens for GitHub-like format)
+  return authorName.toLowerCase().replace(/\s+/g, "-");
+}
+
+/**
+ * Analyze codebase using git blame - NO API calls needed
  */
 export async function analyzeCodeOwnership(
   force: boolean = false,
-  since?: string // ISO date string, e.g., "2024-01-01T00:00:00Z"
+  _since?: string // Ignored for git blame approach
 ): Promise<{ filesAnalyzed: number; engineersFound: number }> {
   try {
-    const config = getConfig();
-    const owner = config.github.owner;
-    const repo = config.github.repo;
-
-    if (!owner || !repo) {
-      throw new Error("GITHUB_OWNER and GITHUB_REPO must be configured");
-    }
-
-    log(`[CodeOwnership] Starting code ownership analysis for ${owner}/${repo}...`);
+    const repoPath = process.env.LOCAL_REPO_PATH || process.cwd();
+    
+    log(`[CodeOwnership] Starting git blame analysis on ${repoPath}...`);
 
     // Check if we already have recent analysis (unless force)
     if (!force) {
@@ -266,69 +210,110 @@ export async function analyzeCodeOwnership(
       }
     }
 
-    // Fetch commits
-    const { GitHubTokenManager } = await import("../connectors/github/tokenManager.js");
-    const tokenManager = await GitHubTokenManager.fromEnvironment();
-    if (!tokenManager) {
-      throw new Error("GITHUB_TOKEN is required");
-    }
+    // Get all files to analyze
+    log(`[CodeOwnership] Scanning files in ${repoPath}...`);
+    const files = await getAllFiles(repoPath, repoPath);
+    log(`[CodeOwnership] Found ${files.length} files to analyze`);
 
-    log(`[CodeOwnership] Fetching commits${since ? ` since ${since}` : ""}...`);
-    const commits = await fetchCommits(tokenManager, owner, repo, since);
-    log(`[CodeOwnership] Fetched ${commits.length} commits`);
-
-    if (commits.length === 0) {
-      log(`[CodeOwnership] No commits found`);
+    if (files.length === 0) {
+      log(`[CodeOwnership] No files found to analyze`);
       return { filesAnalyzed: 0, engineersFound: 0 };
     }
 
-    // Calculate ownership
-    log(`[CodeOwnership] Calculating file ownership...`);
-    const ownershipMap = calculateFileOwnership(commits);
-
-    // Save to database
-    log(`[CodeOwnership] Saving ownership data to database...`);
-    let filesSaved = 0;
+    // Analyze each file with git blame
+    const allOwnerships: Array<{
+      filePath: string;
+      engineer: string;
+      engineerEmail: string;
+      engineerName: string;
+      linesOwned: number;
+      ownershipPercent: number;
+    }> = [];
     const engineers = new Set<string>();
+    let processedFiles = 0;
 
-    for (const [filePath, ownerships] of ownershipMap) {
-      for (const ownership of ownerships) {
-        engineers.add(ownership.engineer);
+    for (const filePath of files) {
+      const blameResult = await getFileBlame(repoPath, filePath);
+      
+      if (blameResult.size > 0) {
+        // Calculate total lines for this file
+        let totalLines = 0;
+        for (const result of blameResult.values()) {
+          totalLines += result.linesOwned;
+        }
 
-        await (prisma as any).codeOwnership.upsert({
-          where: {
-            filePath_engineer: {
-              filePath,
-              engineer: ownership.engineer,
-            },
-          },
-          create: {
+        // Add ownership records
+        for (const [engineer, result] of blameResult) {
+          engineers.add(engineer);
+          const percent = totalLines > 0 ? (result.linesOwned / totalLines) * 100 : 0;
+          
+          allOwnerships.push({
             filePath,
-            engineer: ownership.engineer,
-            linesAdded: ownership.linesAdded,
-            linesDeleted: ownership.linesDeleted,
-            commitsCount: ownership.commitsCount,
-            ownershipPercent: ownership.ownershipPercent,
-            lastCommitSha: ownership.lastCommitSha,
-            lastCommitDate: ownership.lastCommitDate,
-          },
-          update: {
-            linesAdded: ownership.linesAdded,
-            linesDeleted: ownership.linesDeleted,
-            commitsCount: ownership.commitsCount,
-            ownershipPercent: ownership.ownershipPercent,
-            lastCommitSha: ownership.lastCommitSha,
-            lastCommitDate: ownership.lastCommitDate,
-          },
-        });
+            engineer,
+            engineerEmail: result.engineerEmail,
+            engineerName: result.engineerName,
+            linesOwned: result.linesOwned,
+            ownershipPercent: percent,
+          });
+        }
       }
-      filesSaved++;
+
+      processedFiles++;
+      if (processedFiles % 50 === 0) {
+        log(`[CodeOwnership] Analyzed ${processedFiles}/${files.length} files...`);
+      }
     }
 
-    log(`[CodeOwnership] Analysis complete: ${filesSaved} files, ${engineers.size} engineers`);
+    log(`[CodeOwnership] Finished analyzing ${processedFiles} files, found ${allOwnerships.length} ownership records`);
+
+    // Save to database in batches
+    log(`[CodeOwnership] Saving ${allOwnerships.length} ownership records to database...`);
+    
+    const BATCH_SIZE = 100;
+    let savedCount = 0;
+    
+    for (let i = 0; i < allOwnerships.length; i += BATCH_SIZE) {
+      const batch = allOwnerships.slice(i, i + BATCH_SIZE);
+      
+      await prisma.$transaction(
+        batch.map(ownership => 
+          (prisma as any).codeOwnership.upsert({
+            where: {
+              filePath_engineer: {
+                filePath: ownership.filePath,
+                engineer: ownership.engineer,
+              },
+            },
+            create: {
+              filePath: ownership.filePath,
+              engineer: ownership.engineer,
+              engineerEmail: ownership.engineerEmail,
+              engineerName: ownership.engineerName,
+              linesAdded: ownership.linesOwned,
+              linesDeleted: 0,
+              commitsCount: 1,
+              ownershipPercent: ownership.ownershipPercent,
+            },
+            update: {
+              linesAdded: ownership.linesOwned,
+              engineerEmail: ownership.engineerEmail,
+              engineerName: ownership.engineerName,
+              ownershipPercent: ownership.ownershipPercent,
+            },
+          })
+        )
+      );
+      
+      savedCount += batch.length;
+      if (savedCount % 500 === 0 || savedCount === allOwnerships.length) {
+        log(`[CodeOwnership] Saved ${savedCount}/${allOwnerships.length} records`);
+      }
+    }
+
+    log(`[CodeOwnership] Analysis complete: ${processedFiles} files, ${engineers.size} engineers`);
 
     return {
-      filesAnalyzed: filesSaved,
+      filesAnalyzed: processedFiles,
       engineersFound: engineers.size,
     };
   } catch (error) {
@@ -339,93 +324,159 @@ export async function analyzeCodeOwnership(
 
 /**
  * Calculate feature-level ownership from file ownership
+ * Uses file path pattern matching based on feature names and keywords
  */
 export async function calculateFeatureOwnership(): Promise<void> {
   try {
     log(`[CodeOwnership] Calculating feature-level ownership...`);
 
-    // Get all features
+    // Get all features with their keywords
     const features = await prisma.feature.findMany({
-      include: {
-        codeMappings: {
-          include: {
-            codeSection: {
-              include: {
-                codeFile: true,
-              },
-            },
-          },
-        },
+      select: {
+        id: true,
+        name: true,
+        relatedKeywords: true,
       },
     });
 
+    // Get all file ownership data
+    const allFileOwnerships = await (prisma as any).codeOwnership.findMany();
+    
+    if (allFileOwnerships.length === 0) {
+      log(`[CodeOwnership] No file ownership data found. Run analyzeCodeOwnership first.`);
+      return;
+    }
+    
+    log(`[CodeOwnership] Found ${allFileOwnerships.length} file ownership records to map to ${features.length} features`);
+
     for (const feature of features) {
-      // Get all files mapped to this feature
-      const filePaths = new Set<string>();
-      for (const mapping of feature.codeMappings) {
-        filePaths.add(mapping.codeSection.codeFile.filePath);
+      // Build search patterns from feature name and keywords
+      const patterns: string[] = [];
+      
+      // Feature name variations
+      const featureName = feature.name.toLowerCase();
+      patterns.push(featureName);
+      patterns.push(featureName.replace(/\s+/g, "-")); // "two factor" -> "two-factor"
+      patterns.push(featureName.replace(/\s+/g, "_")); // "two factor" -> "two_factor"
+      patterns.push(featureName.replace(/\s+/g, "")); // "two factor" -> "twofactor"
+      
+      // Add related keywords
+      for (const keyword of feature.relatedKeywords || []) {
+        const kw = keyword.toLowerCase();
+        patterns.push(kw);
+        patterns.push(kw.replace(/\s+/g, "-"));
+        patterns.push(kw.replace(/\s+/g, "_"));
       }
-
-      if (filePaths.size === 0) {
-        continue; // No code mapped to this feature
-      }
-
-      // Get ownership for all files in this feature
-      const fileOwnerships = await (prisma as any).codeOwnership.findMany({
-        where: {
-          filePath: { in: Array.from(filePaths) },
-        },
+      
+      // Remove duplicates
+      const uniquePatterns = [...new Set(patterns)];
+      
+      // Find files matching this feature's patterns
+      const matchingOwnerships = allFileOwnerships.filter((ownership: { filePath: string }) => {
+        const filePathLower = ownership.filePath.toLowerCase();
+        return uniquePatterns.some(pattern => 
+          filePathLower.includes(pattern) || 
+          filePathLower.includes(`/${pattern}/`) ||
+          filePathLower.includes(`/${pattern}.`) ||
+          filePathLower.includes(`-${pattern}`) ||
+          filePathLower.includes(`_${pattern}`)
+        );
       });
 
+      if (matchingOwnerships.length === 0) {
+        continue; // No files match this feature
+      }
+      
+      log(`[CodeOwnership] Feature "${feature.name}": Found ${matchingOwnerships.length} matching file ownership records`);
+
       // Aggregate ownership by engineer
-      const engineerOwnership = new Map<string, { lines: number; files: Set<string> }>();
+      const engineerOwnership = new Map<string, { lines: number; files: Set<string>; email: string; name: string }>();
       let totalLines = 0;
 
-      for (const ownership of fileOwnerships) {
-        const lines = ownership.linesAdded + ownership.linesDeleted;
+      for (const ownership of matchingOwnerships) {
+        const lines = ownership.linesAdded || 0;
         totalLines += lines;
 
         if (!engineerOwnership.has(ownership.engineer)) {
           engineerOwnership.set(ownership.engineer, {
             lines: 0,
             files: new Set(),
+            email: ownership.engineerEmail || "",
+            name: ownership.engineerName || "",
           });
         }
 
         const engineer = engineerOwnership.get(ownership.engineer)!;
         engineer.lines += lines;
         engineer.files.add(ownership.filePath);
+        // Update email/name if not set (use first non-empty value found)
+        if (!engineer.email && ownership.engineerEmail) {
+          engineer.email = ownership.engineerEmail;
+        }
+        if (!engineer.name && ownership.engineerName) {
+          engineer.name = ownership.engineerName;
+        }
       }
 
-      // Calculate percentages and save
+      // Calculate percentages and collect for batch save
+      const featureOwnershipRecords: Array<{
+        featureId: string;
+        engineer: string;
+        engineerEmail: string;
+        engineerName: string;
+        percent: number;
+        filesCount: number;
+        totalLinesCount: number;
+      }> = [];
+      
       for (const [engineer, data] of engineerOwnership) {
         const percent = totalLines > 0 ? (data.lines / totalLines) * 100 : 0;
-
-        await (prisma as any).featureOwnership.upsert({
-          where: {
-            featureId_engineer: {
-              featureId: feature.id,
-              engineer,
-            },
-          },
-          create: {
-            featureId: feature.id,
-            engineer,
-            ownershipPercent: percent,
-            filesCount: data.files.size,
-            totalLines: data.lines,
-          },
-          update: {
-            ownershipPercent: percent,
-            filesCount: data.files.size,
-            totalLines: data.lines,
-            lastUpdated: new Date(),
-          },
+        featureOwnershipRecords.push({
+          featureId: feature.id,
+          engineer,
+          engineerEmail: data.email,
+          engineerName: data.name,
+          percent,
+          filesCount: data.files.size,
+          totalLinesCount: data.lines,
         });
+      }
+      
+      // Batch upsert for this feature
+      if (featureOwnershipRecords.length > 0) {
+        await prisma.$transaction(
+          featureOwnershipRecords.map(record => 
+            (prisma as any).featureOwnership.upsert({
+              where: {
+                featureId_engineer: {
+                  featureId: record.featureId,
+                  engineer: record.engineer,
+                },
+              },
+              create: {
+                featureId: record.featureId,
+                engineer: record.engineer,
+                engineerEmail: record.engineerEmail,
+                engineerName: record.engineerName,
+                ownershipPercent: record.percent,
+                filesCount: record.filesCount,
+                totalLines: record.totalLinesCount,
+              },
+              update: {
+                ownershipPercent: record.percent,
+                engineerEmail: record.engineerEmail,
+                engineerName: record.engineerName,
+                filesCount: record.filesCount,
+                totalLines: record.totalLinesCount,
+                lastUpdated: new Date(),
+              },
+            })
+          )
+        );
       }
     }
 
-    log(`[CodeOwnership] Feature ownership calculation complete`);
+    log(`[CodeOwnership] Feature ownership calculation complete for ${features.length} features`);
   } catch (error) {
     log(`[CodeOwnership] Error calculating feature ownership: ${error instanceof Error ? error.message : String(error)}`);
     throw error;
@@ -438,103 +489,135 @@ export async function calculateFeatureOwnership(): Promise<void> {
 export async function getRecommendedAssignees(
   featureId: string,
   limit: number = 5
-): Promise<Array<{ engineer: string; ownershipPercent: number; filesCount: number }>> {
-  const ownerships = await (prisma as any).featureOwnership.findMany({
-    where: { featureId },
-    orderBy: { ownershipPercent: "desc" },
-    take: limit,
-  });
+): Promise<Array<{ engineer: string; engineerEmail?: string; engineerName?: string; ownershipPercent: number; filesCount: number }>> {
+  try {
+    const ownerships = await (prisma as any).featureOwnership.findMany({
+      where: { featureId },
+      orderBy: { ownershipPercent: "desc" },
+      take: limit,
+    });
 
-  return ownerships.map((o: { engineer: string; ownershipPercent: number; filesCount: number }) => ({
-    engineer: o.engineer,
-    ownershipPercent: Number(o.ownershipPercent),
-    filesCount: o.filesCount,
-  }));
+    return ownerships.map((o: { engineer: string; engineerEmail?: string; engineerName?: string; ownershipPercent: { toNumber?: () => number } | number; filesCount: number }) => ({
+      engineer: o.engineer,
+      engineerEmail: o.engineerEmail || undefined,
+      engineerName: o.engineerName || undefined,
+      ownershipPercent: typeof o.ownershipPercent === 'object' && o.ownershipPercent.toNumber 
+        ? o.ownershipPercent.toNumber() 
+        : Number(o.ownershipPercent),
+      filesCount: o.filesCount,
+    }));
+  } catch (error) {
+    log(`[CodeOwnership] Error getting recommended assignees for feature ${featureId}: ${error instanceof Error ? error.message : String(error)}`);
+    return [];
+  }
 }
 
 /**
- * Get recommended assignees for files (when feature mapping not available)
+ * Get recommended assignees based on files (for issues without a feature mapping)
  */
 export async function getRecommendedAssigneesForFiles(
   filePaths: string[],
   limit: number = 5
 ): Promise<Array<{ engineer: string; ownershipPercent: number; filesCount: number }>> {
-  // Aggregate ownership across all files
-  const ownerships = await (prisma as any).codeOwnership.findMany({
-    where: { filePath: { in: filePaths } },
-  });
-
-  const engineerMap = new Map<string, { lines: number; files: Set<string> }>();
-  let totalLines = 0;
-
-  for (const ownership of ownerships) {
-    const lines = ownership.linesAdded + ownership.linesDeleted;
-    totalLines += lines;
-
-    if (!engineerMap.has(ownership.engineer)) {
-      engineerMap.set(ownership.engineer, {
-        lines: 0,
-        files: new Set(),
-      });
+  try {
+    if (filePaths.length === 0) {
+      return [];
     }
 
-    const engineer = engineerMap.get(ownership.engineer)!;
-    engineer.lines += lines;
-    engineer.files.add(ownership.filePath);
+    // Get ownership for all specified files
+    const ownerships = await (prisma as any).codeOwnership.findMany({
+      where: {
+        filePath: { in: filePaths },
+      },
+    });
+
+    if (ownerships.length === 0) {
+      return [];
+    }
+
+    // Aggregate by engineer
+    const engineerStats = new Map<string, { lines: number; files: Set<string> }>();
+    let totalLines = 0;
+
+    for (const ownership of ownerships) {
+      const lines = ownership.linesAdded || 0;
+      totalLines += lines;
+
+      if (!engineerStats.has(ownership.engineer)) {
+        engineerStats.set(ownership.engineer, { lines: 0, files: new Set() });
+      }
+
+      const stats = engineerStats.get(ownership.engineer)!;
+      stats.lines += lines;
+      stats.files.add(ownership.filePath);
+    }
+
+    // Calculate percentages and sort
+    const results = Array.from(engineerStats.entries())
+      .map(([engineer, stats]) => ({
+        engineer,
+        ownershipPercent: totalLines > 0 ? (stats.lines / totalLines) * 100 : 0,
+        filesCount: stats.files.size,
+      }))
+      .sort((a, b) => b.ownershipPercent - a.ownershipPercent)
+      .slice(0, limit);
+
+    return results;
+  } catch (error) {
+    log(`[CodeOwnership] Error getting recommended assignees for files: ${error instanceof Error ? error.message : String(error)}`);
+    return [];
   }
-
-  // Calculate percentages and sort
-  const results = Array.from(engineerMap.entries())
-    .map(([engineer, data]) => ({
-      engineer,
-      ownershipPercent: totalLines > 0 ? (data.lines / totalLines) * 100 : 0,
-      filesCount: data.files.size,
-    }))
-    .sort((a, b) => b.ownershipPercent - a.ownershipPercent)
-    .slice(0, limit);
-
-  return results;
 }
 
 /**
- * Get all features with ownership percentages for each engineer
- * Returns a table-like structure showing feature -> engineer -> percentage
+ * Get all feature ownership data for viewing
  */
 export async function getAllFeatureOwnership(): Promise<Array<{
   featureId: string;
   featureName: string;
-  engineers: Array<{
-    engineer: string;
-    ownershipPercent: number;
-    filesCount: number;
-    totalLines: number;
-  }>;
+  engineers: Array<{ engineer: string; engineerName?: string; engineerEmail?: string; ownershipPercent: number; filesCount: number; totalLines: number }>;
 }>> {
-  const features = await prisma.feature.findMany({
-    orderBy: { name: "asc" },
-  });
-
-  // Get ownership for each feature
-  const result = [];
-  for (const feature of features) {
-    const ownerships = await (prisma as any).featureOwnership.findMany({
-      where: { featureId: feature.id },
-      orderBy: { ownershipPercent: "desc" },
+  try {
+    const features = await prisma.feature.findMany({
+      select: { id: true, name: true },
     });
 
-    result.push({
-      featureId: feature.id,
-      featureName: feature.name,
-      engineers: ownerships.map((o: { engineer: string; ownershipPercent: number; filesCount: number; totalLines: number }) => ({
-        engineer: o.engineer,
-        ownershipPercent: Number(o.ownershipPercent),
-        filesCount: o.filesCount,
-        totalLines: o.totalLines,
-      })),
-    });
+    const result: Array<{
+      featureId: string;
+      featureName: string;
+      engineers: Array<{ engineer: string; engineerName?: string; engineerEmail?: string; ownershipPercent: number; filesCount: number; totalLines: number }>;
+    }> = [];
+
+    for (const feature of features) {
+      const ownerships = await (prisma as any).featureOwnership.findMany({
+        where: { featureId: feature.id },
+        orderBy: { ownershipPercent: "desc" },
+        take: 10,
+      });
+
+      if (ownerships.length > 0) {
+        result.push({
+          featureId: feature.id,
+          featureName: feature.name,
+          engineers: ownerships.map((o: { engineer: string; engineerName?: string; engineerEmail?: string; ownershipPercent: { toNumber?: () => number } | number; filesCount: number; totalLines: number }) => ({
+            engineer: o.engineer,
+            engineerName: o.engineerName || undefined,
+            engineerEmail: o.engineerEmail || undefined,
+            ownershipPercent: typeof o.ownershipPercent === 'object' && o.ownershipPercent.toNumber
+              ? o.ownershipPercent.toNumber()
+              : Number(o.ownershipPercent),
+            filesCount: o.filesCount,
+            totalLines: o.totalLines,
+          })),
+        });
+      }
+    }
+
+    return result;
+  } catch (error) {
+    log(`[CodeOwnership] Error getting all feature ownership: ${error instanceof Error ? error.message : String(error)}`);
+    return [];
   }
-
-  return result;
 }
 
 /**
@@ -542,32 +625,25 @@ export async function getAllFeatureOwnership(): Promise<Array<{
  */
 export async function formatFeatureOwnershipTable(): Promise<string> {
   const data = await getAllFeatureOwnership();
-  
+
   if (data.length === 0) {
-    return "No feature ownership data available. Run `analyze_code_ownership` first.";
+    return "No feature ownership data found. Run `analyze_code_ownership` first.";
   }
 
   const lines: string[] = [];
-  lines.push("# Feature Ownership Table");
-  lines.push("");
-  lines.push("This table shows the percentage of code owned by each engineer for each feature.");
-  lines.push("");
+  lines.push("# Feature Ownership Report\n");
 
   for (const feature of data) {
-    if (feature.engineers.length === 0) {
-      continue; // Skip features with no ownership data
-    }
-
     lines.push(`## ${feature.featureName}`);
     lines.push("");
-    lines.push("| Engineer | Ownership % | Files | Total Lines |");
-    lines.push("|---------|------------|-------|-------------|");
-
-    for (const engineer of feature.engineers) {
-      const percent = engineer.ownershipPercent.toFixed(1);
-      lines.push(`| @${engineer.engineer} | ${percent}% | ${engineer.filesCount} | ${engineer.totalLines} |`);
+    lines.push("| Name | Email | Ownership % | Files | Lines |");
+    lines.push("|------|-------|-------------|-------|-------|");
+    
+    for (const eng of feature.engineers) {
+      const displayName = eng.engineerName || eng.engineer;
+      const email = eng.engineerEmail || "-";
+      lines.push(`| ${displayName} | ${email} | ${eng.ownershipPercent.toFixed(1)}% | ${eng.filesCount} | ${eng.totalLines} |`);
     }
-
     lines.push("");
   }
 

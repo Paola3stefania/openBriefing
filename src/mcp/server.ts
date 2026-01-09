@@ -410,6 +410,11 @@ const tools: Tool[] = [
           description: "One-time migration: If true, updates ALL existing Linear issues with last comment info in titles. Only updates titles, skips other fields. Format: 'X days ago - Title' (e.g., '1 week ago - Title').",
           default: false,
         },
+        update_descriptions: {
+          type: "boolean",
+          description: "If true, forces update of descriptions to add recommended assignees section based on code ownership. Updates descriptions even if they appear unchanged, to ensure the 'Owner/Recommended Assignee' section is present.",
+          default: false,
+        },
       },
       required: [],
     },
@@ -4612,6 +4617,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         update_projects = false,
         update = false,
         update_all_titles = false,
+        update_descriptions = false,
       } = args as {
         use_issue_centric?: boolean;
         channel_id?: string;
@@ -4620,6 +4626,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         update_projects?: boolean;
         update?: boolean;
         update_all_titles?: boolean;
+        update_descriptions?: boolean;
       };
 
       try {
@@ -4693,6 +4700,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           update: updateFlag,
           update_projects: update_projects, // Keep for backward compatibility
           update_all_titles: update_all_titles,
+          update_descriptions: update_descriptions,
         });
 
         if (!result) {
