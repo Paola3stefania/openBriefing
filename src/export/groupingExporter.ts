@@ -415,6 +415,25 @@ function calculatePriority(options: {
     "improve",
   ];
   
+  // Check for urgent patterns first
+  const isUrgent = urgentPatterns.some(pattern => 
+    normalizedLabels.some(l => l.includes(pattern)) || normalizedTitle.includes(pattern)
+  );
+  
+  // Check for enhancement FIRST - if explicitly labeled as enhancement, it's medium priority
+  // This prevents issues with both "bug" and "enhancement" labels from getting urgent
+  const isEnhancement = enhancementPatterns.some(pattern =>
+    normalizedLabels.some(l => l.includes(pattern)) || normalizedTitle.includes(pattern)
+  );
+  
+  if (isEnhancement) {
+    // Enhancement with many threads gets higher priority
+    if (thread_count >= 5) {
+      return isUrgent ? "high" : "medium";
+    }
+    return isUrgent ? "high" : "medium";
+  }
+  
   // Check for security issues (URGENT priority)
   for (const pattern of securityPatterns) {
     if (normalizedLabels.some(l => l.includes(pattern)) || normalizedTitle.includes(pattern)) {
@@ -422,23 +441,23 @@ function calculatePriority(options: {
     }
   }
   
-  // Check for urgent patterns
-  const isUrgent = urgentPatterns.some(pattern => 
-    normalizedLabels.some(l => l.includes(pattern)) || normalizedTitle.includes(pattern)
-  );
-  
-  // Check for regression patterns (HIGH priority - was working, now broken)
-  for (const pattern of regressionPatterns) {
+  // Check for bug patterns (URGENT priority - bugs are high priority)
+  for (const pattern of bugPatterns) {
     if (normalizedLabels.some(l => l.includes(pattern)) || normalizedTitle.includes(pattern)) {
-      return isUrgent ? "urgent" : "high";
+      return "urgent";
     }
   }
   
-  // Check for bug patterns (HIGH priority, or URGENT if also marked urgent)
-  for (const pattern of bugPatterns) {
+  // Check for regression patterns (URGENT priority - was working, now broken)
+  for (const pattern of regressionPatterns) {
     if (normalizedLabels.some(l => l.includes(pattern)) || normalizedTitle.includes(pattern)) {
-      return isUrgent ? "urgent" : "high";
+      return "urgent";
     }
+  }
+  
+  // Issues with many threads/messages (5+) indicate widespread impact - elevate to HIGH
+  if (thread_count >= 5) {
+      return isUrgent ? "urgent" : "high";
   }
   
   // Cross-cutting issues affect multiple features - HIGH priority
@@ -446,16 +465,9 @@ function calculatePriority(options: {
     return isUrgent ? "urgent" : "high";
   }
   
-  // Issues with many threads (3+) indicate widespread impact - elevate to HIGH
+  // Issues with moderate threads (3+) - MEDIUM priority
   if (thread_count >= 3) {
-    return isUrgent ? "urgent" : "high";
-  }
-  
-  // Enhancement/feature requests - LOW priority (unless marked urgent)
-  for (const pattern of enhancementPatterns) {
-    if (normalizedLabels.some(l => l.includes(pattern)) || normalizedTitle.includes(pattern)) {
-      return isUrgent ? "medium" : "low";
-    }
+    return isUrgent ? "high" : "medium";
   }
   
   // Documentation and assistance - LOW priority
