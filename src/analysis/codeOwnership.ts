@@ -319,6 +319,10 @@ export async function analyzeCodeOwnership(
     }
 
     log(`[CodeOwnership] Analysis complete: ${processedFiles} files, ${engineers.size} engineers`);
+    
+    // Consolidate duplicate engineers immediately after saving
+    // This ensures feature ownership calculation uses consolidated data
+    await consolidateDuplicateEngineers();
 
     return {
       filesAnalyzed: processedFiles,
@@ -645,8 +649,7 @@ export async function calculateFeatureOwnership(): Promise<void> {
     
     log(`[CodeOwnership] Linear project ownership calculation complete for ${linearProjects.size} projects`);
     
-    // Consolidate duplicate engineers (numeric IDs that should be merged with named engineers)
-    await consolidateDuplicateEngineers();
+    // Consolidate feature ownership engineers (code ownership already consolidated in analyzeCodeOwnership)
     await consolidateFeatureOwnershipEngineers();
   } catch (error) {
     log(`[CodeOwnership] Error calculating feature ownership: ${error instanceof Error ? error.message : String(error)}`);
@@ -783,15 +786,32 @@ async function consolidateFeatureOwnershipEngineers(): Promise<void> {
   });
   
   // Build name -> canonical engineer mapping
-  const nameToCanonical = new Map<string, { engineer: string; email: string }>();
+  const nameToCanonical = new Map<string, { engineer: string; email: string; name: string }>();
+  // Also build numericId -> canonical mapping from email patterns like "84341268+username@..."
+  const numericIdToCanonical = new Map<string, { engineer: string; email: string; name: string }>();
+  
   for (const o of codeOwnerships) {
     if (o.engineerName) {
       nameToCanonical.set(o.engineerName.toLowerCase(), {
         engineer: o.engineer,
         email: o.engineerEmail || "",
+        name: o.engineerName,
       });
     }
+    // Extract numeric ID from email pattern
+    if (o.engineerEmail) {
+      const match = o.engineerEmail.match(/^(\d+)\+[^@]+@users\.noreply\.github\.com$/);
+      if (match) {
+        numericIdToCanonical.set(match[1], {
+          engineer: o.engineer,
+          email: o.engineerEmail,
+          name: o.engineerName || "",
+        });
+      }
+    }
   }
+  
+  log(`[CodeOwnership] Found ${nameToCanonical.size} name mappings and ${numericIdToCanonical.size} numeric ID mappings`);
   
   // Get all feature ownership records
   const allFeatureOwnerships = await (prisma as any).featureOwnership.findMany({
@@ -823,9 +843,12 @@ async function consolidateFeatureOwnershipEngineers(): Promise<void> {
     for (const o of featureRecords) {
       if (!/^\d+$/.test(o.engineer)) continue; // Skip non-numeric
       
-      // Try to find canonical by name
-      let canonical: { engineer: string; email: string } | undefined;
-      if (o.engineerName) {
+      // Try to find canonical by numeric ID first (most reliable)
+      let canonical: { engineer: string; email: string; name: string } | undefined;
+      canonical = numericIdToCanonical.get(o.engineer);
+      
+      // If not found, try by name
+      if (!canonical && o.engineerName) {
         canonical = nameToCanonical.get(o.engineerName.toLowerCase());
       }
       
@@ -862,6 +885,7 @@ async function consolidateFeatureOwnershipEngineers(): Promise<void> {
           data: { 
             engineer: canonical.engineer,
             engineerEmail: canonical.email || o.engineerEmail,
+            engineerName: canonical.name || o.engineerName,
           },
         });
         mergedCount++;
