@@ -647,6 +647,7 @@ export async function calculateFeatureOwnership(): Promise<void> {
     
     // Consolidate duplicate engineers (numeric IDs that should be merged with named engineers)
     await consolidateDuplicateEngineers();
+    await consolidateFeatureOwnershipEngineers();
   } catch (error) {
     log(`[CodeOwnership] Error calculating feature ownership: ${error instanceof Error ? error.message : String(error)}`);
     throw error;
@@ -763,9 +764,115 @@ async function consolidateDuplicateEngineers(): Promise<void> {
   }
   
   if (mergedCount > 0 || deletedCount > 0) {
-    log(`[CodeOwnership] Consolidated: ${mergedCount} updated, ${deletedCount} merged/deleted`);
+    log(`[CodeOwnership] Consolidated code ownership: ${mergedCount} updated, ${deletedCount} merged/deleted`);
   } else {
-    log(`[CodeOwnership] No duplicate engineers found to merge`);
+    log(`[CodeOwnership] No duplicate engineers found to merge in code ownership`);
+  }
+}
+
+/**
+ * Consolidate duplicate engineer entries in feature_ownership table
+ */
+async function consolidateFeatureOwnershipEngineers(): Promise<void> {
+  log(`[CodeOwnership] Consolidating feature ownership engineers...`);
+  
+  // Get canonical mappings from code_ownership (already consolidated)
+  const codeOwnerships = await (prisma as any).codeOwnership.findMany({
+    select: { engineer: true, engineerName: true, engineerEmail: true },
+    distinct: ['engineer'],
+  });
+  
+  // Build name -> canonical engineer mapping
+  const nameToCanonical = new Map<string, { engineer: string; email: string }>();
+  for (const o of codeOwnerships) {
+    if (o.engineerName) {
+      nameToCanonical.set(o.engineerName.toLowerCase(), {
+        engineer: o.engineer,
+        email: o.engineerEmail || "",
+      });
+    }
+  }
+  
+  // Get all feature ownership records
+  const allFeatureOwnerships = await (prisma as any).featureOwnership.findMany({
+    select: {
+      id: true,
+      featureId: true,
+      engineer: true,
+      engineerName: true,
+      engineerEmail: true,
+      ownershipPercent: true,
+      filesCount: true,
+      totalLines: true,
+    },
+  });
+  
+  // Group by featureId
+  const byFeature = new Map<string, typeof allFeatureOwnerships>();
+  for (const o of allFeatureOwnerships) {
+    if (!byFeature.has(o.featureId)) {
+      byFeature.set(o.featureId, []);
+    }
+    byFeature.get(o.featureId)!.push(o);
+  }
+  
+  let mergedCount = 0;
+  let deletedCount = 0;
+  
+  for (const [featureId, featureRecords] of byFeature) {
+    for (const o of featureRecords) {
+      if (!/^\d+$/.test(o.engineer)) continue; // Skip non-numeric
+      
+      // Try to find canonical by name
+      let canonical: { engineer: string; email: string } | undefined;
+      if (o.engineerName) {
+        canonical = nameToCanonical.get(o.engineerName.toLowerCase());
+      }
+      
+      if (!canonical || canonical.engineer === o.engineer) continue;
+      
+      // Check if there's already a record for this feature + canonical engineer
+      const existingRecord = featureRecords.find(
+        (r: { id: string; engineer: string }) => r.engineer === canonical!.engineer && r.id !== o.id
+      );
+      
+      if (existingRecord) {
+        // Merge: combine ownership and delete this one
+        const existingPercent = typeof existingRecord.ownershipPercent === 'object' 
+          ? existingRecord.ownershipPercent.toNumber() : Number(existingRecord.ownershipPercent);
+        const thisPercent = typeof o.ownershipPercent === 'object' 
+          ? o.ownershipPercent.toNumber() : Number(o.ownershipPercent);
+        
+        await (prisma as any).featureOwnership.update({
+          where: { id: existingRecord.id },
+          data: { 
+            ownershipPercent: existingPercent + thisPercent,
+            filesCount: (existingRecord.filesCount || 0) + (o.filesCount || 0),
+            totalLines: (existingRecord.totalLines || 0) + (o.totalLines || 0),
+          },
+        });
+        await (prisma as any).featureOwnership.delete({
+          where: { id: o.id },
+        });
+        deletedCount++;
+      } else {
+        // No existing record, just update the engineer
+        await (prisma as any).featureOwnership.update({
+          where: { id: o.id },
+          data: { 
+            engineer: canonical.engineer,
+            engineerEmail: canonical.email || o.engineerEmail,
+          },
+        });
+        mergedCount++;
+      }
+    }
+  }
+  
+  if (mergedCount > 0 || deletedCount > 0) {
+    log(`[CodeOwnership] Consolidated feature ownership: ${mergedCount} updated, ${deletedCount} merged/deleted`);
+  } else {
+    log(`[CodeOwnership] No duplicate engineers found in feature ownership`);
   }
 }
 
