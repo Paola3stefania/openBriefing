@@ -11,6 +11,7 @@ MCP server that classifies Discord conversations, correlates with GitHub issues,
    - `OPENAI_API_KEY` (optional, for semantic classification)
    - `DATABASE_URL` (optional, for PostgreSQL storage)
    - `PM_TOOL_*` (optional, for Linear/Jira export)
+   - `LOCAL_REPO_PATH` (optional, for code ownership analysis via git blame)
 3. Database (optional): `createdb unmute_mcp && npx prisma migrate deploy`
 
 See `cursor-mcp-config.json.example` for MCP configuration.
@@ -80,11 +81,15 @@ This single tool runs the complete workflow:
 - `index_codebase` - Index code for a specific query
 - `index_code_for_features` - Index code for all features
 
+### Code Ownership
+- `analyze_code_ownership` - Analyze git blame to determine code ownership by engineer
+- `view_feature_ownership` - View feature ownership table (who owns what % of each feature)
+
 ### Documentation
 - `manage_documentation_cache` - Manage documentation cache (fetch, extract features, compute embeddings, list, clear)
 
 ### Export & Sync
-- `export_to_pm_tool` - Export to Linear/Jira
+- `export_to_pm_tool` - Export to Linear/Jira (use `update_descriptions=true` to add recommended assignees based on code ownership)
 - `sync_linear_status` - Sync GitHub → Linear (closed/merged → Done)
 - `sync_pr_based_status` - Sync PRs → Linear (open PRs → In Progress with assignee)
 - `sync_combined` - Combined sync (PR sync + status sync)
