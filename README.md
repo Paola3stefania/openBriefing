@@ -1,6 +1,51 @@
 # UNMute
 
-MCP server that classifies Discord conversations, correlates with GitHub issues, and exports to PM tools (Linear/Jira).
+**Your AI Product Manager.** UNMute automatically triages community feedback so you can focus on building.
+
+## What It Does
+
+### Understands Your Product
+- Scans your **entire codebase** via git blame to know who owns what
+- Parses your **documentation** to extract product features
+- Computes **semantic embeddings** for intelligent matching
+
+### Collects Feedback
+- Fetches **GitHub issues** with all comments
+- Fetches **Discord messages** from support channels
+- Tracks **Pull Requests** linked to issues
+
+### Organizes Everything
+- **Groups** related issues together (1 Linear ticket per problem, not per report)
+- **Matches** Discord threads to GitHub issues they're discussing
+- **Maps** issues to product features based on content
+- **Detects labels** (bug, security, regression, enhancement) using AI
+- **Removes duplicates** automatically
+
+### Prioritizes Intelligently  
+- **Urgent**: Security issues, bugs, regressions
+- **High**: Many community reports (5+ threads)
+- **Medium**: Feature requests, enhancements
+- **Low**: Questions, documentation
+
+### Assigns & Syncs
+- **Recommends assignees** based on code ownership percentages
+- **Auto-assigns** when engineer comments on issue or opens PR
+- **Sets "In Progress"** when PR is opened
+- **Sets "Done"** when PR is merged or issue is closed
+- **Adds PR links** to Linear descriptions
+
+### Exports to Linear
+- Creates issues with rich descriptions (GitHub link, Discord threads, PRs)
+- Organizes into **projects** matching your features
+- Formats titles with **last activity** ("3 days ago - Issue title")
+- Keeps everything in sync incrementally
+
+One command does it all:
+```bash
+sync_classify_and_export
+```
+
+---
 
 ## Setup
 
