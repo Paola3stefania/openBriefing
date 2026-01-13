@@ -85,13 +85,13 @@ export abstract class BasePMTool implements IPMTool {
           // First try to verify the stored ID exists in Linear
           if ('getIssue' in this && typeof this.getIssue === "function") {
             try {
-              const verifiedIssue = await this.getIssue(issue.linear_issue_id);
-              if (verifiedIssue) {
-                existing = {
-                  id: verifiedIssue.id,
-                  url: verifiedIssue.url,
-                };
-              }
+            const verifiedIssue = await this.getIssue(issue.linear_issue_id);
+            if (verifiedIssue) {
+              existing = {
+                id: verifiedIssue.id,
+                url: verifiedIssue.url,
+              };
+            }
             } catch (verifyError) {
               // Verification failed (issue might be archived/deleted)
               // Still try to use the stored ID - update might work even if getIssue fails
@@ -122,13 +122,13 @@ export abstract class BasePMTool implements IPMTool {
         if (existing) {
           // Update existing issue
           try {
-            await this.updateIssue(existing.id, issue);
-            result.updated_issues++;
-            if (existing.url) {
-              result.issue_urls?.push(existing.url);
-            }
-            // Ensure the issue object has the ID stored
-            issue.linear_issue_id = existing.id;
+          await this.updateIssue(existing.id, issue);
+          result.updated_issues++;
+          if (existing.url) {
+            result.issue_urls?.push(existing.url);
+          }
+          // Ensure the issue object has the ID stored
+          issue.linear_issue_id = existing.id;
           } catch (updateError) {
             // Update failed - issue might have been deleted
             // Fall back to creating a new issue

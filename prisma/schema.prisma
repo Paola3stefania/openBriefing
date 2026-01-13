@@ -694,3 +694,103 @@ model ExportResult {
   @@map("export_results")
 }
 
+
+// ============================================================================
+// PR Fix Tools - Learning and Fix Tracking
+// ============================================================================
+
+// Track fix attempts for GitHub issues
+model FixAttempt {
+  id                String   @id @default(uuid())
+  
+  // Issue identification
+  issueNumber       Int      @map("issue_number")
+  issueRepo         String   @map("issue_repo")        // e.g., "better-auth/better-auth"
+  issueTitle        String   @map("issue_title")
+  
+  // Triage results
+  triageResult      String   @map("triage_result")     // 'bug' | 'config' | 'feature' | 'question' | 'unclear'
+  triageConfidence  Decimal  @db.Decimal(3, 2)         // 0.00 - 1.00
+  triageReasoning   String?  @map("triage_reasoning")  @db.Text
+  
+  // Fix attempt
+  fixAttempted      Boolean  @default(false) @map("fix_attempted")
+  fixSucceeded      Boolean? @map("fix_succeeded")
+  
+  // PR details (if created)
+  prNumber          Int?     @map("pr_number")
+  prUrl             String?  @map("pr_url")
+  prTitle           String?  @map("pr_title")
+  branchName        String?  @map("branch_name")
+  filesChanged      String[] @default([]) @map("files_changed")
+  
+  // If no fix was created
+  noFixReason       String?  @map("no_fix_reason")     // 'config_issue' | 'unclear_repro' | 'too_complex' | 'already_fixed'
+  
+  // Linear integration
+  linearIssueId     String?  @map("linear_issue_id")
+  linearCommentId   String?  @map("linear_comment_id") // Comment added about result
+  linearUpdated     Boolean  @default(false) @map("linear_updated")
+  
+  // Timestamps
+  attemptedAt       DateTime @default(now()) @map("attempted_at")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+  
+  @@unique([issueNumber, issueRepo])
+  @@index([triageResult])
+  @@index([fixSucceeded])
+  @@index([attemptedAt(sort: Desc)])
+  @@index([issueRepo])
+  @@map("fix_attempts")
+}
+
+// Learn from past fixes - stores closed issues with their merged PRs
+model PRLearning {
+  id                String   @id @default(uuid())
+  
+  // Issue info
+  issueNumber       Int      @map("issue_number")
+  issueRepo         String   @map("issue_repo")
+  issueTitle        String   @map("issue_title")
+  issueBody         String?  @map("issue_body") @db.Text
+  issueLabels       String[] @map("issue_labels")
+  issueState        String   @map("issue_state")       // 'closed'
+  
+  // PR info
+  prNumber          Int      @map("pr_number")
+  prTitle           String   @map("pr_title")
+  prBody            String?  @map("pr_body") @db.Text
+  prDiff            String   @map("pr_diff") @db.Text  // The actual diff
+  prFilesChanged    String[] @map("pr_files_changed")
+  prLinesAdded      Int      @map("pr_lines_added")
+  prLinesRemoved    Int      @map("pr_lines_removed")
+  prMergedAt        DateTime? @map("pr_merged_at")
+  prAuthor          String   @map("pr_author")
+  
+  // Classification
+  issueType         String   @map("issue_type")        // 'bug' | 'feature' | 'docs' | etc.
+  subsystem         String?                            // 'oauth' | 'sso' | etc.
+  fixPatterns       String[] @map("fix_patterns")      // ['null_check', 'error_handling', 'type_fix']
+  
+  // Reviewer feedback
+  reviewComments    Json     @default("[]") @map("review_comments")  // Array of review comments
+  reviewOutcome     String?  @map("review_outcome")    // 'approved' | 'changes_requested' | 'merged_without_review'
+  
+  // Embedding for similarity search
+  embedding         Json?    @map("embedding")         // Vector embedding of issue+PR (nullable until computed)
+  contentHash       String   @map("content_hash")      // For deduplication
+  
+  // Timestamps
+  learnedAt         DateTime @default(now()) @map("learned_at")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+  
+  @@unique([issueNumber, prNumber, issueRepo])
+  @@index([issueRepo])
+  @@index([issueType])
+  @@index([subsystem])
+  @@index([fixPatterns], type: Gin)
+  @@index([prMergedAt(sort: Desc)])
+  @@map("pr_learnings")
+}

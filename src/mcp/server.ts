@@ -1099,6 +1099,148 @@ const tools: Tool[] = [
       required: [],
     },
   },
+  // ============================================================================
+  // PR Fix Tools - Learning and Fix Generation
+  // ============================================================================
+  {
+    name: "seed_pr_learnings",
+    description: "One-time seeding: fetch all historical closed issues with merged PRs and populate the PRLearning table. This bootstraps the learning system with past fixes so investigate_issue has examples from day 1. Requires DATABASE_URL and GITHUB_TOKEN.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        since: {
+          type: "string",
+          description: "ISO date to fetch issues from (e.g., '2023-01-01'). Defaults to all time.",
+        },
+        limit: {
+          type: "number",
+          description: "Max number of issues to process. Defaults to all.",
+        },
+        dry_run: {
+          type: "boolean",
+          description: "Show what would be seeded without actually storing.",
+          default: false,
+        },
+        batch_size: {
+          type: "number",
+          description: "Number of issues to process per batch (for rate limiting). Default: 50.",
+          default: 50,
+        },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "learn_from_pr",
+    description: "Learn from a merged PR: store the issue+PR+diff+feedback for future reference. Can be triggered manually or via webhook when PRs are merged. Requires DATABASE_URL and GITHUB_TOKEN.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        pr_number: {
+          type: "number",
+          description: "PR number to learn from.",
+        },
+        force: {
+          type: "boolean",
+          description: "Re-learn even if already processed.",
+          default: false,
+        },
+      },
+      required: ["pr_number"],
+    },
+  },
+  {
+    name: "investigate_issue",
+    description: "Investigate a GitHub issue: gather full context (title, body, comments, labels), triage to determine issue type (bug vs config vs feature vs question), and find similar historical fixes from the learning database. Returns recommendation on whether to attempt a fix. Requires DATABASE_URL and GITHUB_TOKEN.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        issue_number: {
+          type: "number",
+          description: "GitHub issue number to investigate.",
+        },
+        repo: {
+          type: "string",
+          description: "Repository in format 'owner/repo'. Defaults to GITHUB_REPO_URL from config.",
+        },
+        include_discord: {
+          type: "boolean",
+          description: "Include matched Discord threads in context.",
+          default: true,
+        },
+        max_similar_fixes: {
+          type: "number",
+          description: "Max number of similar historical fixes to return.",
+          default: 5,
+        },
+      },
+      required: ["issue_number"],
+    },
+  },
+  {
+    name: "open_pr_with_fix",
+    description: "Create a draft PR with a generated fix. Takes the fix code as input, creates a branch, commits changes, pushes, and opens a draft PR. Updates Linear with the result if configured. Requires LOCAL_REPO_PATH, DATABASE_URL, and GITHUB_TOKEN with repo scope.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        issue_number: {
+          type: "number",
+          description: "GitHub issue number this fix addresses.",
+        },
+        issue_title: {
+          type: "string",
+          description: "Title of the GitHub issue.",
+        },
+        repo: {
+          type: "string",
+          description: "Repository in format 'owner/repo'. Defaults to GITHUB_REPO_URL from config.",
+        },
+        triage_result: {
+          type: "string",
+          enum: ["bug", "config", "feature", "question", "unclear"],
+          description: "Triage result from investigate_issue.",
+        },
+        triage_confidence: {
+          type: "number",
+          description: "Triage confidence from investigate_issue (0.0 - 1.0).",
+        },
+        triage_reasoning: {
+          type: "string",
+          description: "Reasoning from triage.",
+        },
+        file_changes: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              path: { type: "string", description: "File path relative to repo root" },
+              content: { type: "string", description: "New file content (full file)" },
+              operation: { type: "string", enum: ["modify", "create", "delete"] },
+            },
+            required: ["path", "content", "operation"],
+          },
+          description: "Array of file changes to apply.",
+        },
+        commit_message: {
+          type: "string",
+          description: "Commit message following project conventions (e.g., 'fix(auth): resolve null pointer in session handler').",
+        },
+        pr_title: {
+          type: "string",
+          description: "PR title following project conventions.",
+        },
+        pr_body: {
+          type: "string",
+          description: "PR description/body.",
+        },
+        linear_issue_id: {
+          type: "string",
+          description: "Optional Linear issue ID to add a comment about the PR.",
+        },
+      },
+      required: ["issue_number", "issue_title", "triage_result", "triage_confidence", "file_changes", "commit_message", "pr_title", "pr_body"],
+    },
+  },
 ];
 
 // Handle list tools request
@@ -11056,6 +11198,254 @@ Example output:
       } catch (error) {
         logError("Failed to view feature ownership:", error);
         throw new Error(`Failed to view feature ownership: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    // ========================================================================
+    // PR Fix Tools - Learning and Fix Generation
+    // ========================================================================
+
+    case "seed_pr_learnings": {
+      const { since, limit, dry_run = false, batch_size = 50 } = args as {
+        since?: string;
+        limit?: number;
+        dry_run?: boolean;
+        batch_size?: number;
+      };
+
+      try {
+        const { seedPRLearnings } = await import("../learning/prLearning.js");
+        
+        console.error("[PRLearning] Starting seed_pr_learnings...");
+        const result = await seedPRLearnings({
+          since,
+          limit,
+          dryRun: dry_run,
+          batchSize: batch_size,
+        });
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                success: true,
+                message: dry_run ? "Dry run complete" : "Seeding complete",
+                total_issues_found: result.totalIssuesFound,
+                issues_with_prs: result.issuesWithPRs,
+                pr_learnings_created: result.prLearningsCreated,
+                pr_learnings_skipped: result.prLearningsSkipped,
+                errors_count: result.errors.length,
+                errors: result.errors.slice(0, 10), // Show first 10 errors
+                time_elapsed_seconds: Math.round(result.timeElapsed / 1000),
+              }, null, 2),
+            },
+          ],
+        };
+      } catch (error) {
+        logError("seed_pr_learnings failed:", error);
+        throw new Error(`seed_pr_learnings failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    case "learn_from_pr": {
+      const { pr_number, force = false } = args as {
+        pr_number: number;
+        force?: boolean;
+      };
+
+      if (!pr_number) {
+        throw new Error("pr_number is required");
+      }
+
+      try {
+        const { learnFromPR } = await import("../learning/prLearning.js");
+        
+        console.error(`[PRLearning] Learning from PR #${pr_number}...`);
+        const created = await learnFromPR(pr_number, force);
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                success: true,
+                pr_number,
+                learning_created: created,
+                message: created 
+                  ? `Successfully learned from PR #${pr_number}` 
+                  : `PR #${pr_number} was already processed or has no linked issues`,
+              }, null, 2),
+            },
+          ],
+        };
+      } catch (error) {
+        logError("learn_from_pr failed:", error);
+        throw new Error(`learn_from_pr failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    case "investigate_issue": {
+      const { issue_number, repo, include_discord = true, max_similar_fixes = 5 } = args as {
+        issue_number: number;
+        repo?: string;
+        include_discord?: boolean;
+        max_similar_fixes?: number;
+      };
+
+      if (!issue_number) {
+        throw new Error("issue_number is required");
+      }
+
+      try {
+        const { investigateIssue } = await import("../learning/investigateIssue.js");
+        
+        console.error(`[Investigate] Investigating issue #${issue_number}...`);
+        const result = await investigateIssue({
+          issueNumber: issue_number,
+          repo,
+          includeDiscord: include_discord,
+          maxSimilarFixes: max_similar_fixes,
+        });
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                success: true,
+                issue_number,
+                issue_title: result.issueContext.title,
+                issue_url: result.issueContext.url,
+                issue_state: result.issueContext.state,
+                triage: {
+                  result: result.triage.result,
+                  confidence: result.triage.confidence,
+                  reasoning: result.triage.reasoning,
+                },
+                similar_fixes_count: result.similarFixes.length,
+                similar_fixes: result.similarFixes.map(f => ({
+                  issue: `#${f.issueNumber}`,
+                  pr: `#${f.prNumber}`,
+                  pr_url: f.prUrl,
+                  similarity: f.similarity.toFixed(3),
+                  fix_patterns: f.fixPatterns,
+                  files_changed: f.prFilesChanged.slice(0, 5),
+                })),
+                recommendation: result.recommendation,
+                should_attempt_fix: result.shouldAttemptFix,
+                already_investigated: result.alreadyInvestigated,
+                // Include context for fix generation
+                context: {
+                  title: result.issueContext.title,
+                  body: result.issueContext.body?.substring(0, 2000),
+                  labels: result.issueContext.labels,
+                  author: result.issueContext.author,
+                  comments_count: result.issueContext.comments.length,
+                  latest_comments: result.issueContext.comments.slice(-3).map(c => ({
+                    author: c.author,
+                    body: c.body.substring(0, 500),
+                    is_org_member: c.isOrganizationMember,
+                  })),
+                  discord_threads: result.issueContext.discordThreads?.slice(0, 3),
+                },
+              }, null, 2),
+            },
+          ],
+        };
+      } catch (error) {
+        logError("investigate_issue failed:", error);
+        throw new Error(`investigate_issue failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    case "open_pr_with_fix": {
+      const {
+        issue_number,
+        issue_title,
+        repo,
+        triage_result,
+        triage_confidence,
+        triage_reasoning,
+        file_changes,
+        commit_message,
+        pr_title,
+        pr_body,
+        linear_issue_id,
+      } = args as {
+        issue_number: number;
+        issue_title: string;
+        repo?: string;
+        triage_result: string;
+        triage_confidence: number;
+        triage_reasoning?: string;
+        file_changes: Array<{ path: string; content: string; operation: string }>;
+        commit_message: string;
+        pr_title: string;
+        pr_body: string;
+        linear_issue_id?: string;
+      };
+
+      if (!issue_number || !issue_title || !triage_result || !file_changes || !commit_message || !pr_title || !pr_body) {
+        throw new Error("Missing required parameters");
+      }
+
+      try {
+        const { openPRWithFix } = await import("../learning/openPRWithFix.js");
+        
+        console.error(`[OpenPR] Creating PR for issue #${issue_number}...`);
+        const result = await openPRWithFix({
+          issueNumber: issue_number,
+          issueTitle: issue_title,
+          issueRepo: repo,
+          triageResult: triage_result,
+          triageConfidence: triage_confidence,
+          triageReasoning: triage_reasoning,
+          fileChanges: file_changes.map(f => ({
+            path: f.path,
+            content: f.content,
+            operation: f.operation as "modify" | "create" | "delete",
+          })),
+          commitMessage: commit_message,
+          prTitle: pr_title,
+          prBody: pr_body,
+          linearIssueId: linear_issue_id,
+        });
+
+        if (result.success) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  success: true,
+                  message: `Draft PR created successfully!`,
+                  pr_number: result.prNumber,
+                  pr_url: result.prUrl,
+                  branch_name: result.branchName,
+                  files_changed: result.filesChanged,
+                  linear_comment_id: result.linearCommentId,
+                }, null, 2),
+              },
+            ],
+          };
+        } else {
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  success: false,
+                  error: result.error,
+                  branch_name: result.branchName,
+                }, null, 2),
+              },
+            ],
+          };
+        }
+      } catch (error) {
+        logError("open_pr_with_fix failed:", error);
+        throw new Error(`open_pr_with_fix failed: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
 

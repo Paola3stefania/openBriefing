@@ -457,7 +457,7 @@ export async function mapGroupsToFeatures(
       if (allSearchText.includes(featureNameLower)) {
         ruleBasedMatch = true;
         if (labelSimilarity === 0) {
-          similarity = 0.9; // High confidence for exact name match
+        similarity = 0.9; // High confidence for exact name match
         }
         log(`[DEBUG] Group ${group.id}: Rule-based match - feature name "${feature.name}" found in group/issue text`);
       } else {
@@ -466,7 +466,7 @@ export async function mapGroupsToFeatures(
           if (keyword.length > 2 && allSearchText.includes(keyword)) {
             ruleBasedMatch = true;
             if (labelSimilarity === 0) {
-              similarity = 0.8; // High confidence for keyword match
+            similarity = 0.8; // High confidence for keyword match
             }
             log(`[DEBUG] Group ${group.id}: Rule-based match - keyword "${keyword}" found in group/issue text`);
             break;
