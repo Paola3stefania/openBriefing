@@ -1,11 +1,47 @@
 # Open PR With Fix Tool - Design Document
 
-> **Status:** Planning  
+> **Status:** Implemented  
 > **Last Updated:** January 2026
 
 ## Overview
 
-A two-tool MCP system that investigates GitHub issues, learns from past fixes, and opens draft PRs with AI-generated solutions. Uses Claude Opus 4.5 (thinking mode) via Cursor for intelligent fix generation.
+A multi-tool MCP system that investigates GitHub issues, learns from past fixes, and opens draft PRs with AI-generated solutions. Uses Claude Opus 4.5 (thinking mode) via Cursor for intelligent fix generation.
+
+## Quick Start
+
+### Workflow Tool (Recommended)
+
+The easiest way to use the system is with the **`fix_github_issue`** workflow tool:
+
+```
+# Step 1: Investigate (returns context for fix generation)
+fix_github_issue(issue_number: 1234)
+
+# AI generates fix based on returned context...
+
+# Step 2: Apply fix
+fix_github_issue(
+  issue_number: 1234,
+  fix: {
+    file_changes: [...],
+    commit_message: "fix(auth): resolve null pointer in session handler",
+    pr_title: "fix(auth): resolve null pointer in session handler",
+    pr_body: "Fixes #1234\n\nThis PR..."
+  }
+)
+```
+
+### Individual Tools
+
+Or use the individual tools for more control:
+
+| Tool | Purpose |
+|------|---------|
+| `seed_pr_learnings` | One-time: populate learning DB with historical fixes |
+| `learn_from_pr` | Learn from a specific merged PR |
+| `investigate_issue` | Gather context, triage, find similar fixes |
+| `open_pr_with_fix` | Create branch, commit, push, open draft PR |
+| `fix_github_issue` | Full workflow combining investigate + open PR |
 
 ## Goals
 
@@ -16,9 +52,36 @@ A two-tool MCP system that investigates GitHub issues, learns from past fixes, a
 5. **Open PRs** - Create properly formatted draft PRs following project conventions
 6. **Track progress** - Store results in DB to avoid re-processing and measure success
 
-## Architecture: Two Tools
+## Architecture: Workflow Tool + Individual Tools
 
-The system is split into two MCP tools that work together:
+The system provides both a high-level workflow tool and individual tools for flexibility:
+
+### Option 1: Workflow Tool (fix_github_issue)
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  fix_github_issue (workflow tool)                                            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  Mode 1: Investigation Only (no fix parameter)                               │
+│  ─────────────────────────────────────────────                               │
+│  → Gathers issue context, triages, finds similar fixes                       │
+│  → Returns structured context for AI to generate fix                         │
+│  → Includes project rules and fix guidance                                   │
+│                                                                              │
+│  Mode 2: Full Fix (with fix parameter)                                       │
+│  ────────────────────────────────────                                        │
+│  → Validates fix, creates branch, commits, pushes                            │
+│  → Opens draft PR via GitHub API                                             │
+│  → Updates Linear if configured                                              │
+│  → Tracks attempt in database                                                │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Option 2: Individual Tools
+
+The system is also split into individual MCP tools that work together:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐

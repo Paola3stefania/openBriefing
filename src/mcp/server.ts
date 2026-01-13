@@ -1241,6 +1241,61 @@ const tools: Tool[] = [
       required: ["issue_number", "issue_title", "triage_result", "triage_confidence", "file_changes", "commit_message", "pr_title", "pr_body"],
     },
   },
+  {
+    name: "fix_github_issue",
+    description: "Full workflow tool to investigate and fix a GitHub issue. Can be called in two modes: (1) Investigation only - returns issue context, triage, similar fixes, and project rules for the AI to generate a fix; (2) Full fix - takes the generated fix and opens a draft PR. Orchestrates investigate_issue + open_pr_with_fix into a single call.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        issue_number: {
+          type: "number",
+          description: "GitHub issue number to investigate/fix.",
+        },
+        repo: {
+          type: "string",
+          description: "Repository in format 'owner/repo'. Defaults to GITHUB_REPO_URL from config.",
+        },
+        linear_issue_id: {
+          type: "string",
+          description: "Optional Linear issue ID to update with results.",
+        },
+        fix: {
+          type: "object",
+          description: "Optional fix to apply. If not provided, returns investigation results only.",
+          properties: {
+            file_changes: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  path: { type: "string", description: "File path relative to repo root" },
+                  content: { type: "string", description: "New file content (full file)" },
+                  operation: { type: "string", enum: ["modify", "create", "delete"] },
+                },
+                required: ["path", "content", "operation"],
+              },
+              description: "Array of file changes to apply.",
+            },
+            commit_message: { type: "string", description: "Commit message following project conventions." },
+            pr_title: { type: "string", description: "PR title following project conventions." },
+            pr_body: { type: "string", description: "PR description/body." },
+          },
+          required: ["file_changes", "commit_message", "pr_title", "pr_body"],
+        },
+        skip_investigation: {
+          type: "boolean",
+          description: "Skip investigation phase (use when you've already investigated).",
+          default: false,
+        },
+        force_attempt: {
+          type: "boolean",
+          description: "Attempt fix even if not recommended by triage.",
+          default: false,
+        },
+      },
+      required: ["issue_number"],
+    },
+  },
 ];
 
 // Handle list tools request
@@ -11446,6 +11501,185 @@ Example output:
       } catch (error) {
         logError("open_pr_with_fix failed:", error);
         throw new Error(`open_pr_with_fix failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    case "fix_github_issue": {
+      const {
+        issue_number,
+        repo,
+        linear_issue_id,
+        fix,
+        skip_investigation = false,
+        force_attempt = false,
+      } = args as {
+        issue_number: number;
+        repo?: string;
+        linear_issue_id?: string;
+        fix?: {
+          file_changes: Array<{ path: string; content: string; operation: string }>;
+          commit_message: string;
+          pr_title: string;
+          pr_body: string;
+        };
+        skip_investigation?: boolean;
+        force_attempt?: boolean;
+      };
+
+      if (!issue_number) {
+        throw new Error("issue_number is required");
+      }
+
+      try {
+        const { fixIssueWorkflow } = await import("../learning/fixIssueWorkflow.js");
+        
+        console.error(`[Workflow] Starting fix workflow for issue #${issue_number}...`);
+        
+        const result = await fixIssueWorkflow({
+          issueNumber: issue_number,
+          repo,
+          linearIssueId: linear_issue_id,
+          fix: fix ? {
+            fileChanges: fix.file_changes.map(f => ({
+              path: f.path,
+              content: f.content,
+              operation: f.operation as "modify" | "create" | "delete",
+            })),
+            commitMessage: fix.commit_message,
+            prTitle: fix.pr_title,
+            prBody: fix.pr_body,
+          } : undefined,
+          skipInvestigation: skip_investigation,
+          forceAttempt: force_attempt,
+        });
+
+        // Format response based on phase
+        if (result.phase === "investigation") {
+          // Return investigation results for AI to generate fix
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  phase: "investigation",
+                  success: true,
+                  message: "Investigation complete. Use this context to generate a fix, then call again with the fix parameter.",
+                  
+                  // Issue context
+                  issue: {
+                    number: result.investigation?.issueContext.number,
+                    title: result.investigation?.issueContext.title,
+                    body: result.investigation?.issueContext.body?.substring(0, 3000),
+                    labels: result.investigation?.issueContext.labels,
+                    state: result.investigation?.issueContext.state,
+                    author: result.investigation?.issueContext.author,
+                    url: result.investigation?.issueContext.url,
+                    comments_count: result.investigation?.issueContext.comments.length,
+                    latest_comments: result.investigation?.issueContext.comments.slice(-3).map(c => ({
+                      author: c.author,
+                      body: c.body.substring(0, 500),
+                      is_org_member: c.isOrganizationMember,
+                    })),
+                  },
+                  
+                  // Triage
+                  triage: {
+                    result: result.investigation?.triage.result,
+                    confidence: result.investigation?.triage.confidence,
+                    reasoning: result.investigation?.triage.reasoning,
+                  },
+                  
+                  // Similar fixes for reference
+                  similar_fixes: result.investigation?.similarFixes.slice(0, 3).map(f => ({
+                    issue_number: f.issueNumber,
+                    issue_title: f.issueTitle,
+                    pr_number: f.prNumber,
+                    pr_title: f.prTitle,
+                    pr_url: f.prUrl,
+                    files_changed: f.prFilesChanged,
+                    fix_patterns: f.fixPatterns,
+                    diff_preview: f.prDiff.substring(0, 1500),
+                  })),
+                  
+                  // Project rules
+                  project_rules: result.projectRules ? {
+                    base_branch: result.projectRules.baseBranch,
+                    branch_naming: result.projectRules.branchNaming,
+                    commit_format: result.projectRules.commitFormat,
+                    pr_title_format: result.projectRules.prTitleFormat,
+                    types: result.projectRules.types,
+                    code_style: result.projectRules.codeStyle,
+                  } : null,
+                  
+                  // Fix guidance
+                  fix_guidance: result.fixGuidance,
+                  
+                  // Recommendation
+                  recommendation: result.investigation?.recommendation,
+                  should_attempt_fix: result.investigation?.shouldAttemptFix,
+                }, null, 2),
+              },
+            ],
+          };
+        } else if (result.phase === "fix_created") {
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  phase: "fix_created",
+                  success: true,
+                  message: "Draft PR created successfully!",
+                  pr: {
+                    number: result.pr?.number,
+                    url: result.pr?.url,
+                    branch_name: result.pr?.branchName,
+                    files_changed: result.pr?.filesChanged,
+                  },
+                  triage: result.investigation ? {
+                    result: result.investigation.triage.result,
+                    confidence: result.investigation.triage.confidence,
+                  } : null,
+                }, null, 2),
+              },
+            ],
+          };
+        } else if (result.phase === "no_fix") {
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  phase: "no_fix",
+                  success: true,
+                  message: "Fix not attempted based on triage results.",
+                  reason: result.noFixReason,
+                  triage: result.investigation ? {
+                    result: result.investigation.triage.result,
+                    confidence: result.investigation.triage.confidence,
+                    reasoning: result.investigation.triage.reasoning,
+                  } : null,
+                }, null, 2),
+              },
+            ],
+          };
+        } else {
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  phase: "error",
+                  success: false,
+                  error: result.error,
+                }, null, 2),
+              },
+            ],
+          };
+        }
+      } catch (error) {
+        logError("fix_github_issue failed:", error);
+        throw new Error(`fix_github_issue failed: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
 

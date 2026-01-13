@@ -34,6 +34,13 @@
 - **Sets "Done"** when PR is merged or issue is closed
 - **Adds PR links** to Linear descriptions
 
+### Generates Fixes (NEW)
+- **Investigates issues** - Gathers full context, triages bug vs config vs feature
+- **Learns from history** - Finds similar closed issues and their merged PRs
+- **Generates fixes** - AI creates fix based on context and similar fixes
+- **Opens draft PRs** - Creates properly formatted PRs following project conventions
+- **Updates Linear** - Adds PR link and status updates automatically
+
 ### Exports to Linear
 - Creates issues with rich descriptions (GitHub link, Discord threads, PRs)
 - Organizes into **projects** matching your features
@@ -56,7 +63,7 @@ sync_classify_and_export
    - `OPENAI_API_KEY` (optional, for semantic classification)
    - `DATABASE_URL` (optional, for PostgreSQL storage)
    - `PM_TOOL_*` (optional, for Linear/Jira export)
-   - `LOCAL_REPO_PATH` (optional, for code ownership analysis via git blame)
+   - `LOCAL_REPO_PATH` (optional, for code ownership and PR fix tools)
 3. Database (optional): `createdb unmute_mcp && npx prisma migrate deploy`
 
 See `cursor-mcp-config.json.example` for MCP configuration.
@@ -149,9 +156,32 @@ This single tool runs the complete workflow:
 - `check_github_issues_completeness` - Verify all issues fetched
 - `check_discord_classification_completeness` - Verify all messages classified
 
+### PR Fix Tools (AI-Powered)
+- `fix_github_issue` - **Full workflow**: Investigate issue → AI generates fix → Open draft PR
+- `seed_pr_learnings` - One-time: Populate learning DB with historical closed issues + merged PRs
+- `learn_from_pr` - Learn from a specific merged PR
+- `investigate_issue` - Gather issue context, triage, find similar historical fixes
+- `open_pr_with_fix` - Create branch, commit changes, push, open draft PR
+
+**Workflow:**
+```
+# One-time setup: Seed the learning database
+seed_pr_learnings()
+
+# For each issue you want to fix:
+# Step 1: Investigate (returns context for AI to generate fix)
+fix_github_issue(issue_number: 1234)
+
+# Step 2: AI generates fix based on context, then apply it
+fix_github_issue(issue_number: 1234, fix: { file_changes: [...], ... })
+```
+
+See [PR Fix Tool Documentation](docs/OPEN_PR_WITH_FIX_TOOL.md) for details.
+
 ## Documentation
 
 - [Environment Variables](docs/ENVIRONMENT_VARIABLES.md)
 - [Database Setup](docs/DATABASE_SETUP.md)
 - [GitHub Integration](docs/GITHUB_INTEGRATION.md)
 - [Linear Setup](docs/LINEAR_TEAM_SETUP.md)
+- [PR Fix Tool](docs/OPEN_PR_WITH_FIX_TOOL.md) - AI-powered fix generation
