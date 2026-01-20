@@ -411,14 +411,29 @@ async function batchFetchIssueDetails(
         if (tokenOrManager && tokenOrManager instanceof GitHubTokenManager) {
           const errorMsg = error instanceof Error ? error.message : String(error);
           if (errorMsg.includes('403') || errorMsg.includes('429')) {
+            // Log current token status before rotation
+            const currentTokenType = tokenOrManager.getTokenType(currentToken || '');
+            const status = tokenOrManager.getStatus();
+            console.error(`[GitHub] Rate limit hit on ${currentTokenType} token for issue #${issueNumber}`);
+            console.error(`[GitHub] Token status: ${status.map(t => `Token ${t.index}: ${t.remaining}/${t.limit} (resets in ${t.resetIn} min)`).join(', ')}`);
+            
             // Try next token
             const nextToken = await tokenOrManager.getNextAvailableToken();
             if (nextToken) {
+              const nextTokenType = tokenOrManager.getTokenType(nextToken);
+              console.error(`[GitHub] Rotating from ${currentTokenType} to ${nextTokenType} token...`);
               try {
                 return await fetchIssueDetails(issueNumber, nextToken, owner, repo, includeComments);
               } catch (retryError) {
                 log(`Warning: Failed to fetch details for issue #${issueNumber} even after token rotation: ${retryError}`);
               }
+            } else {
+              // All tokens exhausted
+              const resetTimes = tokenOrManager.getResetTimesByType();
+              const allResets = [...resetTimes.appTokens, ...resetTimes.regularTokens];
+              const nextReset = allResets.length > 0 ? Math.min(...allResets.map(t => t.resetIn)) : 0;
+              console.error(`[GitHub] All tokens exhausted! Next reset in ~${nextReset} minutes`);
+              console.error(`[GitHub] Note: Tokens from the same GitHub account share rate limits (5000/hour)`);
             }
           }
         }

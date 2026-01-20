@@ -694,7 +694,6 @@ model ExportResult {
   @@map("export_results")
 }
 
-
 // ============================================================================
 // PR Fix Tools - Learning and Fix Tracking
 // ============================================================================
@@ -710,7 +709,7 @@ model FixAttempt {
   
   // Triage results
   triageResult      String   @map("triage_result")     // 'bug' | 'config' | 'feature' | 'question' | 'unclear'
-  triageConfidence  Decimal  @db.Decimal(3, 2)         // 0.00 - 1.00
+  triageConfidence  Decimal  @map("triage_confidence") @db.Decimal(3, 2) // 0.00 - 1.00
   triageReasoning   String?  @map("triage_reasoning")  @db.Text
   
   // Fix attempt

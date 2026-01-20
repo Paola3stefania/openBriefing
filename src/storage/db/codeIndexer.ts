@@ -38,8 +38,10 @@ interface CodeFile {
 
 /**
  * Get code context for a feature using lazy indexing
- * - Checks if code is already indexed for this feature
- * - If not, searches and indexes code
+ * OPTIMIZED: Reuses any existing code indexed for the repository
+ * - First checks if we have existing code mappings for this feature
+ * - If not, checks if code is indexed for the repository (any search) and reuses it
+ * - Only if no code is indexed at all, searches and indexes code
  * - Returns code context to use in embeddings
  */
 export async function getCodeContextForFeature(
@@ -78,7 +80,6 @@ export async function getCodeContextForFeature(
       
       // Check if any files have changed
       const codeContexts: string[] = [];
-      const filesToReindex: string[] = [];
 
       for (const mapping of existingMappings) {
         const codeFile = mapping.codeSection.codeFile;
@@ -102,25 +103,56 @@ export async function getCodeContextForFeature(
       }
     }
 
-    // No existing mappings - need to search and index
-    if (!repositoryUrl) {
-      const { getConfig } = await import("../../config/index.js");
-      const config = getConfig();
-      repositoryUrl = config.pmIntegration?.github_repo_url;
-    }
+    // No existing mappings - get repository identifier
+    const { getConfig } = await import("../../config/index.js");
+    const config = getConfig();
+    const localRepoPath = config.pmIntegration?.local_repo_path;
+    const githubRepoUrl = repositoryUrl || config.pmIntegration?.github_repo_url;
+    const repoIdentifier = localRepoPath || githubRepoUrl;
 
-    if (!repositoryUrl) {
-      log(`[CodeIndexer] No repository URL configured, cannot index code for feature "${featureName}"`);
+    if (!repoIdentifier) {
+      log(`[CodeIndexer] No repository configured, cannot index code for feature "${featureName}"`);
       return "";
     }
 
-    log(`[CodeIndexer] No code indexed for feature "${featureName}", searching and indexing...`);
+    // OPTIMIZATION: Check if code is already indexed for this repository (ANY search)
+    // This avoids re-scanning the codebase for each feature
+    const existingSearches = await prisma.codeSearch.findMany({
+      where: {
+        repositoryUrl: repoIdentifier,
+      },
+      include: {
+        codeFiles: {
+          include: {
+            codeSections: true,
+          },
+        },
+      },
+      orderBy: {
+        updatedAt: "desc",
+      },
+      take: 1, // Get the most recent one
+    });
+
+    if (existingSearches.length > 0 && existingSearches[0].codeFiles.length > 0) {
+      const existingSearch = existingSearches[0];
+      log(`[CodeIndexer] OPTIMIZATION: Reusing existing code indexed for repository (${existingSearch.codeFiles.length} files from search "${existingSearch.searchQuery?.substring(0, 50)}...")`);
+      
+      // Just create mappings from existing code to this feature - no re-indexing needed!
+      await mapCodeToFeature(existingSearch.codeFiles, featureId, featureName);
+      
+      // Build and return code context from existing code
+      return buildCodeContext(existingSearch.codeFiles);
+    }
+
+    // No existing code indexed for repository - need to search and index (first time only)
+    log(`[CodeIndexer] No code indexed for repository yet. Indexing codebase once for all features...`);
     
-    // Search for code related to this feature
+    // Use a broad search query for first-time indexing
     const searchQuery = buildSearchQuery(featureName, featureKeywords);
     const codeContext = await searchAndIndexCode(
       searchQuery,
-      repositoryUrl,
+      repoIdentifier,
       featureId,
       featureName
     );
