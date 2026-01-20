@@ -1179,7 +1179,7 @@ const tools: Tool[] = [
   },
   {
     name: "open_pr_with_fix",
-    description: "Create a draft PR with a generated fix. Takes the fix code as input, creates a branch, commits changes, pushes, and opens a draft PR. Updates Linear with the result if configured. Requires LOCAL_REPO_PATH, DATABASE_URL, and GITHUB_TOKEN with repo scope.",
+    description: "Create a draft PR with a generated fix. Takes the fix code as input, creates a branch, commits changes, pushes, and opens a draft PR. Updates Linear with the result if configured. Requires LOCAL_REPO_PATH, DATABASE_URL, and GITHUB_TOKEN with repo scope. REQUIREMENTS: (1) Commit must be one-liner (max 100 chars), (2) Must include unit tests (.test.ts or .spec.ts file), (3) PRs are always opened as draft.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1219,11 +1219,11 @@ const tools: Tool[] = [
             },
             required: ["path", "content", "operation"],
           },
-          description: "Array of file changes to apply.",
+          description: "Array of file changes to apply. MUST include at least one test file (.test.ts or .spec.ts).",
         },
         commit_message: {
           type: "string",
-          description: "Commit message following project conventions (e.g., 'fix(auth): resolve null pointer in session handler').",
+          description: "Commit message - MUST be one-liner, max 100 chars (e.g., 'fix(auth): resolve null pointer in session handler'). Put details in pr_body instead.",
         },
         pr_title: {
           type: "string",
@@ -1231,11 +1231,15 @@ const tools: Tool[] = [
         },
         pr_body: {
           type: "string",
-          description: "PR description/body.",
+          description: "PR description/body. Include all details here since commit must be one-liner.",
         },
         linear_issue_id: {
           type: "string",
           description: "Optional Linear issue ID to add a comment about the PR.",
+        },
+        assignee: {
+          type: "string",
+          description: "GitHub username to assign the issue to after PR is created.",
         },
       },
       required: ["issue_number", "issue_title", "triage_result", "triage_confidence", "file_changes", "commit_message", "pr_title", "pr_body"],
@@ -11427,6 +11431,7 @@ Example output:
         pr_title,
         pr_body,
         linear_issue_id,
+        assignee,
       } = args as {
         issue_number: number;
         issue_title: string;
@@ -11439,6 +11444,7 @@ Example output:
         pr_title: string;
         pr_body: string;
         linear_issue_id?: string;
+        assignee?: string;
       };
 
       if (!issue_number || !issue_title || !triage_result || !file_changes || !commit_message || !pr_title || !pr_body) {
@@ -11465,6 +11471,7 @@ Example output:
           prTitle: pr_title,
           prBody: pr_body,
           linearIssueId: linear_issue_id,
+          assignee: assignee,
         });
 
         if (result.success) {

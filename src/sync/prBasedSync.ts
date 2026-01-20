@@ -634,20 +634,23 @@ async function fetchPRsForIssue(
     // Handle rate limit errors - Search API has separate 30 req/min limit!
     if (response.status === 403 || response.status === 429) {
       const retryAfter = response.headers.get('Retry-After');
-      const rateLimitRemaining = response.headers.get('X-RateLimit-Remaining');
       const rateLimitLimit = response.headers.get('X-RateLimit-Limit');
       
       // Search API has 30/min limit (separate from 5000/hour core API)
       const isSearchLimit = rateLimitLimit === '30';
+      const limitType = isSearchLimit ? 'Search API (30/min)' : 'Core API (5000/hour)';
       
-      if (isSearchLimit) {
-        log(`[PR Sync] Search API rate limit hit (30/min) for issue #${issueNumber}`);
-        // Wait for search API reset (usually ~60 seconds)
-        const waitTime = retryAfter ? parseInt(retryAfter) * 1000 : 60000;
-        log(`[PR Sync] Waiting ${Math.ceil(waitTime / 1000)}s for Search API reset...`);
-        await new Promise(resolve => setTimeout(resolve, waitTime));
+      const status = tokenManager.getStatus();
+      log(`[PR Sync] ${limitType} rate limit hit for issue #${issueNumber}`);
+      log(`[PR Sync] Token status: ${status.map(t => `Token ${t.index}: ${t.remaining}/${t.limit}`).join(', ')}`);
+      
+      // ALWAYS try to rotate first - maybe other token has quota
+      const nextToken = await tokenManager.getNextAvailableToken();
+      if (nextToken && nextToken !== token) {
+        log(`[PR Sync] Rotating to next available token...`);
+        token = nextToken;
         
-        // Retry after waiting
+        // Retry with new token
         response = await fetch(url, {
           headers: {
             Accept: "application/vnd.github.v3+json",
@@ -655,18 +658,13 @@ async function fetchPRsForIssue(
           },
         });
         tokenManager.updateRateLimitFromResponse(response, token);
-      } else {
-        // Core API rate limit - try token rotation
-        const status = tokenManager.getStatus();
-        log(`[PR Sync] Core API rate limit hit for issue #${issueNumber}. Token status: ${status.map(t => `Token ${t.index}: ${t.remaining}/${t.limit}`).join(', ')}`);
         
-        // Try to get next available token
-        const nextToken = await tokenManager.getNextAvailableToken();
-        if (nextToken && nextToken !== token) {
-          log(`[PR Sync] Rotating to next available token...`);
-          token = nextToken;
+        // If still rate limited after rotation, wait
+        if (response.status === 403 || response.status === 429) {
+          const waitTime = retryAfter ? parseInt(retryAfter) * 1000 : (isSearchLimit ? 60000 : 300000);
+          log(`[PR Sync] Still rate limited after rotation. Waiting ${Math.ceil(waitTime / 1000)}s...`);
+          await new Promise(resolve => setTimeout(resolve, waitTime));
           
-          // Retry with new token
           response = await fetch(url, {
             headers: {
               Accept: "application/vnd.github.v3+json",
@@ -674,13 +672,20 @@ async function fetchPRsForIssue(
             },
           });
           tokenManager.updateRateLimitFromResponse(response, token);
-        } else {
-          // All tokens exhausted
-          const resetTimes = tokenManager.getResetTimesByType();
-          const allResets = [...resetTimes.appTokens, ...resetTimes.regularTokens];
-          const nextReset = allResets.length > 0 ? Math.min(...allResets.map(t => t.resetIn)) : 0;
-          logError(`[PR Sync] All tokens exhausted! Next reset in ~${nextReset} minutes`);
         }
+      } else {
+        // No other token available - wait for reset
+        const waitTime = retryAfter ? parseInt(retryAfter) * 1000 : (isSearchLimit ? 60000 : 300000);
+        log(`[PR Sync] No other tokens available. Waiting ${Math.ceil(waitTime / 1000)}s for ${limitType} reset...`);
+        await new Promise(resolve => setTimeout(resolve, waitTime));
+        
+        response = await fetch(url, {
+          headers: {
+            Accept: "application/vnd.github.v3+json",
+            Authorization: `Bearer ${token}`,
+          },
+        });
+        tokenManager.updateRateLimitFromResponse(response, token);
       }
     }
     

@@ -395,17 +395,74 @@ async function fetchIssueContext(
   
   // Search for linked PRs
   await wait(100);
-  const prSearchResponse = await fetch(
+  let currentToken = token;
+  let prSearchResponse = await fetch(
     `https://api.github.com/search/issues?q=repo:${owner}/${repo}+type:pr+${issueNumber}&per_page=10`,
     {
       headers: {
         Accept: "application/vnd.github.v3+json",
-        Authorization: `Bearer ${token}`,
+        Authorization: `Bearer ${currentToken}`,
       },
     }
   );
   
-  tokenManager.updateRateLimitFromResponse(prSearchResponse, token);
+  tokenManager.updateRateLimitFromResponse(prSearchResponse, currentToken);
+  
+  // Handle rate limits - Search API has 30/min limit
+  if (prSearchResponse.status === 403 || prSearchResponse.status === 429) {
+    const rateLimitLimit = prSearchResponse.headers.get('X-RateLimit-Limit');
+    const isSearchLimit = rateLimitLimit === '30';
+    
+    // Try rotating to another token
+    const nextToken = await tokenManager.getNextAvailableToken();
+    if (nextToken && nextToken !== currentToken) {
+      currentToken = nextToken;
+      prSearchResponse = await fetch(
+        `https://api.github.com/search/issues?q=repo:${owner}/${repo}+type:pr+${issueNumber}&per_page=10`,
+        {
+          headers: {
+            Accept: "application/vnd.github.v3+json",
+            Authorization: `Bearer ${currentToken}`,
+          },
+        }
+      );
+      tokenManager.updateRateLimitFromResponse(prSearchResponse, currentToken);
+      
+      // If still rate limited, wait
+      if (prSearchResponse.status === 403 || prSearchResponse.status === 429) {
+        const retryAfter = prSearchResponse.headers.get('Retry-After');
+        const waitTime = retryAfter ? parseInt(retryAfter) * 1000 : (isSearchLimit ? 60000 : 300000);
+        await new Promise(resolve => setTimeout(resolve, waitTime));
+        
+        prSearchResponse = await fetch(
+          `https://api.github.com/search/issues?q=repo:${owner}/${repo}+type:pr+${issueNumber}&per_page=10`,
+          {
+            headers: {
+              Accept: "application/vnd.github.v3+json",
+              Authorization: `Bearer ${currentToken}`,
+            },
+          }
+        );
+        tokenManager.updateRateLimitFromResponse(prSearchResponse, currentToken);
+      }
+    } else {
+      // No other token - wait
+      const retryAfter = prSearchResponse.headers.get('Retry-After');
+      const waitTime = retryAfter ? parseInt(retryAfter) * 1000 : (isSearchLimit ? 60000 : 300000);
+      await new Promise(resolve => setTimeout(resolve, waitTime));
+      
+      prSearchResponse = await fetch(
+        `https://api.github.com/search/issues?q=repo:${owner}/${repo}+type:pr+${issueNumber}&per_page=10`,
+        {
+          headers: {
+            Accept: "application/vnd.github.v3+json",
+            Authorization: `Bearer ${currentToken}`,
+          },
+        }
+      );
+      tokenManager.updateRateLimitFromResponse(prSearchResponse, currentToken);
+    }
+  }
   
   const linkedPRs: LinkedPR[] = [];
   if (prSearchResponse.ok) {

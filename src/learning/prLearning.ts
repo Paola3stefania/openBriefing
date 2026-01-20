@@ -416,13 +416,13 @@ async function findPRsBySearch(
   const prNumbers: number[] = [];
   
   try {
-    const token = await tokenManager.getCurrentToken();
+    let token = await tokenManager.getCurrentToken();
     
     // Search for PRs that mention this issue
     const searchQuery = `repo:${owner}/${repo} type:pr is:merged ${issueNumber}`;
     const url = `https://api.github.com/search/issues?q=${encodeURIComponent(searchQuery)}&per_page=20`;
     
-    const response = await fetch(url, {
+    let response = await fetch(url, {
       headers: {
         Accept: "application/vnd.github.v3+json",
         Authorization: `Bearer ${token}`,
@@ -430,6 +430,60 @@ async function findPRsBySearch(
     });
     
     tokenManager.updateRateLimitFromResponse(response, token);
+    
+    // Handle rate limits - Search API has 30/min limit
+    if (response.status === 403 || response.status === 429) {
+      const rateLimitLimit = response.headers.get('X-RateLimit-Limit');
+      const isSearchLimit = rateLimitLimit === '30';
+      const limitType = isSearchLimit ? 'Search API (30/min)' : 'Core API';
+      
+      log(`[PRLearning] ${limitType} rate limit hit for issue #${issueNumber}`);
+      
+      // Try rotating to another token first
+      const nextToken = await tokenManager.getNextAvailableToken();
+      if (nextToken && nextToken !== token) {
+        log(`[PRLearning] Rotating to next available token...`);
+        token = nextToken;
+        
+        response = await fetch(url, {
+          headers: {
+            Accept: "application/vnd.github.v3+json",
+            Authorization: `Bearer ${token}`,
+          },
+        });
+        tokenManager.updateRateLimitFromResponse(response, token);
+        
+        // If still rate limited, wait
+        if (response.status === 403 || response.status === 429) {
+          const retryAfter = response.headers.get('Retry-After');
+          const waitTime = retryAfter ? parseInt(retryAfter) * 1000 : (isSearchLimit ? 60000 : 300000);
+          log(`[PRLearning] Still rate limited. Waiting ${Math.ceil(waitTime / 1000)}s...`);
+          await new Promise(resolve => setTimeout(resolve, waitTime));
+          
+          response = await fetch(url, {
+            headers: {
+              Accept: "application/vnd.github.v3+json",
+              Authorization: `Bearer ${token}`,
+            },
+          });
+          tokenManager.updateRateLimitFromResponse(response, token);
+        }
+      } else {
+        // No other token - wait
+        const retryAfter = response.headers.get('Retry-After');
+        const waitTime = retryAfter ? parseInt(retryAfter) * 1000 : (isSearchLimit ? 60000 : 300000);
+        log(`[PRLearning] No other tokens. Waiting ${Math.ceil(waitTime / 1000)}s...`);
+        await new Promise(resolve => setTimeout(resolve, waitTime));
+        
+        response = await fetch(url, {
+          headers: {
+            Accept: "application/vnd.github.v3+json",
+            Authorization: `Bearer ${token}`,
+          },
+        });
+        tokenManager.updateRateLimitFromResponse(response, token);
+      }
+    }
     
     if (!response.ok) {
       return prNumbers;

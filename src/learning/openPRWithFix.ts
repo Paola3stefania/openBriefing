@@ -38,10 +38,11 @@ export interface OpenPROptions {
   triageConfidence: number;
   triageReasoning?: string;
   fileChanges: FileChange[];
-  commitMessage: string;   // Should follow project conventions
+  commitMessage: string;   // Must be one-liner (max 100 chars)
   prTitle: string;         // Should follow project conventions
-  prBody: string;          // PR description
+  prBody: string;          // PR description (include details here, not in commit)
   linearIssueId?: string;  // Optional Linear issue to update
+  assignee?: string;       // GitHub username to assign the issue to
 }
 
 export interface OpenPRResult {
@@ -79,6 +80,10 @@ const DEFAULT_RULES: ProjectRules = {
 
 const MAX_FILES_CHANGED = 15;
 const MAX_LINES_CHANGED = 1000;
+
+// PR Requirements
+const REQUIRE_UNIT_TESTS = true;
+const ONE_LINER_COMMITS = true;
 
 // ============================================================================
 // Project Rules Discovery
@@ -312,6 +317,45 @@ async function createBranchAndCommit(
 // ============================================================================
 
 /**
+ * Assign issue to a user via GitHub API
+ */
+async function assignIssue(
+  tokenManager: GitHubTokenManager,
+  owner: string,
+  repo: string,
+  issueNumber: number,
+  assignee: string
+): Promise<boolean> {
+  const token = await tokenManager.getCurrentToken();
+  
+  const response = await fetch(
+    `https://api.github.com/repos/${owner}/${repo}/issues/${issueNumber}/assignees`,
+    {
+      method: "POST",
+      headers: {
+        Accept: "application/vnd.github.v3+json",
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        assignees: [assignee],
+      }),
+    }
+  );
+  
+  tokenManager.updateRateLimitFromResponse(response, token);
+  
+  if (!response.ok) {
+    const errorBody = await response.text();
+    logError(`[GitHub] Failed to assign issue: ${response.status} ${errorBody}`);
+    return false;
+  }
+  
+  log(`[GitHub] Assigned issue #${issueNumber} to ${assignee}`);
+  return true;
+}
+
+/**
  * Create a draft PR via GitHub API
  */
 async function createDraftPR(
@@ -477,9 +521,69 @@ Manual investigation may be required.`;
 // ============================================================================
 
 /**
+ * Validate commit message is one-liner
+ */
+function validateCommitMessage(message: string): { valid: boolean; error?: string } {
+  if (!ONE_LINER_COMMITS) {
+    return { valid: true };
+  }
+  
+  const lines = message.split("\n").filter(l => l.trim());
+  if (lines.length > 1) {
+    return {
+      valid: false,
+      error: `Commit message must be a one-liner. Got ${lines.length} lines. Use PR body for details.`,
+    };
+  }
+  
+  if (message.length > 100) {
+    return {
+      valid: false,
+      error: `Commit message too long: ${message.length} chars (max: 100)`,
+    };
+  }
+  
+  return { valid: true };
+}
+
+/**
+ * Validate that unit tests are included in the fix
+ */
+function validateUnitTests(fileChanges: FileChange[]): { valid: boolean; error?: string } {
+  if (!REQUIRE_UNIT_TESTS) {
+    return { valid: true };
+  }
+  
+  const hasTestFile = fileChanges.some(
+    change => change.path.includes(".test.") || change.path.includes(".spec.")
+  );
+  
+  if (!hasTestFile) {
+    return {
+      valid: false,
+      error: "PR must include unit tests. Add a .test.ts or .spec.ts file with coverage for the fix.",
+    };
+  }
+  
+  return { valid: true };
+}
+
+/**
  * Validate the fix doesn't exceed limits
  */
-function validateFix(fileChanges: FileChange[]): { valid: boolean; error?: string } {
+function validateFix(fileChanges: FileChange[], commitMessage: string): { valid: boolean; error?: string } {
+  // Check commit message format
+  const commitValidation = validateCommitMessage(commitMessage);
+  if (!commitValidation.valid) {
+    return commitValidation;
+  }
+  
+  // Check unit tests
+  const testValidation = validateUnitTests(fileChanges);
+  if (!testValidation.valid) {
+    return testValidation;
+  }
+  
   // Check file count
   if (fileChanges.length > MAX_FILES_CHANGED) {
     return {
@@ -536,6 +640,7 @@ export async function openPRWithFix(options: OpenPROptions): Promise<OpenPRResul
     prTitle,
     prBody,
     linearIssueId,
+    assignee,
   } = options;
   
   const config = getConfig();
@@ -579,7 +684,7 @@ export async function openPRWithFix(options: OpenPROptions): Promise<OpenPRResul
     }
     
     // Validate fix
-    const validation = validateFix(fileChanges);
+    const validation = validateFix(fileChanges, commitMessage);
     if (!validation.valid) {
       // Record failed attempt
       await prisma.fixAttempt.upsert({
@@ -722,6 +827,12 @@ export async function openPRWithFix(options: OpenPROptions): Promise<OpenPRResul
     }
     
     log(`[OpenPR] Created PR #${prResult.prNumber}: ${prResult.prUrl}`);
+    
+    // Assign the issue if assignee is specified
+    if (assignee) {
+      log(`[OpenPR] Assigning issue #${issueNumber} to ${assignee}...`);
+      await assignIssue(tokenManager, owner, repoName, issueNumber, assignee);
+    }
     
     // Update Linear if configured
     let linearCommentId: string | undefined;
