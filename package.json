@@ -1,7 +1,7 @@
 {
   "name": "openrundown",
   "version": "1.0.0",
-  "description": "Project context and session memory for AI agents. Distills Discord, GitHub, and session signals into compact briefings.",
+  "description": "Make your agents always up to date out of the box and save up to 80% of token usage. Connects to GitHub, Discord, Slack, and Linear with more integrations coming.",
   "type": "module",
   "main": "dist/index.js",
   "bin": {

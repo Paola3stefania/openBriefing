@@ -4,7 +4,11 @@
 
 # OpenRundown
 
-**Give your AI agents memory.** OpenRundown is an MCP server and Cursor plugin that gives every agent session a briefing -- active issues, recent decisions, and open items from past sessions -- so no agent ever starts blind.
+**Make your agents always up to date out of the box and save up to 80% of token usage.**
+
+Agents get briefed on active issues, past decisions, and open items from previous sessions instead of re-exploring from scratch every time. Data fetched from local or shared DB within your team or org.
+
+Connects to GitHub, Discord, Slack, and Linear today, with a goal of supporting every tool your team uses to work and document -- Jira, Notion, Confluence, and more.
 
 ## The Problem
 

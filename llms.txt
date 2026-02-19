@@ -1,10 +1,10 @@
 # OpenRundown
 
-> Persistent memory for AI coding agents. MCP server that briefs agents on project context at session start and saves what they did at session end.
+> Make your agents always up to date out of the box and save up to 80% of token usage. Agents get briefed on active issues, past decisions, and open items instead of re-exploring from scratch. Data fetched from local or shared DB within your team or org.
 
 ## What This Is
 
-OpenRundown is a Model Context Protocol (MCP) server that gives AI agents continuity across sessions. It ingests signals from GitHub issues, Discord threads, and past agent sessions, then compresses them into a compact briefing (~300-500 tokens) the agent reads at startup. When the session ends, it records decisions, files edited, and open items so the next agent picks up where the last one left off.
+OpenRundown is a Model Context Protocol (MCP) server that gives AI agents continuity across sessions. It ingests signals from GitHub, Discord, Slack, Linear, and past agent sessions, then compresses them into a compact briefing (~300-500 tokens) the agent reads at startup. When the session ends, it records decisions, files edited, and open items so the next agent picks up where the last one left off. Goal: support every tool your team uses to work and document -- Jira, Notion, Confluence, and more.
 
 ## Core Tools (Agent Session)
 
