@@ -26,6 +26,7 @@ Always do this before responding to the user:
 3. Call `get_session_history` with `limit: 3` and `project` to see recent sessions
 4. Use the briefing to understand: active issues, recent decisions, open items, user signals
 5. If a previous session has `open_items`, proactively mention them
+6. **Recover auto-closed sessions**: If the most recent session's summary indicates it was auto-closed (e.g., "Auto-closed: session was never properly ended") and its `filesEdited`, `decisionsMade`, or `openItems` are empty, check if the `lastSession` from the briefing has a `scope`. If it does, mention to the user that the previous session (scope: `<scope>`) was lost without saving progress and ask if there is anything to record before moving on. This prevents silent data loss across agent handoffs.
 
 ## During Work Sessions
 
@@ -48,6 +49,7 @@ Sessions can be lost at any time (chat disconnects, crashes, timeouts). Since yo
 1. **At the end of each response**, after all tool calls and edits are done, call `update_agent_session` with the current cumulative state: `files_edited`, `decisions_made`, `open_items`, and a `summary` of progress so far.
 2. This is the **only** required save point -- do not call `update_agent_session` after every individual action.
 3. `end_agent_session` is still preferred when you know the work is done, but the per-turn save ensures nothing is lost if the chat drops unexpectedly.
+4. **First turn rule**: Even if your first response is just a greeting or briefing summary, call `update_agent_session` with at least a `summary` (e.g., "Session started, briefing reviewed. Waiting for user direction."). An empty session that gets auto-closed is useless to the next agent.
 
 ## What Makes a Good Session Record
 
