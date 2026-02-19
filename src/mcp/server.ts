@@ -1300,6 +1300,152 @@ const tools: Tool[] = [
       required: ["issue_number"],
     },
   },
+
+  // ========================================================================
+  // Agent Briefing System
+  // ========================================================================
+  {
+    name: "get_agent_briefing",
+    description: "Get a structured project context briefing optimized for agent consumption. Returns a compact JSON payload (~300-500 tokens) with active issues, user signals, recent decisions, codebase notes, and activity metrics. Call this at the start of a session to understand the current project state. Optionally scope to a specific area (e.g., 'auth', 'billing') for a focused briefing.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        scope: {
+          type: "string",
+          description: "Optional focus area to filter the briefing (e.g., 'auth', 'billing', 'agent-auth'). When provided, only issues/signals/decisions related to this area are included.",
+        },
+        since: {
+          type: "string",
+          description: "Optional ISO timestamp to look back from. Defaults to last 14 days. Use the timestamp from a previous session to see only what changed.",
+        },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "start_agent_session",
+    description: "Start a new agent session for tracking purposes. Returns a session ID that should be passed to end_agent_session when the session completes. This allows the briefing system to track what agents work on across sessions.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        scope: {
+          type: "array",
+          items: { type: "string" },
+          description: "Areas the agent plans to work on (e.g., ['agent-auth', 'mcp-tools.ts']).",
+        },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "end_agent_session",
+    description: "End an agent session and record what was accomplished. Stores files edited, decisions made, open items, and issues referenced so future briefings can highlight changes.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        session_id: {
+          type: "string",
+          description: "Session ID returned by start_agent_session.",
+        },
+        files_edited: {
+          type: "array",
+          items: { type: "string" },
+          description: "List of files edited during this session.",
+        },
+        decisions_made: {
+          type: "array",
+          items: { type: "string" },
+          description: "Key decisions made during this session (e.g., 'split mcp-tools into separate files').",
+        },
+        open_items: {
+          type: "array",
+          items: { type: "string" },
+          description: "Items left open that need follow-up.",
+        },
+        issues_referenced: {
+          type: "array",
+          items: { type: "string" },
+          description: "Issue IDs referenced during the session (e.g., ['#423', '#451']).",
+        },
+        tools_used: {
+          type: "array",
+          items: { type: "string" },
+          description: "MCP tools used during the session.",
+        },
+        summary: {
+          type: "string",
+          description: "Brief summary of what was accomplished.",
+        },
+      },
+      required: ["session_id"],
+    },
+  },
+  {
+    name: "update_agent_session",
+    description: "Incrementally update a running agent session. Merges new data with existing session data (arrays are deduplicated). Use this to record progress mid-session without ending it.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        session_id: {
+          type: "string",
+          description: "Session ID returned by start_agent_session.",
+        },
+        scope: {
+          type: "array",
+          items: { type: "string" },
+          description: "Additional scope areas discovered during work.",
+        },
+        files_edited: {
+          type: "array",
+          items: { type: "string" },
+          description: "Additional files edited.",
+        },
+        decisions_made: {
+          type: "array",
+          items: { type: "string" },
+          description: "Additional decisions made.",
+        },
+        open_items: {
+          type: "array",
+          items: { type: "string" },
+          description: "Additional open items.",
+        },
+        issues_referenced: {
+          type: "array",
+          items: { type: "string" },
+          description: "Additional issues referenced.",
+        },
+        tools_used: {
+          type: "array",
+          items: { type: "string" },
+          description: "Additional tools used.",
+        },
+        summary: {
+          type: "string",
+          description: "Updated session summary (replaces previous).",
+        },
+      },
+      required: ["session_id"],
+    },
+  },
+  {
+    name: "get_session_history",
+    description: "Get recent agent session history. Shows what agents worked on in past sessions, including files edited, decisions made, and open items. Useful for understanding recent context and picking up where the last session left off.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        limit: {
+          type: "number",
+          description: "Number of recent sessions to return (default: 5).",
+        },
+        session_id: {
+          type: "string",
+          description: "Optional specific session ID to retrieve.",
+        },
+      },
+      required: [],
+    },
+  },
 ];
 
 // Handle list tools request
@@ -11687,6 +11833,201 @@ Example output:
       } catch (error) {
         logError("fix_github_issue failed:", error);
         throw new Error(`fix_github_issue failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    // ====================================================================
+    // Agent Briefing System handlers
+    // ====================================================================
+
+    case "get_agent_briefing": {
+      try {
+        const { hasDatabaseConfig } = await import("../storage/factory.js");
+        if (!hasDatabaseConfig()) {
+          throw new Error("Database is required for agent briefings. Please configure DATABASE_URL.");
+        }
+
+        const { distillBriefing } = await import("../briefing/distill.js");
+        const { getLastSession } = await import("../briefing/sessions.js");
+
+        const scope = args?.scope as string | undefined;
+        const since = args?.since as string | undefined;
+
+        console.error(`[Briefing] Generating agent briefing${scope ? ` (scope: ${scope})` : ""}...`);
+
+        const briefing = await distillBriefing({ scope, since });
+        const lastSession = await getLastSession();
+
+        const result = {
+          briefing,
+          lastSession: lastSession
+            ? {
+                sessionId: lastSession.sessionId,
+                endedAt: lastSession.endedAt,
+                scope: lastSession.scope,
+                summary: lastSession.summary,
+                openItems: lastSession.openItems,
+              }
+            : null,
+        };
+
+        console.error(`[Briefing] Generated briefing: ${briefing.activeIssues.length} issues, ${briefing.userSignals.length} signals, ${briefing.decisions.length} decisions`);
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(result, null, 2),
+            },
+          ],
+        };
+      } catch (error) {
+        logError("get_agent_briefing failed:", error);
+        throw new Error(`get_agent_briefing failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    case "start_agent_session": {
+      try {
+        const { hasDatabaseConfig } = await import("../storage/factory.js");
+        if (!hasDatabaseConfig()) {
+          throw new Error("Database is required for session tracking. Please configure DATABASE_URL.");
+        }
+
+        const { startSession } = await import("../briefing/sessions.js");
+        const scope = (args?.scope as string[] | undefined) ?? [];
+
+        console.error(`[Session] Starting new agent session (scope: ${scope.join(", ") || "none"})...`);
+        const session = await startSession(scope);
+        console.error(`[Session] Started session: ${session.sessionId}`);
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(session, null, 2),
+            },
+          ],
+        };
+      } catch (error) {
+        logError("start_agent_session failed:", error);
+        throw new Error(`start_agent_session failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    case "end_agent_session": {
+      try {
+        const { hasDatabaseConfig } = await import("../storage/factory.js");
+        if (!hasDatabaseConfig()) {
+          throw new Error("Database is required for session tracking. Please configure DATABASE_URL.");
+        }
+
+        const { endSession } = await import("../briefing/sessions.js");
+        const sessionId = args?.session_id as string;
+        if (!sessionId) throw new Error("session_id is required");
+
+        console.error(`[Session] Ending session: ${sessionId}...`);
+        const session = await endSession(sessionId, {
+          filesEdited: args?.files_edited as string[] | undefined,
+          decisionsMade: args?.decisions_made as string[] | undefined,
+          openItems: args?.open_items as string[] | undefined,
+          issuesReferenced: args?.issues_referenced as string[] | undefined,
+          toolsUsed: args?.tools_used as string[] | undefined,
+          summary: args?.summary as string | undefined,
+        });
+        console.error(`[Session] Ended session: ${sessionId}`);
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(session, null, 2),
+            },
+          ],
+        };
+      } catch (error) {
+        logError("end_agent_session failed:", error);
+        throw new Error(`end_agent_session failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    case "update_agent_session": {
+      try {
+        const { hasDatabaseConfig } = await import("../storage/factory.js");
+        if (!hasDatabaseConfig()) {
+          throw new Error("Database is required for session tracking. Please configure DATABASE_URL.");
+        }
+
+        const { updateSession } = await import("../briefing/sessions.js");
+        const sessionId = args?.session_id as string;
+        if (!sessionId) throw new Error("session_id is required");
+
+        console.error(`[Session] Updating session: ${sessionId}...`);
+        const session = await updateSession(sessionId, {
+          scope: args?.scope as string[] | undefined,
+          filesEdited: args?.files_edited as string[] | undefined,
+          decisionsMade: args?.decisions_made as string[] | undefined,
+          openItems: args?.open_items as string[] | undefined,
+          issuesReferenced: args?.issues_referenced as string[] | undefined,
+          toolsUsed: args?.tools_used as string[] | undefined,
+          summary: args?.summary as string | undefined,
+        });
+        console.error(`[Session] Updated session: ${sessionId}`);
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(session, null, 2),
+            },
+          ],
+        };
+      } catch (error) {
+        logError("update_agent_session failed:", error);
+        throw new Error(`update_agent_session failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    case "get_session_history": {
+      try {
+        const { hasDatabaseConfig } = await import("../storage/factory.js");
+        if (!hasDatabaseConfig()) {
+          throw new Error("Database is required for session history. Please configure DATABASE_URL.");
+        }
+
+        const { getRecentSessions, getSession } = await import("../briefing/sessions.js");
+        const sessionId = args?.session_id as string | undefined;
+        const limit = (args?.limit as number | undefined) ?? 5;
+
+        if (sessionId) {
+          console.error(`[Session] Fetching session: ${sessionId}...`);
+          const session = await getSession(sessionId);
+          if (!session) throw new Error(`Session not found: ${sessionId}`);
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify(session, null, 2),
+              },
+            ],
+          };
+        }
+
+        console.error(`[Session] Fetching last ${limit} sessions...`);
+        const sessions = await getRecentSessions(limit);
+        console.error(`[Session] Found ${sessions.length} sessions`);
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({ sessions, count: sessions.length }, null, 2),
+            },
+          ],
+        };
+      } catch (error) {
+        logError("get_session_history failed:", error);
+        throw new Error(`get_session_history failed: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
 

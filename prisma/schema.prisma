@@ -744,6 +744,29 @@ model FixAttempt {
   @@map("fix_attempts")
 }
 
+// ============================================================================
+// Agent Briefing System - Session Tracking
+// ============================================================================
+
+model AgentSession {
+  id                String   @id @default(uuid())
+  startedAt         DateTime @default(now()) @map("started_at")
+  endedAt           DateTime? @map("ended_at")
+  scope             String[] @default([])
+  filesEdited       String[] @default([]) @map("files_edited")
+  decisionsMade     String[] @default([]) @map("decisions_made")
+  openItems         String[] @default([]) @map("open_items")
+  issuesReferenced  String[] @default([]) @map("issues_referenced")
+  toolsUsed         String[] @default([]) @map("tools_used")
+  summary           String?  @db.Text
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  @@index([startedAt(sort: Desc)])
+  @@index([scope], type: Gin)
+  @@map("agent_sessions")
+}
+
 // Learn from past fixes - stores closed issues with their merged PRs
 model PRLearning {
   id                String   @id @default(uuid())
