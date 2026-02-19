@@ -1322,7 +1322,7 @@ const tools: Tool[] = [
   // ========================================================================
   {
     name: "get_agent_briefing",
-    description: "Get a structured project context briefing optimized for agent consumption. Returns a compact JSON payload (~300-500 tokens) with active issues, user signals, recent decisions, codebase notes, and activity metrics. Call this at the start of a session to understand the current project state. Automatically scoped to the current project (auto-detected from git remote or folder name). Pass 'project' to request a briefing for a different project.",
+    description: "Get a structured project context briefing optimized for agent consumption. Returns a compact JSON payload (~300-500 tokens) with active issues, user signals, recent decisions, codebase notes, and activity metrics. Call this at the start of a session to understand the current project state. IMPORTANT: Always pass 'project' — detect it from the workspace git remote (owner/repo) or folder name.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1336,7 +1336,7 @@ const tools: Tool[] = [
         },
         project: {
           type: "string",
-          description: "Optional project identifier (e.g., 'owner/repo') to get a briefing for a different project. Defaults to the auto-detected current project.",
+          description: "Project identifier — use 'owner/repo' from the workspace git remote origin, or the workspace folder name if no remote. The MCP server cannot detect your workspace, so always pass this.",
         },
       },
       required: [],
@@ -1344,7 +1344,7 @@ const tools: Tool[] = [
   },
   {
     name: "start_agent_session",
-    description: "Start a new agent session for tracking purposes. Returns a session ID that should be passed to end_agent_session when the session completes. Sessions are automatically tagged with the current project.",
+    description: "Start a new agent session for tracking purposes. Returns a session ID that should be passed to end_agent_session when the session completes. IMPORTANT: Always pass 'project' — detect it from the workspace git remote (owner/repo) or folder name.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1355,7 +1355,7 @@ const tools: Tool[] = [
         },
         project: {
           type: "string",
-          description: "Optional project identifier override. Defaults to the auto-detected current project.",
+          description: "Project identifier — use 'owner/repo' from the workspace git remote origin, or the workspace folder name if no remote. The MCP server cannot detect your workspace, so always pass this.",
         },
       },
       required: [],
@@ -11876,12 +11876,14 @@ Example output:
         }
 
         const { distillBriefing } = await import("../briefing/distill.js");
-        const { getLastSession } = await import("../briefing/sessions.js");
+        const { getLastSession, closeStaleSessions } = await import("../briefing/sessions.js");
 
         const scope = args?.scope as string | undefined;
         const since = args?.since as string | undefined;
         const project = args?.project as string | undefined;
         const projectId = project ?? detectProjectId();
+
+        const staleClosed = await closeStaleSessions(projectId);
 
         console.error(`[Briefing] Generating agent briefing for project "${projectId}"${scope ? ` (scope: ${scope})` : ""}...`);
 
@@ -11899,9 +11901,10 @@ Example output:
                 openItems: lastSession.openItems,
               }
             : null,
+          ...(staleClosed > 0 && { staleSessionsClosed: staleClosed }),
         };
 
-        console.error(`[Briefing] Generated briefing: ${briefing.activeIssues.length} issues, ${briefing.userSignals.length} signals, ${briefing.decisions.length} decisions`);
+        console.error(`[Briefing] Generated briefing: ${briefing.activeIssues.length} issues, ${briefing.userSignals.length} signals, ${briefing.decisions.length} decisions${staleClosed ? `, ${staleClosed} stale session(s) auto-closed` : ""}`);
 
         return {
           content: [

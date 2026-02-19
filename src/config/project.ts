@@ -2,9 +2,14 @@
  * Project auto-detection
  *
  * Determines a stable project identifier from the environment:
- *   1. git remote origin  (owner/repo)
- *   2. GITHUB_OWNER + GITHUB_REPO env vars
- *   3. basename of cwd
+ *   1. OPENMEMORY_PROJECT env var  (explicit override)
+ *   2. git remote origin  (owner/repo)
+ *   3. GITHUB_OWNER + GITHUB_REPO env vars
+ *   4. basename of cwd
+ *
+ * NOTE: When running as an MCP server, git remote detects this repo —
+ * not the agent's workspace. Agents should pass `project` explicitly.
+ * This detection is a fallback for CLI scripts running inside a project.
  *
  * The result is cached for the lifetime of the process.
  */
@@ -16,21 +21,12 @@ let cachedProjectId: string | undefined;
 
 /**
  * Parse "owner/repo" from a git remote URL.
- * Handles HTTPS, SSH, and git:// formats:
- *   https://github.com/owner/repo.git
- *   git@github.com:owner/repo.git
- *   git://github.com/owner/repo.git
+ * Handles HTTPS, SSH, and git:// formats.
  */
 function parseOwnerRepo(remoteUrl: string): string | null {
   const trimmed = remoteUrl.trim();
-
-  // SSH: git@github.com:owner/repo.git
-  const sshMatch = trimmed.match(/[:\/]([^/]+)\/([^/]+?)(?:\.git)?$/);
-  if (sshMatch) {
-    return `${sshMatch[1]}/${sshMatch[2]}`;
-  }
-
-  return null;
+  const match = trimmed.match(/[:\/]([^/]+)\/([^/]+?)(?:\.git)?$/);
+  return match ? `${match[1]}/${match[2]}` : null;
 }
 
 function detectFromGitRemote(): string | null {
@@ -49,6 +45,9 @@ function detectFromGitRemote(): string | null {
 }
 
 function detectFromEnv(): string | null {
+  const explicit = process.env.OPENMEMORY_PROJECT;
+  if (explicit) return explicit;
+
   const owner = process.env.GITHUB_OWNER;
   const repo = process.env.GITHUB_REPO;
   if (owner && repo) return `${owner}/${repo}`;
@@ -67,7 +66,7 @@ function detectFromCwd(): string {
 export function detectProjectId(): string {
   if (cachedProjectId !== undefined) return cachedProjectId;
 
-  const id = detectFromGitRemote() ?? detectFromEnv() ?? detectFromCwd();
+  const id = detectFromEnv() ?? detectFromGitRemote() ?? detectFromCwd();
   cachedProjectId = id;
   return id;
 }

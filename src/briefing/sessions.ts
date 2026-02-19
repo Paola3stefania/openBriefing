@@ -112,6 +112,42 @@ export async function getRecentSessions(
   return sessions.map(mapSession);
 }
 
+/**
+ * Auto-close sessions that were started but never properly ended.
+ * A session is "stale" if endedAt is null and it hasn't been touched
+ * (started or updated) within the threshold (default: 1 hour).
+ * Using updatedAt means actively-updated long sessions won't be reaped.
+ */
+export async function closeStaleSessions(
+  projectId?: string,
+  maxAgeMs = 60 * 60 * 1000,
+): Promise<number> {
+  const pid = projectId ?? detectProjectId();
+  const cutoff = new Date(Date.now() - maxAgeMs);
+
+  const stale = await prisma.agentSession.findMany({
+    where: {
+      projectId: pid,
+      endedAt: null,
+      updatedAt: { lt: cutoff },
+    },
+    select: { id: true, startedAt: true, updatedAt: true },
+  });
+
+  if (stale.length === 0) return 0;
+
+  await prisma.agentSession.updateMany({
+    where: { id: { in: stale.map((s) => s.id) } },
+    data: {
+      endedAt: new Date(),
+      summary: "Auto-closed: session was never properly ended.",
+    },
+  });
+
+  console.error(`[Session] Auto-closed ${stale.length} stale session(s) for project "${pid}"`);
+  return stale.length;
+}
+
 export async function getLastSession(projectId?: string): Promise<AgentSession | null> {
   const pid = projectId ?? detectProjectId();
   const session = await prisma.agentSession.findFirst({

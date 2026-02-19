@@ -7,23 +7,32 @@ description: Provides project context and session memory for AI agents via the O
 
 OpenMemory gives you persistent memory across sessions. It distills signals from Discord, GitHub, and past agent sessions into structured briefings so you never start blind.
 
+## Detecting the Project
+
+Every call to `get_agent_briefing`, `get_session_history`, and `start_agent_session` needs a `project` parameter. The MCP server runs separately and cannot detect your workspace, so you must detect it yourself:
+
+1. Run `git remote get-url origin` in the workspace and parse `owner/repo` from the URL
+2. If there is no git remote, use the workspace folder name (e.g., `my-project`)
+3. Always pass the result as the `project` argument
+
 ## At Session Start
 
 Always do this before responding to the user:
 
-1. Call `get_agent_briefing` from the `user-openmemory` MCP server
+1. Detect the project identifier (see above)
+2. Call `get_agent_briefing` from the `user-openmemory` MCP server with `project`
    - Optionally pass `scope` if you know what area the user is working on
    - Optionally pass `since` with the last session timestamp
-2. Call `get_session_history` with `limit: 3` to see recent sessions
-3. Use the briefing to understand: active issues, recent decisions, open items, user signals
-4. If a previous session has `open_items`, proactively mention them
+3. Call `get_session_history` with `limit: 3` and `project` to see recent sessions
+4. Use the briefing to understand: active issues, recent decisions, open items, user signals
+5. If a previous session has `open_items`, proactively mention them
 
 ## During Work Sessions
 
 When doing meaningful work (not just answering questions):
 
-1. Call `start_agent_session` with the scope of work
-   - Example: `scope: ["agent-auth", "mcp-tools"]`
+1. Call `start_agent_session` with the scope of work and `project`
+   - Example: `scope: ["agent-auth", "mcp-tools"], project: "owner/repo"`
 2. Call `update_agent_session` periodically to record progress
 3. Call `end_agent_session` when done, recording:
    - `decisions_made`: key decisions with brief reasoning
