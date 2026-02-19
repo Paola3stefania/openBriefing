@@ -1,6 +1,6 @@
 #!/bin/bash
 # Set the project directory
-PROJECT_DIR="/Users/user/Projects/openrundown"
+PROJECT_DIR="/Users/user/Projects/openmemory"
 
 # Change to the project directory
 cd "$PROJECT_DIR" || {

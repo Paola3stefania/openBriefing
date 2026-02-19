@@ -53,8 +53,8 @@ agents/session-tracker.md     -- session tracking agent
 
 1. Clone and install:
    ```bash
-   git clone https://github.com/Paola3stefania/openRundown.git
-   cd openRundown
+   git clone https://github.com/Paola3stefania/openMemory.git
+   cd openMemory
    npm install && npm run build
    ```
 
@@ -153,7 +153,7 @@ Session 2: New agent opens fresh chat
      but tests weren't added yet. Want me to pick that up?"
 ```
 
-No manual context passing. No copy-pasting. The rundown just flows.
+No manual context passing. No copy-pasting. The memory just flows.
 
 ## Documentation
 
