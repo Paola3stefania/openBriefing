@@ -763,6 +763,74 @@ async function fetchPRsForIssue(
 }
 
 /**
+ * Search for PRs across all repos in the same org/owner that reference a given issue.
+ * Useful when a fix PR lives in a sibling repo (e.g., issue in "app" but fix in "shared-lib").
+ */
+async function fetchPRsForIssueAcrossOrg(
+  issueNumber: number,
+  tokenManager: GitHubTokenManager,
+  config: ReturnType<typeof getConfig>
+): Promise<GitHubPR[]> {
+  const owner = config.github.owner;
+  const mainRepo = config.github.repo;
+
+  try {
+    const token = await tokenManager.getTokenWithProactiveRotation(2);
+    const query = `org:${owner} type:pr #${issueNumber}`;
+    const url = `https://api.github.com/search/issues?q=${encodeURIComponent(query)}&per_page=30`;
+
+    const response = await fetch(url, {
+      headers: {
+        Accept: "application/vnd.github.v3+json",
+        Authorization: `Bearer ${token}`,
+      },
+    });
+    tokenManager.updateRateLimitFromResponse(response, token);
+
+    if (!response.ok) return [];
+
+    const searchResult = await response.json() as {
+      items?: Array<{ number: number; pull_request?: { url: string }; repository_url?: string }>;
+    };
+
+    if (!searchResult.items?.length) return [];
+
+    const prs: GitHubPR[] = [];
+    for (const item of searchResult.items) {
+      if (!item.pull_request) continue;
+
+      // Extract repo name from repository_url (https://api.github.com/repos/owner/repo)
+      const repoName = item.repository_url?.split("/").pop() || mainRepo;
+      if (repoName === mainRepo) continue; // Already searched the main repo
+
+      const prResponse = await fetch(
+        `https://api.github.com/repos/${owner}/${repoName}/pulls/${item.number}`,
+        { headers: { Accept: "application/vnd.github.v3+json", Authorization: `Bearer ${token}` } }
+      );
+      tokenManager.updateRateLimitFromResponse(prResponse, token);
+
+      if (prResponse.ok) {
+        const pr = await prResponse.json() as GitHubPR;
+        const fullText = `${pr.title || ""}\n${pr.body || ""}`;
+        const refPattern = /(?:closes?|fixes?|resolves?|refs?)\s*(?:[\w-]+#)?(\d+)\b|(?:[\w-]+#)?(\d+)\b|github\.com\/[\w-]+\/[\w-]+\/issues\/(\d+)/gi;
+        for (const match of fullText.matchAll(refPattern)) {
+          const num = parseInt(match[1] || match[2] || match[3] || "", 10);
+          if (num === issueNumber) {
+            prs.push(pr);
+            break;
+          }
+        }
+      }
+    }
+
+    return prs;
+  } catch (error) {
+    logError(`[PR Sync] Cross-repo search failed for issue #${issueNumber}:`, error);
+    return [];
+  }
+}
+
+/**
  * Fetch recently merged PRs (last 30 days) to catch PRs that were merged but issues not yet closed
  * Extended to 90 days for better coverage
  */
@@ -1497,32 +1565,31 @@ export async function syncPRBasedStatus(options: SyncOptions = {}): Promise<Sync
           if (searchPRs.length > 0) {
             log(`[PR Sync] Found ${searchPRs.length} PR(s) from search for issue #${issue.issueNumber}`);
             allPRsForIssue = searchPRs;
-            // Add to map for future reference
             issueToPRsMap.set(issue.issueNumber, searchPRs);
           }
-          // Add 2.5s delay between search calls to stay under 30/min limit
           await new Promise(resolve => setTimeout(resolve, 2500));
         } catch (error) {
           logError(`[PR Sync] Error fetching PRs for issue #${issue.issueNumber}:`, error);
         }
       }
-      
-      const openPRs = allPRsForIssue.filter(pr => pr.state === "open" && !pr.merged);
-      const mergedPRs = allPRsForIssue.filter(pr => pr.merged);
-      
-      // Debug for issue #7014
-      if (issue.issueNumber === 7014) {
-        log(`[PR Sync] DEBUG: Processing issue #7014 - total PRs: ${allPRsForIssue.length}, open PRs: ${openPRs.length}, merged PRs: ${mergedPRs.length}`);
-        if (allPRsForIssue.length > 0) {
-          log(`[PR Sync] DEBUG: All PRs for #7014: ${allPRsForIssue.map(pr => `PR #${pr.number} (${pr.state}, merged=${pr.merged}, repo=${pr.html_url?.split('/')[4]}/${pr.html_url?.split('/')[5]})`).join(', ')}`);
-        }
-        if (mergedPRs.length > 0) {
-          log(`[PR Sync] DEBUG: Merged PR author: ${mergedPRs[0].user.login}, is org engineer: ${organizationEngineersSet.has(mergedPRs[0].user.login.toLowerCase())}`);
-        }
-        if (openPRs.length > 0) {
-          log(`[PR Sync] DEBUG: Open PR author: ${openPRs[0].user.login}, is org engineer: ${organizationEngineersSet.has(openPRs[0].user.login.toLowerCase())}`);
+
+      // If still no PRs, search across all repos in the org (fix may live in a sibling repo)
+      if (allPRsForIssue.length === 0 && tokenManager) {
+        try {
+          const orgPRs = await fetchPRsForIssueAcrossOrg(issue.issueNumber, tokenManager, config);
+          if (orgPRs.length > 0) {
+            log(`[PR Sync] Found ${orgPRs.length} cross-repo PR(s) for issue #${issue.issueNumber}`);
+            allPRsForIssue = orgPRs;
+            issueToPRsMap.set(issue.issueNumber, orgPRs);
+          }
+          await new Promise(resolve => setTimeout(resolve, 2500));
+        } catch (error) {
+          logError(`[PR Sync] Error in cross-repo search for issue #${issue.issueNumber}:`, error);
         }
       }
+
+      const openPRs = allPRsForIssue.filter(pr => pr.state === "open" && !pr.merged);
+      const mergedPRs = allPRsForIssue.filter(pr => pr.merged);
       
       // Save merged PRs to database (for linearStatusSync to also pick up)
       if (mergedPRs.length > 0) {
@@ -1716,32 +1783,6 @@ export async function auditAndFixIncorrectlyAssignedIssues(options: SyncOptions 
         const prsForIssue = issueToPRsMap.get(issue.issueNumber) || [];
         const openPRs = prsForIssue.filter(pr => pr.state === "open" && !pr.merged);
         const mergedPRsForIssue = prsForIssue.filter(pr => pr.merged);
-
-        // Special case for issue #7014 - check better-call repo
-        let allPRsForIssue = prsForIssue;
-        if (issue.issueNumber === 7014 && tokenManager) {
-          try {
-            const token = await tokenManager.getCurrentToken();
-            const betterCallResponse = await fetch(`https://api.github.com/repos/${config.github.owner}/better-call/pulls/92`, {
-              headers: {
-                Accept: "application/vnd.github.v3+json",
-                Authorization: `Bearer ${token}`,
-              },
-            });
-            tokenManager.updateRateLimitFromResponse(betterCallResponse, token);
-            if (betterCallResponse.ok) {
-              const pr = await betterCallResponse.json() as GitHubPR;
-              allPRsForIssue = [pr];
-              if (pr.merged) {
-                mergedPRsForIssue.push(pr);
-              } else if (pr.state === "open") {
-                openPRs.push(pr);
-              }
-            }
-          } catch (error) {
-            // Ignore errors for better-call check
-          }
-        }
 
         // Determine if issue should be in this state
         const shouldBeInProgress = openPRs.length > 0;
