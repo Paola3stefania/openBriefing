@@ -1,11 +1,11 @@
 {
-  "name": "openrundown",
+  "name": "openmemory",
   "version": "1.0.0",
   "description": "Project context and session memory for AI agents. Distills Discord, GitHub, and session signals into compact briefings.",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "openrundown": "./dist/index.js"
+    "openmemory": "./dist/index.js"
   },
   "scripts": {
     "build": "prisma generate && prisma migrate deploy && tsc",
@@ -35,7 +35,7 @@
   },
   "keywords": [
     "mcp",
-    "openrundown",
+    "openmemory",
     "claude",
     "vercel"
   ],

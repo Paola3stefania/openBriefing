@@ -1,13 +1,13 @@
 {
-  "name": "openrundown",
-  "displayName": "OpenRundown",
+  "name": "openmemory",
+  "displayName": "OpenMemory",
   "version": "0.1.0",
   "description": "Project context and session memory for AI agents. Gives every session a briefing on active issues, recent decisions, and open items from past sessions.",
   "author": {
     "name": "Paola Estefania",
-    "email": "paola@openrundown.dev"
+    "email": "paola@openmemory.dev"
   },
   "license": "MIT",
-  "keywords": ["cursor", "mcp", "agent-memory", "session-context", "briefing", "openrundown"],
+  "keywords": ["cursor", "mcp", "agent-memory", "session-context", "briefing", "openmemory"],
   "logo": "assets/logo.svg"
 }

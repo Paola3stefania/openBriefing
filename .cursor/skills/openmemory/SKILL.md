@@ -1,17 +1,17 @@
 ---
-name: openrundown
-description: Provides project context and session memory for AI agents via the OpenRundown MCP server. Use at the start of every conversation to get a briefing on active issues, recent decisions, and open items. Use during work sessions to record decisions and progress for the next agent. Triggers when working on any project with OpenRundown configured.
+name: openmemory
+description: Provides project context and session memory for AI agents via the OpenMemory MCP server. Use at the start of every conversation to get a briefing on active issues, recent decisions, and open items. Use during work sessions to record decisions and progress for the next agent. Triggers when working on any project with OpenMemory configured.
 ---
 
-# OpenRundown
+# OpenMemory
 
-OpenRundown gives you persistent memory across sessions. It distills signals from Discord, GitHub, and past agent sessions into structured briefings so you never start blind.
+OpenMemory gives you persistent memory across sessions. It distills signals from Discord, GitHub, and past agent sessions into structured briefings so you never start blind.
 
 ## At Session Start
 
 Always do this before responding to the user:
 
-1. Call `get_agent_briefing` from the `user-openrundown` MCP server
+1. Call `get_agent_briefing` from the `user-openmemory` MCP server
    - Optionally pass `scope` if you know what area the user is working on
    - Optionally pass `since` with the last session timestamp
 2. Call `get_session_history` with `limit: 3` to see recent sessions
