@@ -2484,14 +2484,11 @@ function hasObviousResolutionSignals(messages: Array<{ content: string; author?:
  * These are people who, if they answer, likely resolved the issue
  */
 function getMaintainerUsernames(): string[] {
-  // Default maintainers for Better Auth (can be overridden via env var)
   const envMaintainers = process.env.MAINTAINER_USERNAMES;
   if (envMaintainers) {
     return envMaintainers.split(',').map(u => u.trim().toLowerCase());
   }
-  
-  // Default Better Auth maintainers
-  return ['bekaru', 'alex', 'taesu', 'max'].map(u => u.toLowerCase());
+  return [];
 }
 
 /**

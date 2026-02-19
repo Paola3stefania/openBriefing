@@ -18,7 +18,7 @@ export interface FeatureExtractionConfig {
 export interface PMIntegrationConfig {
   enabled: boolean;
   documentation_urls?: string[];
-  github_repo_url?: string; // GitHub repository URL or Linear format (e.g., "better-auth/better-auth" or "https://github.com/better-auth/better-auth")
+  github_repo_url?: string; // GitHub repository URL or Linear format (e.g., "acme-corp/my-project" or "https://github.com/acme-corp/my-project")
   local_repo_path?: string; // Local repository path (e.g., /path/to/repo) - used for local code indexing before falling back to GitHub API
   feature_extraction?: FeatureExtractionConfig;
   pm_tool?: PMToolConfig;

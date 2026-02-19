@@ -816,7 +816,7 @@ const tools: Tool[] = [
   },
   {
     name: "sync_engineer_comments",
-    description: "Sync Linear issues based on engineer comments. When a Better Auth engineer comments on a GitHub issue, assign that engineer and set the Linear issue to 'In Progress'. Uses members.csv for engineer list and mappings.",
+    description: "Sync Linear issues based on engineer comments. When a team engineer comments on a GitHub issue, assign that engineer and set the Linear issue to 'In Progress'. Uses members.csv for engineer list and mappings.",
     inputSchema: {
       type: "object",
       properties: {
@@ -963,7 +963,7 @@ const tools: Tool[] = [
   },
   {
     name: "compute_feature_embeddings",
-    description: "Compute and update embeddings for product features. This includes documentation context, related GitHub issues, Discord conversations, and code context from the repository. Code indexing will automatically try LOCAL_REPO_PATH first (if configured) for faster local code access, then fallback to GitHub API. IMPORTANT: When called from within a codebase (e.g., Better Auth repo), you can either: (1) Set LOCAL_REPO_PATH environment variable to point to the local repo, or (2) Use codebase_search to find relevant code files and pass them via the code_context parameter. Only computes embeddings for features that don't have embeddings or have changed content. Set force=true to recompute all embeddings. Requires OPENAI_API_KEY.",
+    description: "Compute and update embeddings for product features. This includes documentation context, related GitHub issues, Discord conversations, and code context from the repository. Code indexing will automatically try LOCAL_REPO_PATH first (if configured) for faster local code access, then fallback to GitHub API. IMPORTANT: When called from within a codebase, you can either: (1) Set LOCAL_REPO_PATH environment variable to point to the local repo, or (2) Use codebase_search to find relevant code files and pass them via the code_context parameter. Only computes embeddings for features that don't have embeddings or have changed content. Set force=true to recompute all embeddings. Requires OPENAI_API_KEY.",
     inputSchema: {
       type: "object",
       properties: {

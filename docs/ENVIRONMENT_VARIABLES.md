@@ -9,7 +9,7 @@ This document lists all environment variables used by OpenRundown MCP Server, or
 | Variable | Description | Example |
 |----------|-------------|---------|
 | `DISCORD_TOKEN` | Discord bot token | `MTIzNDU2Nzg5MDEyMzQ1Njc4OQ.XXXXXX.XXXXXX` |
-| `GITHUB_REPO_URL` | GitHub repository (owner/repo format) | `better-auth/better-auth` |
+| `GITHUB_REPO_URL` | GitHub repository (owner/repo format) | `acme-corp/my-project` |
 | `GITHUB_TOKEN` | GitHub Personal Access Token | `ghp_xxxxxxxxxxxx` |
 | **OR** | | |
 | `GITHUB_APP_ID` | GitHub App ID | `123456` |

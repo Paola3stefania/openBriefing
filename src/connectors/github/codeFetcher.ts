@@ -23,7 +23,7 @@ export function parseGitHubRepoUrl(url: string): GitHubRepoInfo | null {
     let cleanUrl = url.trim();
     
     // First check if it's already in owner/repo format (no protocol, no domain)
-    // This is the simplest and most common format (e.g., "better-auth/better-auth")
+    // This is the simplest and most common format (e.g., "acme-corp/my-project")
     if (!cleanUrl.includes('://') && !cleanUrl.includes('@') && !cleanUrl.includes('github.com')) {
       const parts = cleanUrl.split('/').filter(Boolean);
       if (parts.length >= 2) {

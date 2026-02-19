@@ -230,7 +230,7 @@ const TRIAGE_FACTORS: Array<{
     factor: "version_info",
     weight: 0.05,
     check: (ctx) => ({
-      matched: ctx.body ? /version|v\d+\.\d+|better-auth@\d/i.test(ctx.body) : false,
+      matched: ctx.body ? /version|v\d+\.\d+|\w+@\d/i.test(ctx.body) : false,
       detail: "Includes version information",
     }),
   },

@@ -47,7 +47,7 @@ npm install
 ### 2. Run Database Migrations
 
 ```bash
-# Apply all migrations including Better Auth tables
+# Apply all migrations
 npm run db:migrate
 ```
 

@@ -180,8 +180,8 @@ All configuration uses existing environment variables:
 
 | Variable | Purpose | Example |
 |----------|---------|---------|
-| `LOCAL_REPO_PATH` | Local clone of the repo to fix | `/Users/user/Coding/betterAuth/better-auth` |
-| `GITHUB_REPO_URL` | GitHub repo (owner/repo format) | `better-auth/better-auth` |
+| `LOCAL_REPO_PATH` | Local clone of the repo to fix | `/Users/user/Projects/my-project` |
+| `GITHUB_REPO_URL` | GitHub repo (owner/repo format) | `acme-corp/my-project` |
 | `GITHUB_TOKEN` | Token with `repo` scope | `ghp_xxx...` |
 | `OPENAI_API_KEY` | For embeddings | `sk-xxx...` |
 | `DATABASE_URL` | PostgreSQL for tracking attempts | `postgresql://...` |
@@ -286,19 +286,15 @@ interface ProjectRules {
 }
 ```
 
-### Better Auth Rules (Current)
-
-From `/Users/user/Coding/betterAuth/better-auth/.cursor/rules`:
+### Example Rules
 
 | Rule | Value |
 |------|-------|
 | Branch Format | `type/subsystem-description` |
 | PR Title Format | `type(subsystem): description` |
-| Base Branch | `canary` |
+| Base Branch | `main` |
 | Types | `fix`, `feat`, `chore`, `refactor`, `doc`, `test`, `deps`, `build` |
-| Subsystems | `sso`, `saml`, `organization`, `api-key`, `passkey`, `two-factor`, `admin`, `stripe`, `oauth`, `adapter`, `cli`, `client`, `db`, `tools` |
 | Description | Lowercase, present tense, <50 chars, no period |
-| Code Style | No inline comments, no `any`/`unknown`, use internal utilities |
 
 ## Confidence Threshold (Triage)
 
@@ -416,7 +412,7 @@ model FixAttempt {
   
   // Issue identification
   issueNumber       Int      @map("issue_number")
-  issueRepo         String   @map("issue_repo")        // e.g., "better-auth/better-auth"
+  issueRepo         String   @map("issue_repo")        // e.g., "acme-corp/my-project"
   issueTitle        String   @map("issue_title")
   
   // Triage results
@@ -680,7 +676,7 @@ model PRLearning {
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                              │
 │  1. FETCH CLOSED ISSUES                                                      │
-│     GET /repos/better-auth/better-auth/issues?state=closed&per_page=100     │
+│     GET /repos/acme-corp/my-project/issues?state=closed&per_page=100       │
 │     └─→ Paginate through all closed issues                                  │
 │                                                                              │
 │  2. FOR EACH ISSUE, FIND LINKED PR                                          │
@@ -710,7 +706,7 @@ model PRLearning {
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-#### Expected Results for Better Auth
+#### Expected Results
 
 | Metric | Estimate |
 |--------|----------|
@@ -732,11 +728,11 @@ Update the Linear ticket with:
 ## Automated Fix Attempted
 
 A draft PR has been opened to address this issue:
-- PR: [#123](https://github.com/better-auth/better-auth/pull/123)
+- PR: [#123](https://github.com/acme-corp/my-project/pull/123)
 - Branch: `fix/oauth-token-refresh`
 
 ### Changes
-- `packages/better-auth/src/oauth/refresh.ts`
+- `src/oauth/refresh.ts`
 
 ### Summary
 [AI-generated explanation of the fix]
@@ -792,8 +788,8 @@ Discord threads: 2 matched (similarity > 60%)
   "reasoning": "Clear reproduction steps, error message provided, multiple users reporting, affects core OAuth flow",
   "suggestedAction": "fix",
   "relatedCode": [
-    "packages/better-auth/src/oauth/refresh.ts",
-    "packages/better-auth/src/oauth/providers/google.ts"
+    "src/oauth/refresh.ts",
+    "src/oauth/providers/google.ts"
   ]
 }
 ```
@@ -818,8 +814,8 @@ Body:
   - Added debug logging for refresh failures
   
   ## Changes
-  - `packages/better-auth/src/oauth/refresh.ts`
-  
+  - `src/oauth/refresh.ts`
+
   ## Testing
   - Added test case for expired refresh token scenario
   
@@ -946,14 +942,14 @@ AI calls: open_pr_with_fix(
   fix_type: "fix",
   subsystem: "oauth",
   description: "handle token refresh failure gracefully",
-  files: [{ path: "packages/better-auth/src/oauth/refresh.ts", content: "..." }],
+  files: [{ path: "src/oauth/refresh.ts", content: "..." }],
   pr_body: "Fixes #1234\n\n## Problem\n..."
 )
 
 Returns:
 - branch: "fix/oauth-handle-token-refresh-failure-gracefully"
 - prNumber: 5678
-- prUrl: "https://github.com/better-auth/better-auth/pull/5678"
+- prUrl: "https://github.com/acme-corp/my-project/pull/5678"
 - linearUpdated: true
 ```
 
@@ -997,7 +993,7 @@ The tools should be built in this order:
 
 ## Future Enhancements
 
-1. **Multi-repo support** - Handle issues across Better Auth org repos (docs, infrastructure, etc.)
+1. **Multi-repo support** - Handle issues across multiple org repos (docs, infrastructure, etc.)
 2. **Test generation** - Auto-generate test cases alongside the fix
 3. **Webhook integration** - Auto-trigger `learn_from_pr` when PRs are merged
 4. **Batch processing** - Process multiple issues in one run

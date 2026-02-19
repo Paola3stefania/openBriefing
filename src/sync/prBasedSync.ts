@@ -1485,49 +1485,7 @@ export async function syncPRBasedStatus(options: SyncOptions = {}): Promise<Sync
     const details: SyncDetail[] = [];
 
     for (const issue of issues) {
-      // Special case for issue #7014 - try fetching PR #92 from better-call repo FIRST
-      // The issue is in better-auth but the PR is in better-call
-      // This should take priority over other PRs found in the map
-      let allPRsForIssue: GitHubPR[] = [];
-      
-      if (issue.issueNumber === 7014 && tokenManager) {
-        log(`[PR Sync] Special handling for issue #7014 - checking for PR #92 from better-call repo FIRST...`);
-        try {
-          const token = await tokenManager.getCurrentToken();
-          // Try better-call repo (where the PR actually is)
-          const betterCallResponse = await fetch(`https://api.github.com/repos/${config.github.owner}/better-call/pulls/92`, {
-            headers: {
-              Accept: "application/vnd.github.v3+json",
-              Authorization: `Bearer ${token}`,
-            },
-          });
-          
-          tokenManager.updateRateLimitFromResponse(betterCallResponse, token);
-          
-          if (betterCallResponse.ok) {
-            const pr = await betterCallResponse.json() as GitHubPR;
-            log(`[PR Sync] Successfully fetched PR #92 from better-call: state=${pr.state}, merged=${pr.merged}, author=${pr.user.login}, url=${pr.html_url}`);
-            // Always add PR #92 from better-call (it's the correct one)
-            // This will replace any PRs from better-auth repo
-            allPRsForIssue = [pr];
-            issueToPRsMap.set(7014, [pr]);
-            log(`[PR Sync] Set allPRsForIssue for issue #7014 to PR #92 from better-call (merged=${pr.merged})`);
-          } else {
-            const errorText = await betterCallResponse.text();
-            logError(`[PR Sync] Failed to fetch PR #92 from better-call: ${betterCallResponse.status} ${errorText}`);
-            // Fall back to map if PR #92 not found
-            allPRsForIssue = issueToPRsMap.get(issue.issueNumber) || [];
-            log(`[PR Sync] Falling back to map for issue #7014, found ${allPRsForIssue.length} PR(s)`);
-          }
-        } catch (error) {
-          logError(`[PR Sync] Error fetching PR #92 from better-call:`, error);
-          // Fall back to map if error
-          allPRsForIssue = issueToPRsMap.get(issue.issueNumber) || [];
-        }
-      } else {
-        // For other issues, get PRs from the map
-        allPRsForIssue = issueToPRsMap.get(issue.issueNumber) || [];
-      }
+      let allPRsForIssue: GitHubPR[] = issueToPRsMap.get(issue.issueNumber) || [];
       
       // If no PRs found in map, try fetching directly from GitHub using search
       // This catches PRs that are linked but don't mention the issue in text, or were merged >90 days ago

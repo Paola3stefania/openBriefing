@@ -704,7 +704,7 @@ model FixAttempt {
   
   // Issue identification
   issueNumber       Int      @map("issue_number")
-  issueRepo         String   @map("issue_repo")        // e.g., "better-auth/better-auth"
+  issueRepo         String   @map("issue_repo")        // e.g., "acme-corp/my-project"
   issueTitle        String   @map("issue_title")
   
   // Triage results
