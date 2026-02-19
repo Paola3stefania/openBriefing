@@ -19,3 +19,6 @@ results/**/*.json
 # Keep cursor config example but ignore personal config
 cursor-mcp-config.json
 .vercel
+
+# Machine-specific MCP launcher (contains absolute paths)
+run-mcp.sh
