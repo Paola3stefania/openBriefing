@@ -1,0 +1,59 @@
+# OpenRundown
+
+> Persistent memory for AI coding agents. MCP server that briefs agents on project context at session start and saves what they did at session end.
+
+## What This Is
+
+OpenRundown is a Model Context Protocol (MCP) server that gives AI agents continuity across sessions. It ingests signals from GitHub issues, Discord threads, and past agent sessions, then compresses them into a compact briefing (~300-500 tokens) the agent reads at startup. When the session ends, it records decisions, files edited, and open items so the next agent picks up where the last one left off.
+
+## Core Tools (Agent Session)
+
+- get_agent_briefing: Returns a structured JSON briefing with active issues, recent decisions, open items from past sessions, user signals, and codebase notes. Call at session start.
+- get_session_history: Returns recent agent sessions with their scope, summary, decisions, files edited, and open items. Use to understand what previous agents worked on.
+- start_agent_session: Begin tracking a work session. Pass a scope (e.g., ["auth", "api"]) and project identifier.
+- update_agent_session: Record progress mid-session. Pass files_edited, decisions_made, open_items, summary.
+- end_agent_session: Finalize a session with a complete record of what was accomplished.
+
+## Signal Pipeline Tools
+
+- fetch_github_issues: Ingest all GitHub issues with comments and cache them.
+- fetch_discord_messages: Ingest Discord channel messages and cache them.
+- classify_discord_messages: Match Discord messages to related GitHub issues using AI.
+- group_github_issues: Group related issues (one ticket per problem, not per report).
+- label_github_issues: Auto-detect and assign labels (bug, security, regression, enhancement).
+- match_issues_to_features: Map issues to product features using semantic similarity.
+- compute_github_issue_embeddings: Generate embeddings for semantic matching.
+- compute_discord_embeddings: Generate embeddings for Discord threads.
+- sync_classify_and_export: Run the full pipeline end-to-end.
+
+## Export and Sync Tools
+
+- export_to_pm_tool: Export issues to Linear or Jira with rich descriptions.
+- sync_linear_status: Sync GitHub issue states with Linear tickets.
+- sync_pr_based_status: Update Linear status based on open PRs.
+
+## AI Fix Tools
+
+- investigate_issue: Gather context, triage, and find similar historical fixes for an issue.
+- fix_github_issue: Full workflow -- investigate, generate fix, open draft PR.
+- learn_from_pr: Learn from merged PRs to improve future fix generation.
+
+## Briefing Response Format
+
+The briefing JSON contains:
+- project: Project identifier (owner/repo)
+- activeIssues: Ranked by priority (critical > high > medium > low), each with id, summary, report count, source, labels, assignees
+- decisions: Recent decisions from merged PRs and sessions, with what/why/status/openItems
+- userSignals: Recurring themes from Discord and GitHub
+- codebaseNotes: Which files and areas map to which features
+- recentActivity: Issue/PR/Discord counts for the last 14 days
+- lastSession: Previous agent's scope, summary, and open items
+
+## Installation
+
+npm install, configure .env with GITHUB_TOKEN and DISCORD_TOKEN, optionally set up PostgreSQL with Prisma. Add as an MCP server in Cursor or any MCP-compatible client.
+
+## Links
+
+- Repository: https://github.com/Paola3stefania/openrundown
+- License: MIT

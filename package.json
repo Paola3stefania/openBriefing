@@ -35,9 +35,16 @@
   },
   "keywords": [
     "mcp",
-    "openrundown",
-    "claude",
-    "vercel"
+    "mcp-server",
+    "model-context-protocol",
+    "ai-agent",
+    "agent-memory",
+    "session-memory",
+    "cursor",
+    "developer-tools",
+    "github",
+    "discord",
+    "openrundown"
   ],
   "license": "MIT",
   "dependencies": {

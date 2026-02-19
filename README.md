@@ -1,3 +1,7 @@
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![MCP Compatible](https://img.shields.io/badge/MCP-Compatible-green.svg)](https://modelcontextprotocol.io)
+[![Node.js](https://img.shields.io/badge/Node.js-18+-339933.svg)](https://nodejs.org)
+
 # OpenRundown
 
 **Give your AI agents memory.** OpenRundown is an MCP server and Cursor plugin that gives every agent session a briefing -- active issues, recent decisions, and open items from past sessions -- so no agent ever starts blind.
@@ -83,6 +87,60 @@ These are the core tools agents use every session:
 | `update_agent_session` | Record progress mid-session |
 | `end_agent_session` | Save decisions, files, open items |
 | `get_session_history` | See what previous agents did |
+
+### Example Briefing
+
+This is what `get_agent_briefing` returns (~300-500 tokens):
+
+```json
+{
+  "briefing": {
+    "project": "acme/webapp",
+    "lastUpdated": "2026-02-19T09:00:00Z",
+    "activeIssues": [
+      {
+        "id": "#412",
+        "summary": "Login fails silently when session cookie expires",
+        "reports": 8,
+        "source": "github + discord",
+        "priority": "critical",
+        "labels": ["bug", "auth"],
+        "assignees": ["alice"]
+      }
+    ],
+    "decisions": [
+      {
+        "what": "Split auth middleware into separate request/response handlers",
+        "why": "Addresses #389 -- middleware was blocking streaming responses",
+        "when": "2026-02-18",
+        "status": "implemented",
+        "openItems": ["Add tests for new response handler"]
+      }
+    ],
+    "userSignals": [
+      {
+        "theme": "Session handling confusion",
+        "count": 12,
+        "period": "last 14 days",
+        "sources": ["discord", "github"]
+      }
+    ],
+    "recentActivity": {
+      "issuesOpened": 15,
+      "issuesClosed": 42,
+      "prsOpened": 8,
+      "prsMerged": 6,
+      "discordThreads": 23,
+      "period": "last 14 days"
+    }
+  },
+  "lastSession": {
+    "scope": ["auth", "middleware"],
+    "summary": "Refactored auth middleware into request/response split. Tests pending.",
+    "openItems": ["Add tests for new response handler"]
+  }
+}
+```
 
 ### CLI
 
