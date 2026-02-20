@@ -759,6 +759,7 @@ model AgentSession {
   openItems         String[] @default([]) @map("open_items")
   issuesReferenced  String[] @default([]) @map("issues_referenced")
   toolsUsed         String[] @default([]) @map("tools_used")
+  planSteps         Json?    @map("plan_steps") @db.JsonB
   summary           String?  @db.Text
   createdAt         DateTime @default(now()) @map("created_at")
   updatedAt         DateTime @updatedAt @map("updated_at")

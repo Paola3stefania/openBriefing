@@ -1363,7 +1363,7 @@ const tools: Tool[] = [
   },
   {
     name: "end_agent_session",
-    description: "End an agent session and record what was accomplished. Stores files edited, decisions made, open items, and issues referenced so future briefings can highlight changes.",
+    description: "End an agent session and record what was accomplished. Stores files edited, decisions made, plan steps, open items, and issues referenced so future briefings can highlight changes.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1396,6 +1396,20 @@ const tools: Tool[] = [
           items: { type: "string" },
           description: "MCP tools used during the session.",
         },
+        plan_steps: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              id: { type: "string", description: "Unique step identifier (e.g., '1', 'auth-setup')." },
+              description: { type: "string", description: "What this step accomplishes." },
+              status: { type: "string", enum: ["pending", "in_progress", "completed", "blocked"], description: "Current status of this step." },
+              notes: { type: "string", description: "Optional context — why blocked, what was learned, etc." },
+            },
+            required: ["id", "description", "status"],
+          },
+          description: "Structured plan steps with statuses. Save your plan here so the next agent can pick up where you left off. Each step has an id, description, status (pending/in_progress/completed/blocked), and optional notes.",
+        },
         summary: {
           type: "string",
           description: "Brief summary of what was accomplished.",
@@ -1406,7 +1420,7 @@ const tools: Tool[] = [
   },
   {
     name: "update_agent_session",
-    description: "Incrementally update a running agent session. Merges new data with existing session data (arrays are deduplicated). Use this to record progress mid-session without ending it.",
+    description: "Incrementally update a running agent session. Merges new data with existing session data (arrays are deduplicated, plan steps are merged by id). Use this to record progress mid-session without ending it.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1444,6 +1458,20 @@ const tools: Tool[] = [
           items: { type: "string" },
           description: "Additional tools used.",
         },
+        plan_steps: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              id: { type: "string", description: "Unique step identifier (e.g., '1', 'auth-setup')." },
+              description: { type: "string", description: "What this step accomplishes." },
+              status: { type: "string", enum: ["pending", "in_progress", "completed", "blocked"], description: "Current status of this step." },
+              notes: { type: "string", description: "Optional context — why blocked, what was learned, etc." },
+            },
+            required: ["id", "description", "status"],
+          },
+          description: "Plan steps to add or update. Steps are merged by id — existing steps get their status/notes updated, new steps are appended.",
+        },
         summary: {
           type: "string",
           description: "Updated session summary (replaces previous).",
@@ -1474,6 +1502,24 @@ const tools: Tool[] = [
       required: [],
     },
   },
+  {
+    name: "import_claude_plans",
+    description: "Import plans from Claude Code's ~/.claude/plans/ directory. Claude Code stores detailed implementation plans as markdown files. This tool reads them, extracts structured steps, and attaches them to the current session. Use this when starting a session if the user has been working with Claude Code.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        session_id: {
+          type: "string",
+          description: "Session ID to attach the imported plan to.",
+        },
+        plan_file: {
+          type: "string",
+          description: "Optional specific plan filename to import (e.g., 'delegated-snuggling-turing.md'). If omitted, lists all available plans.",
+        },
+      },
+      required: [],
+    },
+  },
 ];
 
 // Handle list tools request
@@ -1486,8 +1532,55 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
   // Extract name early so it's available in catch block
   const { name, arguments: args } = request.params;
   
+  const discordFreeTools = new Set([
+    "get_agent_briefing",
+    "start_agent_session",
+    "end_agent_session",
+    "update_agent_session",
+    "get_session_history",
+    "import_claude_plans",
+    "investigate_issue",
+    "fix_github_issue",
+    "open_pr_with_fix",
+    "learn_from_pr",
+    "seed_pr_learnings",
+    "fetch_github_issues",
+    "search_github_issues",
+    "check_github_issues_completeness",
+    "label_github_issues",
+    "group_github_issues",
+    "suggest_grouping",
+    "match_issues_to_features",
+    "match_ungrouped_issues_to_features",
+    "match_groups_to_features",
+    "match_database_groups_to_features",
+    "view_feature_ownership",
+    "analyze_code_ownership",
+    "index_codebase",
+    "index_code_for_features",
+    "manage_documentation_cache",
+    "compute_feature_embeddings",
+    "compute_group_embeddings",
+    "compute_github_issue_embeddings",
+    "compute_discord_embeddings",
+    "export_to_pm_tool",
+    "list_linear_teams",
+    "validate_pm_setup",
+    "validate_export_sync",
+    "export_stats",
+    "sync_classify_and_export",
+    "sync_linear_status",
+    "sync_pr_based_status",
+    "sync_combined",
+    "sync_engineer_comments",
+    "classify_linear_issues",
+    "label_linear_issues",
+    "audit_and_fix_incorrectly_assigned",
+    "remove_linear_duplicates",
+  ]);
+
   try {
-    if (!discordReady) {
+    if (!discordReady && !discordFreeTools.has(name)) {
       throw new Error("Discord client is not ready yet");
     }
 
@@ -11899,6 +11992,7 @@ Example output:
                 scope: lastSession.scope,
                 summary: lastSession.summary,
                 openItems: lastSession.openItems,
+                ...(lastSession.planSteps && lastSession.planSteps.length > 0 && { planSteps: lastSession.planSteps }),
               }
             : null,
           ...(staleClosed > 0 && { staleSessionsClosed: staleClosed }),
@@ -11968,6 +12062,7 @@ Example output:
           openItems: args?.open_items as string[] | undefined,
           issuesReferenced: args?.issues_referenced as string[] | undefined,
           toolsUsed: args?.tools_used as string[] | undefined,
+          planSteps: args?.plan_steps as import("../briefing/types.js").PlanStep[] | undefined,
           summary: args?.summary as string | undefined,
         });
         console.error(`[Session] Ended session: ${sessionId}`);
@@ -12005,6 +12100,7 @@ Example output:
           openItems: args?.open_items as string[] | undefined,
           issuesReferenced: args?.issues_referenced as string[] | undefined,
           toolsUsed: args?.tools_used as string[] | undefined,
+          planSteps: args?.plan_steps as import("../briefing/types.js").PlanStep[] | undefined,
           summary: args?.summary as string | undefined,
         });
         console.error(`[Session] Updated session: ${sessionId}`);
@@ -12068,6 +12164,99 @@ Example output:
       }
     }
 
+    case "import_claude_plans": {
+      try {
+        const { readdir, readFile, stat } = await import("node:fs/promises");
+        const { join } = await import("node:path");
+        const { homedir } = await import("node:os");
+
+        const plansDir = join(homedir(), ".claude", "plans");
+
+        try {
+          await stat(plansDir);
+        } catch {
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({ error: "No Claude Code plans directory found at ~/.claude/plans/. Claude Code may not be installed or has no saved plans." }),
+            }],
+          };
+        }
+
+        const planFile = args?.plan_file as string | undefined;
+
+        if (!planFile) {
+          const files = await readdir(plansDir);
+          const mdFiles = files.filter((f: string) => f.endsWith(".md"));
+
+          const plans = await Promise.all(
+            mdFiles.map(async (f: string) => {
+              const fileStat = await stat(join(plansDir, f));
+              const content = await readFile(join(plansDir, f), "utf-8");
+              const titleMatch = content.match(/^#\s+(.+)/m);
+              return {
+                filename: f,
+                title: titleMatch?.[1] ?? f.replace(".md", ""),
+                lastModified: fileStat.mtime.toISOString(),
+                sizeBytes: fileStat.size,
+              };
+            }),
+          );
+
+          plans.sort((a, b) => new Date(b.lastModified).getTime() - new Date(a.lastModified).getTime());
+
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                plans,
+                hint: "Pass a filename as plan_file to import a specific plan. Pass session_id to attach it to your current session.",
+              }, null, 2),
+            }],
+          };
+        }
+
+        const filePath = join(plansDir, planFile);
+        const content = await readFile(filePath, "utf-8");
+
+        const steps = parseMarkdownPlanSteps(content);
+        const titleMatch = content.match(/^#\s+(.+)/m);
+        const title = titleMatch?.[1] ?? planFile.replace(".md", "");
+
+        const sessionId = args?.session_id as string | undefined;
+
+        if (sessionId) {
+          const { hasDatabaseConfig } = await import("../storage/factory.js");
+          if (!hasDatabaseConfig()) {
+            throw new Error("Database is required for session tracking. Please configure DATABASE_URL.");
+          }
+          const { updateSession } = await import("../briefing/sessions.js");
+
+          console.error(`[Plans] Importing Claude Code plan "${title}" (${steps.length} steps) into session ${sessionId}...`);
+          await updateSession(sessionId, {
+            planSteps: steps,
+            decisionsMade: [`Imported plan from Claude Code: ${title}`],
+          });
+        }
+
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              title,
+              filename: planFile,
+              steps,
+              totalSteps: steps.length,
+              ...(sessionId && { attachedToSession: sessionId }),
+            }, null, 2),
+          }],
+        };
+      } catch (error) {
+        logError("import_claude_plans failed:", error);
+        throw new Error(`import_claude_plans failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
     default:
       throw new Error(`Unknown tool: ${name}`);
     }
@@ -12088,6 +12277,42 @@ Example output:
     throw new Error(`Command failed: ${errorMessage}`);
   }
 });
+
+/**
+ * Parse a Claude Code markdown plan into structured PlanStep objects.
+ * Looks for numbered/bulleted items under headings containing "step", "file", or "implementation",
+ * and falls back to extracting all top-level headings as steps.
+ */
+function parseMarkdownPlanSteps(markdown: string): import("../briefing/types.js").PlanStep[] {
+  const steps: import("../briefing/types.js").PlanStep[] = [];
+
+  const stepSectionRegex = /^###?\s+(?:Step\s+)?(\d+)[.:]\s*(.+)/gim;
+  let match;
+  while ((match = stepSectionRegex.exec(markdown)) !== null) {
+    steps.push({
+      id: match[1],
+      description: match[2].trim(),
+      status: "pending",
+    });
+  }
+
+  if (steps.length > 0) return steps;
+
+  const headingRegex = /^###?\s+(?:\d+\.\s+)?(?:(?:Modify|New file|Create|Update|Add|Fix|Remove|Refactor):\s*)?(.+)/gim;
+  let stepNum = 0;
+  while ((match = headingRegex.exec(markdown)) !== null) {
+    const desc = match[1].trim();
+    if (desc.toLowerCase() === "overview" || desc.toLowerCase() === "context" || desc.toLowerCase() === "verification") continue;
+    stepNum++;
+    steps.push({
+      id: String(stepNum),
+      description: desc,
+      status: "pending",
+    });
+  }
+
+  return steps;
+}
 
 // Start the server
 async function main() {

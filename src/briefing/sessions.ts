@@ -10,9 +10,10 @@
  * No embeddings needed — just structured data in a simple table.
  */
 
+import type { Prisma } from "@prisma/client";
 import { prisma } from "../storage/db/prisma.js";
 import { detectProjectId } from "../config/project.js";
-import type { AgentSession } from "./types.js";
+import type { AgentSession, PlanStep } from "./types.js";
 
 export async function startSession(
   scope: string[] = [],
@@ -38,6 +39,7 @@ export async function endSession(
     openItems?: string[];
     issuesReferenced?: string[];
     toolsUsed?: string[];
+    planSteps?: PlanStep[];
     summary?: string;
   } = {},
 ): Promise<AgentSession> {
@@ -50,6 +52,9 @@ export async function endSession(
       openItems: updates.openItems ?? [],
       issuesReferenced: updates.issuesReferenced ?? [],
       toolsUsed: updates.toolsUsed ?? [],
+      ...(updates.planSteps !== undefined && {
+        planSteps: updates.planSteps as unknown as Prisma.InputJsonValue,
+      }),
       summary: updates.summary ?? null,
     },
   });
@@ -66,6 +71,7 @@ export async function updateSession(
     openItems: string[];
     issuesReferenced: string[];
     toolsUsed: string[];
+    planSteps: PlanStep[];
     summary: string;
   }>,
 ): Promise<AgentSession> {
@@ -76,6 +82,11 @@ export async function updateSession(
   const mergeArrays = (existing: string[], incoming?: string[]) =>
     incoming ? [...new Set([...existing, ...incoming])] : existing;
 
+  const mergedPlanSteps = mergePlanSteps(
+    parsePlanSteps(existing.planSteps),
+    updates.planSteps,
+  );
+
   const session = await prisma.agentSession.update({
     where: { id: sessionId },
     data: {
@@ -85,6 +96,9 @@ export async function updateSession(
       openItems: mergeArrays(existing.openItems, updates.openItems),
       issuesReferenced: mergeArrays(existing.issuesReferenced, updates.issuesReferenced),
       toolsUsed: mergeArrays(existing.toolsUsed, updates.toolsUsed),
+      ...(mergedPlanSteps !== undefined && {
+        planSteps: mergedPlanSteps as unknown as Prisma.InputJsonValue,
+      }),
       summary: updates.summary ?? existing.summary,
     },
   });
@@ -157,6 +171,29 @@ export async function getLastSession(projectId?: string): Promise<AgentSession |
   return session ? mapSession(session) : null;
 }
 
+function parsePlanSteps(raw: unknown): PlanStep[] | undefined {
+  if (!raw) return undefined;
+  if (Array.isArray(raw)) return raw as PlanStep[];
+  return undefined;
+}
+
+/**
+ * Merge incoming plan steps with existing ones by id.
+ * New steps are appended, existing steps are updated (status/notes overwrite).
+ */
+function mergePlanSteps(
+  existing?: PlanStep[],
+  incoming?: PlanStep[],
+): PlanStep[] | undefined {
+  if (!incoming) return existing;
+  if (!existing || existing.length === 0) return incoming;
+
+  const merged = new Map<string, PlanStep>();
+  for (const step of existing) merged.set(step.id, step);
+  for (const step of incoming) merged.set(step.id, { ...merged.get(step.id), ...step });
+  return [...merged.values()];
+}
+
 function mapSession(session: {
   id: string;
   projectId: string;
@@ -168,6 +205,7 @@ function mapSession(session: {
   openItems: string[];
   issuesReferenced: string[];
   toolsUsed: string[];
+  planSteps: unknown;
   summary: string | null;
 }): AgentSession {
   return {
@@ -181,6 +219,7 @@ function mapSession(session: {
     openItems: session.openItems,
     issuesReferenced: session.issuesReferenced,
     toolsUsed: session.toolsUsed,
+    planSteps: parsePlanSteps(session.planSteps),
     summary: session.summary ?? undefined,
   };
 }

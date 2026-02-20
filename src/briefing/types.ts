@@ -60,6 +60,15 @@ export interface RecentActivity {
   period: string;
 }
 
+export type PlanStepStatus = "pending" | "in_progress" | "completed" | "blocked";
+
+export interface PlanStep {
+  id: string;
+  description: string;
+  status: PlanStepStatus;
+  notes?: string;
+}
+
 export interface AgentSession {
   sessionId: string;
   projectId: string;
@@ -71,6 +80,7 @@ export interface AgentSession {
   openItems: string[];
   issuesReferenced: string[];
   toolsUsed: string[];
+  planSteps?: PlanStep[];
   summary?: string;
 }
 
