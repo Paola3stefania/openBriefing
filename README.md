@@ -2,6 +2,8 @@
 [![MCP Compatible](https://img.shields.io/badge/MCP-Compatible-green.svg)](https://modelcontextprotocol.io)
 [![Node.js](https://img.shields.io/badge/Node.js-18+-339933.svg)](https://nodejs.org)
 
+**Contributors and coding agents:** start with **[AGENTS.md](AGENTS.md)** (repository layout, build/test commands, `project` parameter, doc index). The distributable skill for end users lives in `skills/openrundown/SKILL.md`.
+
 # OpenRundown
 
 **Make your agents always up to date out of the box and save up to 80% of token usage.**
@@ -242,6 +244,8 @@ No manual context passing. No copy-pasting. The memory just flows.
 
 ## Documentation
 
+- [AGENTS.md](AGENTS.md) — onramp for contributors and AI agents (read first in this repo)
+- [CONTRIBUTING.md](CONTRIBUTING.md) — short guide for pull requests
 - [Environment Variables](docs/ENVIRONMENT_VARIABLES.md)
 - [Database Setup](docs/DATABASE_SETUP.md)
 - [GitHub Integration](docs/GITHUB_INTEGRATION.md)
