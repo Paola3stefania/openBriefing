@@ -10,3 +10,4 @@ openrundown-session-protocol:
 - When doing meaningful work (not just answering questions), call `start_agent_session` with the scope of work.
 - At the end of meaningful work, call `end_agent_session` recording decisions_made, files_edited, open_items, and a summary.
 - Decisions should include the "why", not just the "what". Open items should be specific and actionable.
+- For a grouped list of all MCP tools and when to use them, read `.cursor/skills/openrundown/SKILL.md` in this project. If you are developing the **openrundown** open-source project itself, read `AGENTS.md` in that repository.

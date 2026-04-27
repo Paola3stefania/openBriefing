@@ -1,6 +1,6 @@
 ---
 name: openrundown
-description: Provides project context and session memory for AI agents via the OpenRundown MCP server. Use at the start of every conversation to get a briefing on active issues, recent decisions, and open items. Use during work sessions to record decisions and progress for the next agent. Triggers when working on any project with OpenRundown configured.
+description: Provides project context and session memory for AI agents via the OpenRundown MCP server. Use at the start of every conversation to get a briefing on active issues, recent decisions, and open items. Use during work sessions to record decisions and progress for the next agent. Includes a catalog of MCP tools (grouped) and local npm commands for the openrundown source repo. Triggers when working on any project with OpenRundown configured.
 ---
 
 # OpenRundown
@@ -20,14 +20,15 @@ Every call to `get_agent_briefing`, `get_session_history`, and `start_agent_sess
 Always do this before responding to the user:
 
 1. Detect the project identifier (see above)
-2. Call `get_agent_briefing` from the `user-openrundown` MCP server with `project`
+2. Call `get_agent_briefing` from the `user-openrundown` MCP server (or whatever your Cursor MCP entry is named) with `project`
    - Optionally pass `scope` if you know what area the user is working on
    - Optionally pass `since` with the last session timestamp
 3. Call `get_session_history` with `limit: 3` and `project` to see recent sessions
-4. Use the briefing to understand: active issues, recent decisions, open items, active plans, user signals, tech signals from X/Twitter
-5. If a previous session has `open_items`, proactively mention them
-6. **Resume active plans**: If the last session has `planSteps` with incomplete steps (pending/in_progress/blocked), show the plan status to the user and offer to continue from where the previous agent left off.
-7. **Recover auto-closed sessions**: If the most recent session's summary indicates it was auto-closed (e.g., "Auto-closed: session was never properly ended") and its `filesEdited`, `decisionsMade`, or `openItems` are empty, check if the `lastSession` from the briefing has a `scope`. If it does, mention to the user that the previous session (scope: `<scope>`) was lost without saving progress and ask if there is anything to record before moving on. This prevents silent data loss across agent handoffs.
+4. **Optional (semantic memory):** Call `search_memory` with a short query, and `get_recent_memories` with `limit: 5`, if the deployment uses the memory tools
+5. Use the briefing to understand: active issues, recent decisions, open items, active plans, user signals, tech signals from X/Twitter
+6. If a previous session has `open_items`, proactively mention them
+7. **Resume active plans**: If the last session has `planSteps` with incomplete steps (pending/in_progress/blocked), show the plan status to the user and offer to continue from where the previous agent left off.
+8. **Recover auto-closed sessions**: If the most recent session's summary indicates it was auto-closed (e.g., "Auto-closed: session was never properly ended") and its `filesEdited`, `decisionsMade`, or `openItems` are empty, check if the `lastSession` from the briefing has a `scope`. If it does, mention to the user that the previous session (scope: `<scope>`) was lost without saving progress and ask if there is anything to record before moving on. This prevents silent data loss across agent handoffs.
 
 ## During Work Sessions
 
@@ -44,6 +45,11 @@ When doing meaningful work (not just answering questions):
    - `plan_steps`: structured plan with step statuses (see below)
    - `summary`: 1-2 sentence description of what was accomplished
 
+## Saving memories (ad-hoc)
+
+- After an architectural decision, you can call `save_memory` with reasoning and `tags` (e.g. `["area", "decision"]`) if your deployment has embeddings configured.
+- Non-obvious codebase facts are good candidates to save.
+
 ## Saving Plans (mandatory when plans exist)
 
 When you create a plan (in Plan mode, or outline implementation steps), you **must** persist it via `plan_steps` so the next agent can continue:
@@ -54,6 +60,7 @@ When you create a plan (in Plan mode, or outline implementation steps), you **mu
 4. **At session end**: The final `plan_steps` state should reflect what was done and what remains. Incomplete steps are automatically visible to the next agent via the briefing.
 
 Example `plan_steps`:
+
 ```json
 [
   { "id": "1", "description": "Add planSteps field to schema", "status": "completed" },
@@ -70,7 +77,7 @@ The next agent's briefing will include these steps, so they know exactly where t
 Sessions can be lost at any time (chat disconnects, crashes, timeouts). Since you cannot detect when a chat is about to end, you must save at the end of every turn:
 
 1. **At the end of each response**, after all tool calls and edits are done, call `update_agent_session` with the current cumulative state: `files_edited`, `decisions_made`, `open_items`, `plan_steps` (if a plan exists), and a `summary` of progress so far.
-2. This is the **only** required save point -- do not call `update_agent_session` after every individual action.
+2. This is the **only** required save point – do not call `update_agent_session` after every individual action.
 3. `end_agent_session` is still preferred when you know the work is done, but the per-turn save ensures nothing is lost if the chat drops unexpectedly.
 4. **First turn rule**: Even if your first response is just a greeting or briefing summary, call `update_agent_session` with at least a `summary` (e.g., "Session started, briefing reviewed. Waiting for user direction."). An empty session that gets auto-closed is useless to the next agent.
 
@@ -80,16 +87,92 @@ Sessions can be lost at any time (chat disconnects, crashes, timeouts). Since yo
 - Open items should be specific and actionable
 - Summaries should be useful to a future agent with no prior context
 
-## Available Tools
+## How to use this catalog
 
-| Tool | When to Use |
+- **MCP** tools run through your OpenRundown MCP server. Full JSON schemas and descriptions live in the tool picker; the tables below are a **map** of names and purpose.
+- **`npm` scripts** apply when you are working in the **openrundown source repository** and need to build, test, or sync data to Postgres without the MCP.
+
+## Local CLI (openrundown source repo only)
+
+| Command | Purpose |
+|---------|---------|
+| `npm run build` | `prisma generate` + `migrate deploy` + `tsc` |
+| `npm test` | Run Vitest unit tests |
+| `npm run sync:all` | Pull latest **GitHub issues** + **Discord** default channel into the DB (same as MCP `fetch_github_issues` + `fetch_discord_messages` when `DATABASE_URL` is set; incremental by default) |
+| `npm run sync:all -- --full` | Full re-fetch/upsert for both (heavy) |
+| `npm run sync:all -- --github-only` or `--discord-only` | One side only |
+| `npm run fetch-issues` / `fetch-issues-incremental` | JSON cache of issues (not the primary path when the DB is configured) |
+| `npm run fetch-discord` | JSON cache of messages (not the primary path when the DB is configured) |
+| `npm run briefing` | Local preview of `get_agent_briefing` output in the terminal |
+| `npm run dev` | Start dev entry; MCP server is usually started by Cursor, not this |
+| `npm run sync:skill` | After editing **this** skill in `skills/openrundown/`, copy it to `.cursor/skills/openrundown/SKILL.md` so both stay in sync |
+
+## Agent memory & project context (MCP)
+
+| Tool | When to use |
 |------|-------------|
-| `get_agent_briefing` | Start of every session |
-| `get_session_history` | Start of session, to see recent work |
-| `start_agent_session` | Beginning of meaningful work |
-| `update_agent_session` | Mid-session progress recording (include `plan_steps`!) |
-| `end_agent_session` | End of meaningful work |
-| `import_claude_plans` | Import plans from Claude Code's `~/.claude/plans/` |
-| `fetch_x_posts` | Fetch tweets by users, hashtags, or keywords |
-| `manage_x_watches` | Add/remove/list monitored X accounts and hashtags |
-| `search_x_posts` | Search stored tweets by content, author, engagement |
+| `get_agent_briefing` | **Every session start** – distilled context (issues, decisions, sessions, signals). Pass `project`. |
+| `get_session_history` | Recent sessions; default is compact. Use `verbose: true` only if you need full detail. |
+| `start_agent_session` | When beginning substantive work. |
+| `update_agent_session` | After each turn / meaningful step (per skill rules). |
+| `end_agent_session` | When the work block is done. |
+| `import_claude_plans` | Import plans from `~/.claude/plans/`. |
+| `save_memory` / `search_memory` / `get_recent_memories` / `delete_memory` | Ad-hoc memory not tied to a session. |
+
+## GitHub & Discord: fetch and search (MCP)
+
+| Tool | When to use |
+|------|-------------|
+| `fetch_github_issues` | Sync issues from GitHub into storage (DB or JSON, depending on env). Supports incremental. |
+| `check_github_issues_completeness` | Diagnostics on coverage vs API. |
+| `fetch_discord_messages` | Sync a channel to storage (DB preferred when configured). |
+| `search_github_issues` | Query stored issues. |
+| `read_messages` / `search_messages` / `list_channels` / `list_servers` | Read/search Discord in context of the running bot. |
+| `search_discord_and_github` | Unified search across both. |
+
+## Classification, grouping, embeddings (MCP)
+
+| Tool | When to use |
+|------|-------------|
+| `classify_discord_messages` | Classify threads; may also refresh GitHub context first. |
+| `check_discord_classification_completeness` | Gaps in classification. |
+| `group_github_issues` / `suggest_grouping` | Correlation / grouping of issues. |
+| `match_*` (`match_groups_to_features`, `match_ungrouped_issues_to_features`, `match_issues_to_features`, `match_database_groups_to_features`, `match_issues_to_threads`) | Map issues/groups/threads to features. |
+| `label_github_issues` | Suggest/apply labels from stored data. |
+| `compute_*_embeddings` (`compute_discord_embeddings`, `compute_github_issue_embeddings`, `compute_feature_embeddings`, `compute_group_embeddings`) | Backfill or refresh vector embeddings. |
+
+## End-to-end workflows: sync → export (MCP)
+
+| Tool | When to use |
+|------|-------------|
+| `sync_classify_and_export` | **Issue-centric pipeline**: sync GitHub + (expects Discord in DB) embeddings, group, and export. Needs DB + `OPENAI_API_KEY`. |
+| `export_to_pm_tool` | Export grouped work to the configured PM (e.g. Linear). |
+| `validate_pm_setup` / `list_linear_teams` | Check PM connection and teams. |
+| `validate_export_sync` / `export_stats` | Reconcile PM vs local DB, stats. |
+| `remove_linear_duplicates` | Cleanup in Linear. |
+
+## Linear and GitHub ↔ Linear (MCP)
+
+| Tool | When to use |
+|------|-------------|
+| `sync_combined` | PR-based + comment + Linear status in one go. |
+| `sync_pr_based_status` / `sync_linear_status` / `sync_engineer_comments` | Individual steps. |
+| `audit_and_fix_incorrectly_assigned` | Fix false-positive Linear states from old syncs. |
+| `classify_linear_issues` / `label_linear_issues` | Label/structure Linear issues. |
+
+## Code, docs, ownership, learning (MCP)
+
+| Tool | When to use |
+|------|-------------|
+| `index_codebase` / `index_code_for_features` | Code search index for the repo. |
+| `manage_documentation_cache` | PM/docs fetch cache. |
+| `analyze_code_ownership` / `view_feature_ownership` | Ownership and features. |
+| `seed_pr_learnings` / `learn_from_pr` / `investigate_issue` / `open_pr_with_fix` / `fix_github_issue` | Learning and automated fix flows. |
+
+## X (Twitter) (MCP)
+
+| Tool | When to use |
+|------|-------------|
+| `fetch_x_posts` | Ingest from X. |
+| `manage_x_watches` | Subscriptions. |
+| `search_x_posts` | Search ingested posts. |
