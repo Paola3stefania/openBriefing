@@ -112,13 +112,15 @@ Sessions can be lost at any time (chat disconnects, crashes, timeouts). Since yo
 
 | Tool | When to use |
 |------|-------------|
-| `get_agent_briefing` | **Every session start** – distilled context (issues, decisions, sessions, signals). Pass `project`. |
+| `get_agent_briefing` | **Every session start** – distilled context (issues, decisions, sessions, signals). Pass `project`. Also exposes `actionable[]` (top incomplete plan steps ranked by recency × scope match) and `relatedInsights[]` (memories semantically related to your current focus). |
 | `get_session_history` | Recent sessions; default is compact. Use `verbose: true` only if you need full detail. |
+| `get_session_delta` | Compact diff since a reference point (a session ID or ISO timestamp). Use when resuming after a break — returns only what's new (decisions, completed steps, external refs) at ~200-400 tokens vs `get_session_history`'s ~1k. Pass `project` and `since`. Optional `scope` filter. |
 | `start_agent_session` | When beginning substantive work. |
-| `update_agent_session` | After each turn / meaningful step (per skill rules). |
+| `update_agent_session` | After each turn / meaningful step (per skill rules). **Soft-end**: also works on already-ended sessions for 24h after `endedAt` (configurable via `OPENRUNDOWN_SESSION_AMEND_WINDOW_MS`), so a forgotten debrief can land on the right session instead of in `save_memory`. |
 | `end_agent_session` | When the work block is done. |
+| `link_external_event` | Bind a typed pointer to an artifact on another surface (Slack thread, Notion page, GitHub PR, Linear issue, file, Discord thread) to the active session — instead of stuffing `"Dan ratified X in Slack <url>"` into open_items as a string. The reference is structured (channel/ts/repo/number/...) and the next agent can navigate it. Resolves the active session as the most-recent amendable session for `project`, or pass `session_id` explicitly. |
 | `import_claude_plans` | Import plans from `~/.claude/plans/`. |
-| `save_memory` / `search_memory` / `get_recent_memories` / `delete_memory` | Ad-hoc memory not tied to a session. |
+| `save_memory` / `search_memory` / `get_recent_memories` / `delete_memory` | Ad-hoc memory not tied to a session. **Always pass `project`** — `project` is the primary param, `project_id` is a deprecated alias. |
 
 ## GitHub & Discord: fetch and search (MCP)
 

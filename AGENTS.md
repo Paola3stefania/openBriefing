@@ -183,6 +183,18 @@ After data is stored, the existing **classification, grouping, and embedding** t
 ### `get_agent_briefing` and live APIs
 
 - **`get_agent_briefing` distills from what is already stored** (and session records). It is **not** designed to re-fetch the full GitHub and Discord APIs on every call. Keep data fresh with **periodic** `fetch_*` / `sync:all` / your automation.
+- The briefing also exposes two derived fields for handoffs:
+  - **`actionable[]`** — top incomplete plan steps from recent sessions, ranked by status × recency × scope match. The next agent's "what should I pick up first?" queue.
+  - **`relatedInsights[]`** — memories semantically related to the current focus (scope + plan steps + open items). Reuses `MemoryEntry`/`MemoryEntryEmbedding`, so anything saved with `save_memory` automatically becomes briefing-visible without an extra retrieval call. Requires `OPENAI_API_KEY` for the focus-query embedding; falls back to `[]` silently otherwise.
+
+### Soft-end on `update_agent_session`
+
+- `update_agent_session` accepts ended sessions for `OPENRUNDOWN_SESSION_AMEND_WINDOW_MS` (default 24h) after `endedAt`. This means a forgotten debrief can land on the right session record instead of fragmenting into `save_memory`. After the window expires, the tool returns a clear error pointing at the env var.
+
+### `get_session_delta` and `link_external_event`
+
+- **`get_session_delta(since, scope?, project)`** — compact diff since a reference point (a session ID or ISO timestamp). Returns only what's new (decisions, completed plan steps, new external refs) at ~200-400 tokens vs `get_session_history`'s ~1k. Use when resuming a project after a break.
+- **`link_external_event({source, url, text, kind?, ...})`** — bind a typed pointer to an artifact on another surface (Slack thread, Notion page, GitHub PR/issue, Linear issue, file, Discord thread) to the active session. Replaces "stuff a URL into open_items as a string" with structured `ExternalRef` objects the next agent can navigate. By default attaches to the most-recent amendable session for `project`; pass `session_id` to override.
 
 ### Classifications and embeddings (for LLMs, but stored in *your* DB)
 
