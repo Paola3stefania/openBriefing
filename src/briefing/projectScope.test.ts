@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   __resetProjectScopeCacheForTests,
+  getProjectChatWorkspaceIds,
   getProjectDiscordGuilds,
 } from "./projectScope.js";
 
 const ENV_KEY = "PROJECT_DISCORD_GUILDS";
+const ENV_KEY_CHAT = "PROJECT_CHAT_WORKSPACES";
 
 describe("getProjectDiscordGuilds", () => {
   let original: string | undefined;
@@ -79,5 +81,89 @@ describe("getProjectDiscordGuilds", () => {
     __resetProjectScopeCacheForTests();
 
     expect(getProjectDiscordGuilds("owner/repo")).toEqual([]);
+  });
+});
+
+describe("getProjectChatWorkspaceIds", () => {
+  let originalDiscord: string | undefined;
+  let originalChat: string | undefined;
+
+  beforeEach(() => {
+    originalDiscord = process.env[ENV_KEY];
+    originalChat = process.env[ENV_KEY_CHAT];
+    delete process.env[ENV_KEY];
+    delete process.env[ENV_KEY_CHAT];
+    __resetProjectScopeCacheForTests();
+  });
+
+  afterEach(() => {
+    if (originalDiscord === undefined) delete process.env[ENV_KEY];
+    else process.env[ENV_KEY] = originalDiscord;
+    if (originalChat === undefined) delete process.env[ENV_KEY_CHAT];
+    else process.env[ENV_KEY_CHAT] = originalChat;
+    __resetProjectScopeCacheForTests();
+  });
+
+  it("returns undefined when neither env var is set (back-compat)", () => {
+    expect(getProjectChatWorkspaceIds("owner/repo")).toBeUndefined();
+  });
+
+  it("falls back to PROJECT_DISCORD_GUILDS for legacy deployments", () => {
+    process.env[ENV_KEY] = JSON.stringify({
+      "owner/repo": ["1288403910284935179"],
+    });
+    __resetProjectScopeCacheForTests();
+
+    expect(getProjectChatWorkspaceIds("owner/repo")).toEqual([
+      "1288403910284935179",
+    ]);
+  });
+
+  it("returns workspaces from PROJECT_CHAT_WORKSPACES across sources", () => {
+    process.env[ENV_KEY_CHAT] = JSON.stringify({
+      "owner/repo": ["slack:T01ABC", "teams:tenant-x"],
+    });
+    __resetProjectScopeCacheForTests();
+
+    expect(getProjectChatWorkspaceIds("owner/repo")).toEqual([
+      "slack:T01ABC",
+      "teams:tenant-x",
+    ]);
+  });
+
+  it("merges legacy Discord guilds with new chat workspaces", () => {
+    process.env[ENV_KEY] = JSON.stringify({
+      "owner/repo": ["1288403910284935179"],
+    });
+    process.env[ENV_KEY_CHAT] = JSON.stringify({
+      "owner/repo": ["slack:T01ABC"],
+    });
+    __resetProjectScopeCacheForTests();
+
+    expect(getProjectChatWorkspaceIds("owner/repo")?.sort()).toEqual([
+      "1288403910284935179",
+      "slack:T01ABC",
+    ]);
+  });
+
+  it("dedupes IDs that appear in both maps", () => {
+    process.env[ENV_KEY] = JSON.stringify({
+      "owner/repo": ["dup-id"],
+    });
+    process.env[ENV_KEY_CHAT] = JSON.stringify({
+      "owner/repo": ["dup-id"],
+    });
+    __resetProjectScopeCacheForTests();
+
+    expect(getProjectChatWorkspaceIds("owner/repo")).toEqual(["dup-id"]);
+  });
+
+  it("returns empty array (suppress) when project is unmapped in either configured map", () => {
+    process.env[ENV_KEY_CHAT] = JSON.stringify({
+      "other/repo": ["slack:T01ABC"],
+    });
+    __resetProjectScopeCacheForTests();
+
+    expect(getProjectChatWorkspaceIds("owner/repo")).toEqual([]);
   });
 });

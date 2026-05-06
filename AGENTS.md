@@ -106,6 +106,99 @@ Your Cursor config may name the server `user-openrundown`, `openrundown`, or ano
                     start/update/end_agent_session
 ```
 
+## Data flow: what hits the database vs the network
+
+Use this to reason about **“do we re-fetch every time?”** and **“where do embeddings and classification sit?”**
+
+### When `DATABASE_URL` is set (Postgres + Prisma)
+
+- **GitHub** — Issues (and related fields) are **stored in the DB** (`fetch_github_issues` or `npm run sync:all` with `--github-only`). Later runs are typically **incremental** (new or updated work since the last window), not a full re-download of the entire list every time unless you ask for a full resync.
+- **Discord** — Channel messages and channels are **stored in the DB** (`fetch_discord_messages` or `npm run sync:all`). After a first backfill, runs are **incremental** (new/updated messages), not a full history fetch on every run by default.
+- **X (Twitter)** — Watches/ingest flows store data for **search and briefing-related signals**; you are not expected to re-hit the live X API for every `get_agent_briefing` if the data is already ingested.
+- **Agent sessions and optional PM (e.g. Linear) sync** — **Persisted**; briefing and history tools read from the DB.
+- **Other chat sources (Slack, Teams, Telegram, Matrix, Mattermost, ...)** — There is no native fetcher for these in this repo, but the `Channel` + `DiscordMessage` Postgres models are intentionally **generic** (channel id, workspace/team id, author, text, time). Any external MCP can hand off normalized messages via the **`ingest_chat_messages`** tool (see below); the rows then flow through the same classification / grouping / embedding / briefing pipelines as Discord ingest.
+
+### Any external chat MCP via `ingest_chat_messages` (generic)
+
+`ingest_chat_messages` is an MCP tool that accepts a batch of normalized messages from **any** source. The agent (or a custom MCP) is responsible for mapping the source's payload into OpenRundown's normalized shape; OpenRundown handles persistence, ID prefixing, and briefing scoping.
+
+**Input shape (per call):**
+
+```json
+{
+  "source": "slack",                   // free-form: "slack" | "teams" | "telegram" | ...
+  "workspace_id": "T01ABC",            // Slack team id, Teams tenant id, etc.
+  "workspace_name": "Acme",            // optional
+  "channel_id": "C123",                // native channel id at the source
+  "channel_name": "general",           // optional
+  "messages": [
+    {
+      "id": "msg-1",
+      "author_id": "U1",
+      "author_name": "alice",
+      "content": "hello",
+      "created_at": "2026-04-27T12:00:00Z",
+      "thread_id": "msg-0",            // optional; native parent message id
+      "reply_to": "msg-0",             // optional
+      "attachments": [{ "id": "f1", "filename": "x.png", "url": "https://...", "size": 42 }],
+      "reactions":   [{ "emoji": "+1", "count": 2 }],
+      "mentions": ["U2"],
+      "url": "https://..."
+    }
+  ]
+}
+```
+
+**ID prefixing (automatic).** OpenRundown writes:
+
+| DB column | Stored value |
+|---|---|
+| `Channel.guildId` | `<source>:<workspace_id>` (e.g. `slack:T01ABC`) |
+| `Channel.id`      | `<source>:<workspace_id>:<channel_id>` |
+| `DiscordMessage.id`, `threadId`, `messageReference.message_id` | `<source>:<workspace_id>:<channel_id>:<id>` |
+
+This keeps every external source isolated from Discord's bare snowflakes (and from each other) inside a shared database.
+
+**Briefing scoping (per project).** Add the returned `workspaceKey` to **`PROJECT_CHAT_WORKSPACES`** so briefings for that project pick up the new source:
+
+```bash
+PROJECT_CHAT_WORKSPACES='{"better-auth/better-auth":["slack:T01ABC","teams:tenant-x"]}'
+```
+
+`PROJECT_DISCORD_GUILDS` continues to work for Discord (bare guild ids). The two maps are **merged**: `getProjectChatWorkspaceIds()` returns the union, and the briefing filters all chat-derived signals against it.
+
+**Concept mapping (any source → schema):**
+
+| Concept | DB field | Notes |
+|---|---|---|
+| Source | (encoded into IDs) | `<source>:` prefix; no schema change. |
+| Workspace / team / tenant | `Channel.guildId` | `<source>:<workspace_id>`; matches `PROJECT_CHAT_WORKSPACES`. |
+| Room / channel / DM | `Channel.id` | `<source>:<workspace_id>:<channel_id>`. |
+| User | `authorId` | Native user id at the source. |
+| Text & time | `content`, `createdAt` | ISO 8601 timestamps. |
+| Threading | `threadId`, `messageReference` | Replies and threads keep source-scoped IDs. |
+
+After data is stored, the existing **classification, grouping, and embedding** tools work unchanged because they key off `channelId` / thread ids that the ingest path already prefixed.
+
+### `get_agent_briefing` and live APIs
+
+- **`get_agent_briefing` distills from what is already stored** (and session records). It is **not** designed to re-fetch the full GitHub and Discord APIs on every call. Keep data fresh with **periodic** `fetch_*` / `sync:all` / your automation.
+
+### Classifications and embeddings (for LLMs, but stored in *your* DB)
+
+- **Classification** (e.g. `classify_discord_messages`) is a **separate step** from “fetch.” It reads stored messages, runs the classification pipeline, and **writes** structured results back. Run it when you need new threads classified, or use a chained workflow like `sync_classify_and_export` where the pipeline does multiple steps in order.
+- **Embeddings** are **vector representations** (typically via **`OPENAI_API_KEY`**) used for **similarity** (grouping issues, matching threads, etc.). They live in **Postgres** (embedding tables / columns) via tools like `compute_*_embeddings` or inside larger workflows. This is not a second proprietary “LLM database” product — it is **your** database plus embedding fields used by those features.
+
+### One shared database, many `project` IDs (e.g. better-auth repos)
+
+- If many projects share one DB, set **`PROJECT_CHAT_WORKSPACES`** (preferred, source-agnostic) and/or **`PROJECT_DISCORD_GUILDS`** (legacy, Discord-only) — see `env.example`. The two maps are merged, so chat-derived briefing signals **only** include workspaces/guilds mapped to the current `project` ID across every chat source. The `project` string must stay consistent (usually `owner/repo` from `git`).
+
+### `classify_discord_messages` is slow / hanging?
+
+- Every stage now emits `[stage] <name> → start ... ← ok in Nms` (or `✕ TIMEOUT after Nms`) on stderr. Read those logs to see which step is slow: typical culprits are `classify:github-sync` (rate limits / huge comment fetches), `classify:issue-embeddings` and `classify:thread-embeddings` (OpenAI), or `classify:discord-channel-fetch` (hangs forever if the Discord client never logged in).
+- Pass **`skip_github_sync: true, skip_embeddings: true`** to bypass the heavy prep work entirely and classify against whatever's already in the DB — this is what makes `limit: 1` actually fast.
+- Per-stage and overall timeouts are env-tunable (`OPENRUNDOWN_CLASSIFY_TIMEOUT_MS`, `OPENRUNDOWN_GITHUB_SYNC_TIMEOUT_MS`, ...). The full list is in `env.example`.
+
 ## Lost?
 
 1. `project` set correctly?  
