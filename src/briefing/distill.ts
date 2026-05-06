@@ -14,6 +14,7 @@ import { getRecentSessions } from "./sessions.js";
 import { getProjectChatWorkspaceIds } from "./projectScope.js";
 import type {
   ProjectContext,
+  ActionableItem,
   ActiveIssue,
   AgentSession,
   UserSignal,
@@ -21,7 +22,9 @@ import type {
   CodebaseNote,
   Decision,
   RecentActivity,
+  RelatedInsight,
   BriefingOptions,
+  PlanStep,
 } from "./types.js";
 
 const DEFAULT_LOOKBACK_DAYS = 14;
@@ -30,6 +33,9 @@ const MAX_USER_SIGNALS = 5;
 const MAX_CODEBASE_NOTES = 5;
 const MAX_DECISIONS = 5;
 const MAX_TECH_SIGNALS = 5;
+const MAX_ACTIONABLE = 5;
+const MAX_RELATED_INSIGHTS = 5;
+const RELATED_INSIGHT_MIN_SIMILARITY = 0.3;
 const SESSION_HISTORY_LIMIT = 15;
 
 export async function distillBriefing(options: BriefingOptions = {}): Promise<ProjectContext> {
@@ -84,6 +90,13 @@ export async function distillBriefingWithSessions(
   ]);
 
   const sessionDerived = distillFromSessions(sessions, scope);
+  const actionable = extractActionableItems(sessions, scope);
+  const relatedInsights = await distillRelatedInsights({
+    projectId,
+    scope,
+    sessions,
+    actionable,
+  });
 
   const briefing: ProjectContext = {
     project: projectId,
@@ -96,6 +109,8 @@ export async function distillBriefingWithSessions(
     codebaseNotes: mergeCodebaseNotes(codebaseNotes, sessionDerived.codebaseNotes),
     recentActivity,
     preferences,
+    actionable,
+    relatedInsights,
   };
 
   return { briefing, sessions };
@@ -544,6 +559,120 @@ function getReactionCount(reactions: unknown): number {
 }
 
 /**
+ * Build a focus query string from the agent's current context — scope,
+ * incomplete plan steps, and open items from recent sessions. Used as the
+ * input to the embedding-based memory ranker so `relatedInsights` reflects
+ * what the agent is actually about to work on, not just project-global
+ * memories.
+ *
+ * Exported for testability.
+ */
+export function buildFocusQuery(input: {
+  scope?: string;
+  actionable?: ActionableItem[];
+  sessions?: AgentSession[];
+}): string {
+  const parts: string[] = [];
+  if (input.scope) parts.push(input.scope);
+  if (input.actionable) {
+    for (const item of input.actionable.slice(0, 5)) {
+      parts.push(item.description);
+      if (item.notes) parts.push(item.notes);
+    }
+  }
+  if (input.sessions) {
+    for (const session of input.sessions.slice(0, 3)) {
+      for (const item of session.openItems.slice(0, 3)) parts.push(item);
+      if (session.summary) parts.push(session.summary);
+    }
+  }
+  return parts.filter((p) => p && p.trim().length > 0).join("\n").trim();
+}
+
+/**
+ * Surface memories that are semantically related to the agent's current
+ * focus. Reuses the `MemoryEntry` + `MemoryEntryEmbedding` tables so
+ * `save_memory` writes (or future automated ingestion) feed straight into
+ * the briefing's `relatedInsights` field — no extra retrieval round-trip
+ * required by the agent.
+ *
+ * Behavior:
+ *   - Only ever queries memories scoped to `projectId` (no cross-project leak).
+ *   - Best-effort: if `OPENAI_API_KEY` is missing or embedding generation
+ *     fails, returns `[]` rather than failing the whole briefing.
+ *   - If the focus query is empty (no scope, no plan steps, no open items),
+ *     skips entirely — random "recent memories" would be noise here, not
+ *     signal. Use `get_recent_memories` for that view.
+ *   - Filters by `RELATED_INSIGHT_MIN_SIMILARITY` to avoid surfacing
+ *     barely-related memories as if they were relevant.
+ */
+async function distillRelatedInsights(input: {
+  projectId: string;
+  scope?: string;
+  sessions: AgentSession[];
+  actionable: ActionableItem[];
+}): Promise<RelatedInsight[]> {
+  const focusQuery = buildFocusQuery({
+    scope: input.scope,
+    actionable: input.actionable,
+    sessions: input.sessions,
+  });
+  if (focusQuery.length === 0) return [];
+
+  const apiKey = process.env.OPENAI_API_KEY ?? null;
+  if (!apiKey) return [];
+
+  let queryEmbedding: number[];
+  try {
+    const { createEmbedding } = await import("../core/classify/semantic.js");
+    queryEmbedding = await createEmbedding(focusQuery, apiKey);
+  } catch (err) {
+    console.error("[Briefing] relatedInsights: failed to embed focus query", err);
+    return [];
+  }
+
+  const entries = await prisma.memoryEntry.findMany({
+    where: { projectId: input.projectId },
+    include: { embedding: true },
+    orderBy: { createdAt: "desc" },
+    take: 200,
+  });
+
+  const ranked: RelatedInsight[] = [];
+  for (const entry of entries) {
+    if (!entry.embedding) continue;
+    const vec = entry.embedding.embedding as number[];
+    if (!Array.isArray(vec) || vec.length !== queryEmbedding.length) continue;
+    const similarity = cosineSimilarity(queryEmbedding, vec);
+    if (similarity < RELATED_INSIGHT_MIN_SIMILARITY) continue;
+    ranked.push({
+      memoryId: entry.id,
+      summary: entry.summary,
+      tags: entry.tags,
+      createdAt: entry.createdAt.toISOString(),
+      similarity: Number(similarity.toFixed(3)),
+    });
+  }
+
+  return ranked
+    .sort((a, b) => b.similarity - a.similarity)
+    .slice(0, MAX_RELATED_INSIGHTS);
+}
+
+function cosineSimilarity(a: number[], b: number[]): number {
+  let dot = 0;
+  let normA = 0;
+  let normB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+  if (normA === 0 || normB === 0) return 0;
+  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+}
+
+/**
  * Approximate token savings between raw session payloads and the produced
  * briefing. Uses the rough `chars / 4` heuristic — not a tokenizer-accurate
  * count, but good enough for an order-of-magnitude indicator and avoids
@@ -622,6 +751,93 @@ export function estimateTokenSavings(
  * If no sessions match scope, fall back to all recent sessions so the agent
  * still sees something useful.
  */
+/**
+ * Lift incomplete plan steps from recent sessions into a ranked, actionable
+ * queue surfaced on the briefing. The next agent's "what should I pick up
+ * first?" answer.
+ *
+ * Ranking: each step gets a score in [0, 1] based on:
+ *   - status weight (in_progress > blocked > pending)
+ *   - recency (newer sessions matter more — exponential decay over ~30 days)
+ *   - scope match (if a `scope` is passed, sessions/steps that mention it
+ *     get a boost; otherwise this factor is constant)
+ *
+ * Already-completed steps are dropped. Steps with the same description across
+ * sessions are deduplicated (latest occurrence wins).
+ */
+export function extractActionableItems(
+  sessions: AgentSession[],
+  scope?: string,
+  now: Date = new Date(),
+): ActionableItem[] {
+  if (sessions.length === 0) return [];
+
+  const RECENCY_HALF_LIFE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+  const STATUS_WEIGHTS: Record<PlanStep["status"], number> = {
+    in_progress: 1.0,
+    blocked: 0.9,
+    pending: 0.7,
+    completed: 0,
+  };
+
+  const scopeLower = scope?.toLowerCase();
+  const candidates = new Map<string, ActionableItem>();
+
+  for (const session of sessions) {
+    const steps = session.planSteps ?? [];
+    if (steps.length === 0) continue;
+
+    const startedMs = Date.parse(session.startedAt);
+    const ageMs = Number.isFinite(startedMs)
+      ? Math.max(0, now.getTime() - startedMs)
+      : RECENCY_HALF_LIFE_MS;
+    const recency = Math.exp(-ageMs / RECENCY_HALF_LIFE_MS);
+
+    const sessionHaystack = [
+      ...session.scope,
+      ...session.decisionsMade,
+      ...session.openItems,
+      ...steps.map((s) => s.description),
+    ]
+      .join("\n")
+      .toLowerCase();
+
+    for (const step of steps) {
+      if (step.status === "completed") continue;
+      const desc = step.description.trim();
+      if (desc.length === 0) continue;
+
+      const statusWeight = STATUS_WEIGHTS[step.status] ?? 0.5;
+      const scopeMatch = scopeLower
+        ? sessionHaystack.includes(scopeLower) ||
+          desc.toLowerCase().includes(scopeLower)
+          ? 1
+          : 0.6
+        : 1;
+      const score = Math.min(1, statusWeight * recency * scopeMatch);
+
+      const key = `${desc.toLowerCase()}::${step.status}`;
+      const existing = candidates.get(key);
+      if (!existing || score > existing.score) {
+        candidates.set(key, {
+          id: step.id,
+          description: desc,
+          status: step.status as ActionableItem["status"],
+          notes: step.notes?.trim() || undefined,
+          sessionId: session.sessionId,
+          sessionStartedAt: session.startedAt,
+          sessionScope: session.scope,
+          score: Number(score.toFixed(3)),
+        });
+      }
+    }
+  }
+
+  return [...candidates.values()]
+    .sort((a, b) => b.score - a.score)
+    .slice(0, MAX_ACTIONABLE);
+}
+
 export function distillFromSessions(
   sessions: AgentSession[],
   scope?: string,

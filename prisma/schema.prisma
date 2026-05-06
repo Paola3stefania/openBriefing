@@ -769,6 +769,11 @@ model AgentSession {
   issuesReferenced  String[] @default([]) @map("issues_referenced")
   toolsUsed         String[] @default([]) @map("tools_used")
   planSteps         Json?    @map("plan_steps") @db.JsonB
+  // Typed pointers to artifacts on other surfaces (slack threads, notion pages,
+  // github PRs, files, ...). Populated by `link_external_event`. See
+  // `ExternalRef` in src/briefing/types.ts for the shape. Default `[]` so old
+  // rows read as an empty list without a backfill migration.
+  externalRefs      Json     @default("[]") @map("external_refs") @db.JsonB
   summary           String?  @db.Text
   createdAt         DateTime @default(now()) @map("created_at")
   updatedAt         DateTime @updatedAt @map("updated_at")

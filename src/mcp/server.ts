@@ -76,6 +76,67 @@ discord.once("clientReady", () => {
 });
 
 /**
+ * Construct a typed `ExternalRef` from the loose `link_external_event` tool
+ * args. Branching on `source` so the stored ref is the strict tagged-union
+ * shape (slack_thread / notion_page / github_pr / ...) rather than a generic
+ * bag of optional fields.
+ *
+ * Heuristic fallbacks:
+ *   - github source with a URL like `.../pull/N` → `github_pr`, otherwise
+ *     `github_issue` (matches GitHub URL conventions).
+ *   - file source: keeps `path` and optional `sha`.
+ *   - other / unknown sources fall through to `kind: "other"`.
+ */
+function buildExternalRef(input: {
+  source: string;
+  url: string;
+  text: string;
+  role: "decision" | "open_item" | "reference";
+  channel?: string;
+  ts?: string;
+  pageId?: string;
+  repo?: string;
+  number?: number;
+  identifier?: string;
+  path?: string;
+  sha?: string;
+  guildId?: string;
+  threadId?: string;
+}): import("../briefing/types.js").ExternalRef {
+  const addedAt = new Date().toISOString();
+  const base = { text: input.text, url: input.url, role: input.role, addedAt } as const;
+  switch (input.source) {
+    case "slack":
+      return { kind: "slack_thread", ...base, channel: input.channel, ts: input.ts };
+    case "notion":
+      return { kind: "notion_page", ...base, pageId: input.pageId };
+    case "github": {
+      const isPr = /\/pull\//i.test(input.url);
+      return {
+        kind: isPr ? "github_pr" : "github_issue",
+        ...base,
+        repo: input.repo,
+        number: input.number,
+      };
+    }
+    case "linear":
+      return { kind: "linear_issue", ...base, identifier: input.identifier };
+    case "file":
+      return { kind: "file", ...base, path: input.path, sha: input.sha };
+    case "discord":
+      return {
+        kind: "discord_thread",
+        ...base,
+        guildId: input.guildId,
+        channelId: input.channel,
+        threadId: input.threadId,
+      };
+    default:
+      return { kind: "other", ...base };
+  }
+}
+
+/**
  * Resolve the project identifier from a tool args bag.
  *
  * Memory tools (and a few others) historically shipped with `project_id`,
@@ -1551,6 +1612,104 @@ const tools: Tool[] = [
     },
   },
   {
+    name: "get_session_delta",
+    description: "Compact diff of project state since a reference point — returns only what's NEW (decisions/open_items/completed steps/external refs) since `since`, not the full recent-sessions view. Use when resuming a project after a break instead of pulling get_session_history. Cheaper in tokens; returns ~200-400 tokens vs get_session_history's ~1k.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        since: {
+          type: "string",
+          description: "Reference point. Accepts: a session ID (delta runs from that session's startedAt), an ISO 8601 timestamp, or any value parseable by Date(). If unparseable, falls back to 30 days ago so the tool always returns something useful.",
+        },
+        scope: {
+          type: "string",
+          description: "Optional scope substring (case-insensitive) to filter the delta. Sessions whose scope/decisions/open_items don't mention it are excluded.",
+        },
+        project: {
+          type: "string",
+          description: "Project identifier — use 'owner/repo' from the workspace git remote origin, or the workspace folder name if no remote. The MCP server cannot detect your workspace, so always pass this.",
+        },
+      },
+      required: ["since"],
+    },
+  },
+  {
+    name: "link_external_event",
+    description: "Bind a typed pointer to an artifact on another surface (Slack thread, Notion page, GitHub PR/issue, Linear issue, file, Discord thread, ...) to the active session. Use this instead of stuffing 'Dan ratified X in Slack <url>' into open_items as a string — produces a navigable, structured reference the next agent can follow. Resolves the active session as the most-recent amendable session for the project (running, OR ended within OPENRUNDOWN_SESSION_AMEND_WINDOW_MS — default 24h). Pass session_id to override.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        source: {
+          type: "string",
+          enum: ["slack", "notion", "github", "linear", "file", "discord", "other"],
+          description: "What surface this artifact lives on. Drives the structured fields populated on the stored ref (slack_thread → channel/ts, github → repo/number, etc.).",
+        },
+        url: {
+          type: "string",
+          description: "Canonical URL for the artifact. Used as the dedupe key — re-linking the same URL replaces the previous ref so labels/role can be updated.",
+        },
+        text: {
+          type: "string",
+          description: "Human-readable label. Renders in the session view without dereferencing the URL (e.g., 'Dan ratified orchestrator service_mode').",
+        },
+        kind: {
+          type: "string",
+          enum: ["decision", "open_item", "reference"],
+          description: "What this reference represents in the session — 'decision' (a binding decision was recorded elsewhere), 'open_item' (a follow-up to track), or 'reference' (supporting context). Defaults to 'reference'.",
+        },
+        channel: {
+          type: "string",
+          description: "Slack: channel ID (e.g., 'C0AGL9PDTAS'). Discord: channel ID. Ignored for other sources.",
+        },
+        ts: {
+          type: "string",
+          description: "Slack thread timestamp (e.g., '1778030426.278609'). Ignored for non-slack sources.",
+        },
+        page_id: {
+          type: "string",
+          description: "Notion page ID. Ignored for non-notion sources.",
+        },
+        repo: {
+          type: "string",
+          description: "GitHub: 'owner/repo'. Ignored for non-github sources.",
+        },
+        number: {
+          type: "number",
+          description: "GitHub PR or issue number. Ignored for non-github sources.",
+        },
+        identifier: {
+          type: "string",
+          description: "Linear issue identifier (e.g., 'ENG-1234'). Ignored for non-linear sources.",
+        },
+        path: {
+          type: "string",
+          description: "File: workspace-relative path. Ignored for non-file sources.",
+        },
+        sha: {
+          type: "string",
+          description: "File: optional git sha for stability across refactors. Ignored for non-file sources.",
+        },
+        guild_id: {
+          type: "string",
+          description: "Discord: guild ID. Ignored for non-discord sources.",
+        },
+        thread_id: {
+          type: "string",
+          description: "Discord: thread ID. Ignored for non-discord sources.",
+        },
+        session_id: {
+          type: "string",
+          description: "Optional explicit session to attach to. If omitted, picks the most-recent amendable session for `project`.",
+        },
+        project: {
+          type: "string",
+          description: "Project identifier — use 'owner/repo' from the workspace git remote origin, or the workspace folder name if no remote. Used to resolve the active session when `session_id` is not passed.",
+        },
+      },
+      required: ["source", "url", "text"],
+    },
+  },
+  {
     name: "import_claude_plans",
     description: "Import plans from Claude Code's ~/.claude/plans/ directory. Claude Code stores detailed implementation plans as markdown files. This tool reads them, extracts structured steps, and attaches them to the current session. Use this when starting a session if the user has been working with Claude Code.",
     inputSchema: {
@@ -1877,6 +2036,8 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
     "end_agent_session",
     "update_agent_session",
     "get_session_history",
+    "get_session_delta",
+    "link_external_event",
     "import_claude_plans",
     "investigate_issue",
     "fix_github_issue",
@@ -12561,31 +12722,39 @@ Example output:
           throw new Error("Database is required for session tracking. Please configure DATABASE_URL.");
         }
 
-        const { updateSession } = await import("../briefing/sessions.js");
+        const { updateSession, SessionAmendmentExpiredError } = await import(
+          "../briefing/sessions.js"
+        );
         const sessionId = args?.session_id as string;
         if (!sessionId) throw new Error("session_id is required");
 
         console.error(`[Session] Updating session: ${sessionId}...`);
-        const session = await updateSession(sessionId, {
-          scope: args?.scope as string[] | undefined,
-          filesEdited: args?.files_edited as string[] | undefined,
-          decisionsMade: args?.decisions_made as string[] | undefined,
-          openItems: args?.open_items as string[] | undefined,
-          issuesReferenced: args?.issues_referenced as string[] | undefined,
-          toolsUsed: args?.tools_used as string[] | undefined,
-          planSteps: args?.plan_steps as import("../briefing/types.js").PlanStep[] | undefined,
-          summary: args?.summary as string | undefined,
-        });
-        console.error(`[Session] Updated session: ${sessionId}`);
-
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(session, null, 2),
-            },
-          ],
-        };
+        try {
+          const session = await updateSession(sessionId, {
+            scope: args?.scope as string[] | undefined,
+            filesEdited: args?.files_edited as string[] | undefined,
+            decisionsMade: args?.decisions_made as string[] | undefined,
+            openItems: args?.open_items as string[] | undefined,
+            issuesReferenced: args?.issues_referenced as string[] | undefined,
+            toolsUsed: args?.tools_used as string[] | undefined,
+            planSteps: args?.plan_steps as import("../briefing/types.js").PlanStep[] | undefined,
+            summary: args?.summary as string | undefined,
+          });
+          console.error(`[Session] Updated session: ${sessionId}`);
+          return {
+            content: [{ type: "text", text: JSON.stringify(session, null, 2) }],
+          };
+        } catch (err) {
+          // Soft-end: if the amendment window has expired, surface a clear
+          // message naming the env var so the operator knows how to extend
+          // it (or to start a new session).
+          if (err instanceof SessionAmendmentExpiredError) {
+            throw new Error(
+              `${err.message} (Adjust OPENRUNDOWN_SESSION_AMEND_WINDOW_MS to change the window.)`,
+            );
+          }
+          throw err;
+        }
       } catch (error) {
         logError("update_agent_session failed:", error);
         throw new Error(`update_agent_session failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -12653,6 +12822,121 @@ Example output:
       } catch (error) {
         logError("get_session_history failed:", error);
         throw new Error(`get_session_history failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    case "get_session_delta": {
+      try {
+        const { hasDatabaseConfig } = await import("../storage/factory.js");
+        if (!hasDatabaseConfig()) {
+          throw new Error("Database is required for session delta. Please configure DATABASE_URL.");
+        }
+
+        const since = args?.since;
+        if (typeof since !== "string" || since.trim().length === 0) {
+          throw new Error("`since` is required (sessionId, ISO timestamp, or any Date-parseable string).");
+        }
+
+        const { getSessionDelta } = await import("../briefing/sessions.js");
+        const project = resolveProjectArg(args) ?? detectProjectId();
+        const scope = typeof args?.scope === "string" ? args.scope : undefined;
+
+        console.error(`[Session] Computing delta for project "${project}" since "${since}"...`);
+        const delta = await getSessionDelta({
+          projectId: project,
+          since,
+          scope,
+        });
+        console.error(
+          `[Session] Delta: ${delta.changedSessions} session(s), ${delta.newDecisions.length} decisions, ` +
+            `${delta.completedPlanSteps.length} completed steps, ${delta.newExternalRefs.length} refs`,
+        );
+
+        return {
+          content: [{ type: "text", text: JSON.stringify(delta, null, 2) }],
+        };
+      } catch (error) {
+        logError("get_session_delta failed:", error);
+        throw new Error(`get_session_delta failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    case "link_external_event": {
+      try {
+        const { hasDatabaseConfig } = await import("../storage/factory.js");
+        if (!hasDatabaseConfig()) {
+          throw new Error("Database is required for session tracking. Please configure DATABASE_URL.");
+        }
+
+        const source = args?.source as string | undefined;
+        const url = args?.url as string | undefined;
+        const text = args?.text as string | undefined;
+        if (!source || !url || !text) {
+          throw new Error("`source`, `url`, and `text` are required for link_external_event.");
+        }
+
+        const { appendExternalRef, findActiveSessionForProject } = await import(
+          "../briefing/sessions.js"
+        );
+
+        const explicitSessionId = args?.session_id as string | undefined;
+        let targetSessionId = explicitSessionId;
+        if (!targetSessionId) {
+          const project = resolveProjectArg(args) ?? detectProjectId();
+          const active = await findActiveSessionForProject(project);
+          if (!active) {
+            throw new Error(
+              `No active or recently-amendable session for project "${project}". ` +
+                `Call start_agent_session first, or pass session_id explicitly.`,
+            );
+          }
+          targetSessionId = active.sessionId;
+        }
+
+        const role = (args?.kind as string | undefined) ?? "reference";
+        if (!["decision", "open_item", "reference"].includes(role)) {
+          throw new Error(`Invalid kind: ${role}. Expected one of decision|open_item|reference.`);
+        }
+
+        const ref = buildExternalRef({
+          source,
+          url,
+          text,
+          role: role as "decision" | "open_item" | "reference",
+          channel: args?.channel as string | undefined,
+          ts: args?.ts as string | undefined,
+          pageId: args?.page_id as string | undefined,
+          repo: args?.repo as string | undefined,
+          number: typeof args?.number === "number" ? args.number : undefined,
+          identifier: args?.identifier as string | undefined,
+          path: args?.path as string | undefined,
+          sha: args?.sha as string | undefined,
+          guildId: args?.guild_id as string | undefined,
+          threadId: args?.thread_id as string | undefined,
+        });
+
+        console.error(
+          `[Session] Linking ${ref.kind} ref to session ${targetSessionId}: ${ref.text}`,
+        );
+        const session = await appendExternalRef(targetSessionId, ref);
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  sessionId: session.sessionId,
+                  externalRefs: session.externalRefs ?? [],
+                },
+                null,
+                2,
+              ),
+            },
+          ],
+        };
+      } catch (error) {
+        logError("link_external_event failed:", error);
+        throw new Error(`link_external_event failed: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
 

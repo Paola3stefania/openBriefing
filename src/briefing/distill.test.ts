@@ -11,8 +11,10 @@
 import { describe, expect, it } from "vitest";
 import {
   buildCodeSearchRepoFilter,
+  buildFocusQuery,
   distillFromSessions,
   estimateTokenSavings,
+  extractActionableItems,
   mergeActiveIssues,
   mergeCodebaseNotes,
   mergeDecisions,
@@ -277,6 +279,143 @@ describe("buildCodeSearchRepoFilter", () => {
         equalsClauses.some((c) => lower === c.equals.toLowerCase());
       expect(matchesAny).toBe(false);
     }
+  });
+});
+
+describe("extractActionableItems", () => {
+  const NOW = new Date("2026-05-06T00:00:00.000Z");
+
+  it("returns empty for no sessions", () => {
+    expect(extractActionableItems([], undefined, NOW)).toEqual([]);
+  });
+
+  it("drops completed steps and keeps pending/in_progress/blocked", () => {
+    const sessions = [
+      session({
+        sessionId: "s1",
+        startedAt: "2026-05-05T12:00:00.000Z",
+        planSteps: [
+          { id: "1", description: "ship soft-end", status: "in_progress" },
+          { id: "2", description: "old done", status: "completed" },
+          { id: "3", description: "blocked thing", status: "blocked", notes: "waiting on X" },
+          { id: "4", description: "pending thing", status: "pending" },
+        ],
+      }),
+    ];
+    const result = extractActionableItems(sessions, undefined, NOW);
+    const descs = result.map((i) => i.description);
+    expect(descs).toContain("ship soft-end");
+    expect(descs).toContain("blocked thing");
+    expect(descs).toContain("pending thing");
+    expect(descs).not.toContain("old done");
+    expect(result.find((i) => i.description === "blocked thing")?.notes).toBe("waiting on X");
+  });
+
+  it("ranks by status weight × recency × scope match", () => {
+    const sessions = [
+      session({
+        sessionId: "recent",
+        startedAt: "2026-05-05T12:00:00.000Z",
+        scope: ["billing"],
+        planSteps: [
+          { id: "1", description: "wire stripe checkout", status: "in_progress" },
+        ],
+      }),
+      session({
+        sessionId: "old",
+        startedAt: "2026-01-01T00:00:00.000Z",
+        scope: ["auth"],
+        planSteps: [
+          { id: "2", description: "rotate signing keys", status: "in_progress" },
+        ],
+      }),
+    ];
+
+    const billing = extractActionableItems(sessions, "billing", NOW);
+    expect(billing[0].description).toBe("wire stripe checkout");
+    expect(billing[0].score).toBeGreaterThan(0);
+    expect(billing[0].sessionScope).toEqual(["billing"]);
+    const wireBillingScore = billing[0].score;
+
+    const auth = extractActionableItems(sessions, "auth", NOW);
+    const wireUnderAuth = auth.find((i) => i.description === "wire stripe checkout");
+    expect(wireUnderAuth).toBeDefined();
+    expect(wireUnderAuth!.score).toBeLessThan(wireBillingScore);
+  });
+
+  it("dedupes the same description across sessions, keeping the best score", () => {
+    const sessions = [
+      session({
+        sessionId: "older",
+        startedAt: "2025-12-01T00:00:00.000Z",
+        planSteps: [{ id: "a", description: "fix flaky test", status: "pending" }],
+      }),
+      session({
+        sessionId: "newer",
+        startedAt: "2026-05-01T00:00:00.000Z",
+        planSteps: [{ id: "b", description: "fix flaky test", status: "pending" }],
+      }),
+    ];
+    const result = extractActionableItems(sessions, undefined, NOW);
+    expect(result.filter((i) => i.description === "fix flaky test")).toHaveLength(1);
+    expect(result[0].sessionId).toBe("newer");
+  });
+
+  it("caps at MAX_ACTIONABLE (5)", () => {
+    const sessions = Array.from({ length: 8 }, (_, i) =>
+      session({
+        sessionId: `s${i}`,
+        startedAt: NOW.toISOString(),
+        planSteps: [{ id: `${i}`, description: `step ${i}`, status: "pending" }],
+      }),
+    );
+    expect(extractActionableItems(sessions, undefined, NOW)).toHaveLength(5);
+  });
+});
+
+describe("buildFocusQuery", () => {
+  it("returns empty string when nothing is provided", () => {
+    expect(buildFocusQuery({})).toBe("");
+  });
+
+  it("composes scope, actionable items, and recent session context", () => {
+    const result = buildFocusQuery({
+      scope: "billing",
+      actionable: [
+        {
+          id: "1",
+          description: "wire stripe checkout",
+          status: "in_progress",
+          sessionId: "s1",
+          sessionStartedAt: "2026-05-05T12:00:00.000Z",
+          sessionScope: ["billing"],
+          score: 0.8,
+          notes: "blocked on webhook signature",
+        },
+      ],
+      sessions: [
+        session({
+          sessionId: "s1",
+          openItems: ["audit refunds endpoint", "verify idempotency keys"],
+          summary: "started checkout integration",
+        }),
+      ],
+    });
+    expect(result).toContain("billing");
+    expect(result).toContain("wire stripe checkout");
+    expect(result).toContain("blocked on webhook signature");
+    expect(result).toContain("audit refunds endpoint");
+    expect(result).toContain("started checkout integration");
+  });
+
+  it("ignores empty/whitespace contributions", () => {
+    const result = buildFocusQuery({
+      scope: "  ",
+      actionable: [],
+      sessions: [session({ sessionId: "s1", openItems: ["", "  "], summary: "" })],
+    });
+    // Trims to empty after dropping whitespace-only entries.
+    expect(result.trim()).toBe("");
   });
 });
 
