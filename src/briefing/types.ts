@@ -55,6 +55,11 @@ export interface ActionableItem {
  * A memory entry surfaced into the briefing because it's semantically related
  * to the current focus. Includes a similarity score so consumers can decide
  * whether to display or filter further.
+ *
+ * When `source === "session"` and `sessionId` is set, the next agent can
+ * fetch the originating session via `get_session_history({ session_id })`
+ * to see the full context that produced the insight. That's the navigable
+ * back-link the previous roadmap session called out as missing.
  */
 export interface RelatedInsight {
   memoryId: string;
@@ -63,6 +68,10 @@ export interface RelatedInsight {
   createdAt: string;
   /** Cosine similarity to the focus query embedding, in [-1, 1]. */
   similarity: number;
+  /** "conversation" | "manual" | "session" — see MemoryEntry.source. */
+  source: string;
+  /** When the memory was authored by `end_agent_session({ related_insights })`. */
+  sessionId?: string;
 }
 
 /**

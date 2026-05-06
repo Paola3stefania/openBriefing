@@ -44,6 +44,7 @@ When doing meaningful work (not just answering questions):
    - `issues_referenced`: GitHub issue numbers discussed
    - `plan_steps`: structured plan with step statuses (see below)
    - `summary`: 1-2 sentence description of what was accomplished
+   - **`related_insights`**: free-form debrief content that doesn't fit decisions/openItems but should be retrievable later by meaning (e.g., "spec is the source of truth", "gotcha: X is null when Y is true", principles that emerged). Each entry becomes a session-linked memory and surfaces in future briefings via `relatedInsights[]` automatically — use this instead of calling `save_memory` separately.
 
 ## Saving memories (ad-hoc)
 
@@ -117,7 +118,7 @@ Sessions can be lost at any time (chat disconnects, crashes, timeouts). Since yo
 | `get_session_delta` | Compact diff since a reference point (a session ID or ISO timestamp). Use when resuming after a break — returns only what's new (decisions, completed steps, external refs) at ~200-400 tokens vs `get_session_history`'s ~1k. Pass `project` and `since`. Optional `scope` filter. |
 | `start_agent_session` | When beginning substantive work. |
 | `update_agent_session` | After each turn / meaningful step (per skill rules). **Soft-end**: also works on already-ended sessions for 24h after `endedAt` (configurable via `OPENRUNDOWN_SESSION_AMEND_WINDOW_MS`), so a forgotten debrief can land on the right session instead of in `save_memory`. |
-| `end_agent_session` | When the work block is done. |
+| `end_agent_session` | When the work block is done. Pass `related_insights: string[]` for free-form debrief content — each entry becomes a session-linked memory (tagged `session:<id>`, embedded for semantic retrieval) and surfaces in future briefings' `relatedInsights[]` with `sessionId` set so the next agent can navigate back. Use this instead of calling `save_memory` after `end_agent_session`. |
 | `link_external_event` | Bind a typed pointer to an artifact on another surface (Slack thread, Notion page, GitHub PR, Linear issue, file, Discord thread) to the active session — instead of stuffing `"Dan ratified X in Slack <url>"` into open_items as a string. The reference is structured (channel/ts/repo/number/...) and the next agent can navigate it. Resolves the active session as the most-recent amendable session for `project`, or pass `session_id` explicitly. |
 | `import_claude_plans` | Import plans from `~/.claude/plans/`. |
 | `save_memory` / `search_memory` / `get_recent_memories` / `delete_memory` | Ad-hoc memory not tied to a session. **Always pass `project`** — `project` is the primary param, `project_id` is a deprecated alias. |

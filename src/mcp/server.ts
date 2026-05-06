@@ -1468,7 +1468,7 @@ const tools: Tool[] = [
   },
   {
     name: "end_agent_session",
-    description: "End an agent session and record what was accomplished. Stores files edited, decisions made, plan steps, open items, and issues referenced so future briefings can highlight changes.",
+    description: "End an agent session and record what was accomplished. Stores files edited, decisions made, plan steps, open items, and issues referenced so future briefings can highlight changes. Pass `related_insights` to also persist free-form debrief content as session-linked memories — that's the right place for 'why we chose X' or 'spec is the source of truth' framings instead of a separate save_memory call.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1518,6 +1518,11 @@ const tools: Tool[] = [
         summary: {
           type: "string",
           description: "Brief summary of what was accomplished.",
+        },
+        related_insights: {
+          type: "array",
+          items: { type: "string" },
+          description: "Free-form debrief insights to persist as session-linked memories (one per array entry). Each becomes a MemoryEntry tagged with this session id, gets embedded, and shows up in future briefings' relatedInsights[] when it matches the agent's focus query. Use this for 'why we chose X', 'unexpected gotcha Y', or 'principle Z that emerged' — content that doesn't fit decisions/openItems but should be retrievable later by meaning. Replaces the pattern of calling save_memory after end_agent_session, which fragmented the record.",
         },
       },
       required: ["session_id"],
@@ -12689,7 +12694,15 @@ Example output:
         const sessionId = args?.session_id as string;
         if (!sessionId) throw new Error("session_id is required");
 
-        console.error(`[Session] Ending session: ${sessionId}...`);
+        const relatedInsights = Array.isArray(args?.related_insights)
+          ? (args.related_insights as unknown[]).filter(
+              (s): s is string => typeof s === "string" && s.trim().length > 0,
+            )
+          : undefined;
+
+        console.error(
+          `[Session] Ending session: ${sessionId} (related_insights=${relatedInsights?.length ?? 0})...`,
+        );
         const session = await endSession(sessionId, {
           filesEdited: args?.files_edited as string[] | undefined,
           decisionsMade: args?.decisions_made as string[] | undefined,
@@ -12698,6 +12711,7 @@ Example output:
           toolsUsed: args?.tools_used as string[] | undefined,
           planSteps: args?.plan_steps as import("../briefing/types.js").PlanStep[] | undefined,
           summary: args?.summary as string | undefined,
+          relatedInsights,
         });
         console.error(`[Session] Ended session: ${sessionId}`);
 
@@ -12705,7 +12719,14 @@ Example output:
           content: [
             {
               type: "text",
-              text: JSON.stringify(session, null, 2),
+              text: JSON.stringify(
+                {
+                  ...session,
+                  relatedInsightsSaved: relatedInsights?.length ?? 0,
+                },
+                null,
+                2,
+              ),
             },
           ],
         };

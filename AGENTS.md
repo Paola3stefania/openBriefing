@@ -185,7 +185,13 @@ After data is stored, the existing **classification, grouping, and embedding** t
 - **`get_agent_briefing` distills from what is already stored** (and session records). It is **not** designed to re-fetch the full GitHub and Discord APIs on every call. Keep data fresh with **periodic** `fetch_*` / `sync:all` / your automation.
 - The briefing also exposes two derived fields for handoffs:
   - **`actionable[]`** — top incomplete plan steps from recent sessions, ranked by status × recency × scope match. The next agent's "what should I pick up first?" queue.
-  - **`relatedInsights[]`** — memories semantically related to the current focus (scope + plan steps + open items). Reuses `MemoryEntry`/`MemoryEntryEmbedding`, so anything saved with `save_memory` automatically becomes briefing-visible without an extra retrieval call. Requires `OPENAI_API_KEY` for the focus-query embedding; falls back to `[]` silently otherwise.
+  - **`relatedInsights[]`** — memories semantically related to the current focus (scope + plan steps + open items). Reuses `MemoryEntry`/`MemoryEntryEmbedding`, so anything saved with `save_memory` automatically becomes briefing-visible without an extra retrieval call. When `source === "session"` and `sessionId` is set, the entry came from `end_agent_session({ related_insights })` and the next agent can fetch the full session via `get_session_history({ session_id })`. Requires `OPENAI_API_KEY` for the focus-query embedding; falls back to `[]` silently otherwise.
+
+### `end_agent_session.related_insights[]` → session-linked memories
+
+- `end_agent_session` accepts `related_insights: string[]` for free-form debrief content (e.g. "spec is the source of truth", principles that emerged, gotchas worth remembering). Each entry is persisted as a `MemoryEntry` with `source: "session"`, `sessionId` populated, tagged `session`/`session:<id>`, and embedded for semantic retrieval.
+- Migration #31 (`20260506050000_add_memory_session_link`) added `MemoryEntry.session_id` as a nullable FK to `agent_sessions(id)` with `ON DELETE SET NULL`. Manual `save_memory` calls leave it `null`; the column is also writable directly from `saveMemory({ sessionId })` for any future automated session-bound ingestion.
+- This is the canonical way to debrief — replaces the older pattern of calling `save_memory` after `end_agent_session`, which fragmented the work record across two surfaces with no link between them.
 
 ### Soft-end on `update_agent_session`
 
