@@ -651,6 +651,12 @@ async function distillRelatedInsights(input: {
       tags: entry.tags,
       createdAt: entry.createdAt.toISOString(),
       similarity: Number(similarity.toFixed(3)),
+      source: entry.source,
+      // Read defensively: the field is a real column on `MemoryEntry`, but we
+      // want to tolerate IDE language servers running with a stale prisma
+      // client until they reload. tsc on the CLI proves the type is correct.
+      sessionId:
+        (entry as { sessionId?: string | null }).sessionId ?? undefined,
     });
   }
 

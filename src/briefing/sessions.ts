@@ -75,6 +75,18 @@ export async function endSession(
     toolsUsed?: string[];
     planSteps?: PlanStep[];
     summary?: string;
+    /**
+     * Free-form debrief insights to persist as session-linked memories.
+     * Each entry becomes a `MemoryEntry` row with `source: "session"`,
+     * tagged with the session id, and embedded for semantic retrieval.
+     * The next briefing's `relatedInsights[]` will surface them when
+     * they match the agent's focus query.
+     *
+     * This is the primary mechanism for narrowing the memory-vs-session
+     * bifurcation: the canonical work record (session) and the retrievable
+     * insight (memory) come from a single tool call.
+     */
+    relatedInsights?: string[];
   } = {},
 ): Promise<AgentSession> {
   const session = await prisma.agentSession.update({
@@ -92,6 +104,19 @@ export async function endSession(
       summary: updates.summary ?? null,
     },
   });
+
+  // Best-effort fan-out: if the caller passed `relatedInsights`, persist them
+  // as session-linked memories. Failures are logged inside saveSessionInsights
+  // and never block end_session (a partial save is better than losing the
+  // canonical session record because OpenAI was momentarily down).
+  if (updates.relatedInsights && updates.relatedInsights.length > 0) {
+    const { saveSessionInsights } = await import("../storage/db/memory.js");
+    await saveSessionInsights({
+      sessionId,
+      projectId: session.projectId,
+      insights: updates.relatedInsights,
+    });
+  }
 
   return mapSession(session);
 }

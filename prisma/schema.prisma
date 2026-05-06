@@ -778,6 +778,10 @@ model AgentSession {
   createdAt         DateTime @default(now()) @map("created_at")
   updatedAt         DateTime @updatedAt @map("updated_at")
 
+  // Memories whose `sessionId` points at this session. Populated when an agent
+  // passes `relatedInsights` to end_agent_session.
+  memories          MemoryEntry[]
+
   @@index([projectId, startedAt(sort: Desc)])
   @@index([startedAt(sort: Desc)])
   @@index([scope], type: Gin)
@@ -887,14 +891,24 @@ model MemoryEntry {
   content     String   @db.Text
   summary     String   @db.Text
   tags        String[] @default([])
-  source      String   @default("conversation") // 'conversation' | 'manual'
+  source      String   @default("conversation") // 'conversation' | 'manual' | 'session'
+  // Optional link back to the session that authored this memory. Set when an
+  // agent passes `relatedInsights` to `end_agent_session` (or future automated
+  // ingestion). Lets the briefing surface "this insight came from session X"
+  // so the next agent can navigate back to the original work unit. Nullable
+  // because most memories aren't session-bound (manual save_memory calls,
+  // imported context, etc.). `onDelete: SetNull` so deleting a session doesn't
+  // orphan or destroy the memory.
+  sessionId   String?  @map("session_id")
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
 
   embedding   MemoryEntryEmbedding?
+  session     AgentSession?         @relation(fields: [sessionId], references: [id], onDelete: SetNull)
 
   @@index([projectId, createdAt(sort: Desc)])
   @@index([tags], type: Gin)
+  @@index([sessionId])
   @@map("memory_entries")
 }
 
