@@ -74,6 +74,14 @@ npm run briefing
 npm run briefing -- --json
 ```
 
+Recover memories that were saved while `OPENAI_API_KEY` was broken/expired (rows land without an embedding row, so semantic search can't surface them):
+
+```bash
+npm run backfill:memory-embeddings -- --dry-run
+npm run backfill:memory-embeddings
+npm run backfill:memory-embeddings -- --project=owner/repo --limit=20
+```
+
 **Install OpenRundown into another project** (copies skill, rule, hooks, writes `.cursor/mcp.json`):
 
 ```bash

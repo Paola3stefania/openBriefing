@@ -27,6 +27,51 @@ function hashContent(content: string): string {
   return createHash("md5").update(content).digest("hex");
 }
 
+/**
+ * Generate the OpenAI embedding for a memory entry's content and persist it
+ * to `memory_entry_embeddings`. Used both by `saveMemory` (write path) and
+ * `backfill-memory-embeddings` (recovery path) so the embedding shape stays
+ * identical no matter who originated the row.
+ *
+ * Returns `true` when the embedding row was created, `false` when it was
+ * skipped (no API key, OpenAI unavailable, etc.). Idempotent against
+ * pre-existing rows for the same `memoryId`.
+ */
+export async function embedAndStoreMemoryEmbedding(options: {
+  memoryId: string;
+  content: string;
+  /** Pass an explicit API key to override the env-based default (tests). */
+  apiKey?: string | null;
+}): Promise<boolean> {
+  const apiKey = options.apiKey ?? getOpenAIApiKey();
+  if (!apiKey) return false;
+
+  try {
+    const embedding = await createEmbedding(options.content, apiKey);
+    await prisma.memoryEntryEmbedding.upsert({
+      where: { memoryId: options.memoryId },
+      create: {
+        memoryId: options.memoryId,
+        embedding: embedding as Prisma.InputJsonValue,
+        contentHash: hashContent(options.content),
+        model: getEmbeddingModel(),
+      },
+      update: {
+        embedding: embedding as Prisma.InputJsonValue,
+        contentHash: hashContent(options.content),
+        model: getEmbeddingModel(),
+      },
+    });
+    return true;
+  } catch (err) {
+    console.error(
+      `[Memory] Failed to embed memory ${options.memoryId}:`,
+      err instanceof Error ? err.message : err,
+    );
+    return false;
+  }
+}
+
 function cosineSimilarity(a: Embedding, b: Embedding): number {
   let dot = 0;
   let normA = 0;
@@ -76,8 +121,6 @@ export async function saveMemory(options: {
   sessionId?: string;
 }): Promise<MemoryEntryResult> {
   const projectId = options.projectId ?? detectProjectId();
-  const model = getEmbeddingModel();
-  const contentHash = hashContent(options.content);
 
   const entry = await prisma.memoryEntry.create({
     data: {
@@ -90,23 +133,12 @@ export async function saveMemory(options: {
     },
   });
 
-  // Generate and store embedding (best-effort — don't fail the save if OpenAI is unavailable)
-  const apiKey = getOpenAIApiKey();
-  if (apiKey) {
-    try {
-      const embedding = await createEmbedding(options.content, apiKey);
-      await prisma.memoryEntryEmbedding.create({
-        data: {
-          memoryId: entry.id,
-          embedding: embedding as Prisma.InputJsonValue,
-          contentHash,
-          model,
-        },
-      });
-    } catch (err) {
-      console.error("[Memory] Failed to generate embedding:", err);
-    }
-  }
+  // Best-effort: don't fail the save if OpenAI is unavailable. The row will
+  // be picked up later by `npm run backfill:memory-embeddings`.
+  await embedAndStoreMemoryEmbedding({
+    memoryId: entry.id,
+    content: options.content,
+  });
 
   return mapEntry(entry);
 }
