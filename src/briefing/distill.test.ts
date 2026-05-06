@@ -10,6 +10,7 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  buildCodeSearchRepoFilter,
   distillFromSessions,
   estimateTokenSavings,
   mergeActiveIssues,
@@ -216,6 +217,66 @@ describe("merge helpers", () => {
     expect(files).toEqual(["src/a.ts", "src/b.ts"]);
     const areas = result.map((n) => n.area).filter(Boolean);
     expect(areas).toEqual(["Billing"]);
+  });
+});
+
+describe("buildCodeSearchRepoFilter", () => {
+  it("returns undefined when projectRepo is missing or not in owner/repo shape", () => {
+    expect(buildCodeSearchRepoFilter(undefined)).toBeUndefined();
+    expect(buildCodeSearchRepoFilter("")).toBeUndefined();
+    expect(buildCodeSearchRepoFilter("openrundown")).toBeUndefined();
+    expect(buildCodeSearchRepoFilter("owner/repo/extra")).toBeUndefined();
+    expect(buildCodeSearchRepoFilter("owner repo")).toBeUndefined();
+  });
+
+  it("matches every common GitHub repo URL form for the project", () => {
+    const filter = buildCodeSearchRepoFilter("Paola3stefania/openRundown");
+    expect(filter).toBeDefined();
+    const endsWithValues = (filter?.OR ?? [])
+      .map((c) => c.repositoryUrl)
+      .filter((p): p is { endsWith: string; mode: "insensitive" } => "endsWith" in p)
+      .map((p) => p.endsWith);
+    expect(endsWithValues).toEqual([
+      "/Paola3stefania/openRundown",
+      "/Paola3stefania/openRundown.git",
+      ":Paola3stefania/openRundown",
+      ":Paola3stefania/openRundown.git",
+    ]);
+    const equalsValues = (filter?.OR ?? [])
+      .map((c) => c.repositoryUrl)
+      .filter((p): p is { equals: string; mode: "insensitive" } => "equals" in p)
+      .map((p) => p.equals);
+    expect(equalsValues).toEqual(["Paola3stefania/openRundown"]);
+    for (const clause of filter?.OR ?? []) {
+      expect(clause.repositoryUrl.mode).toBe("insensitive");
+    }
+  });
+
+  it("does not produce a substring that would match a different repo with the same suffix", () => {
+    // Regression guard for the original cross-project leak: a Feature indexed
+    // against `better-auth/better-auth` must not match a project filter for
+    // `Paola3stefania/openRundown`.
+    const filter = buildCodeSearchRepoFilter("Paola3stefania/openRundown");
+    const samples = [
+      "https://github.com/better-auth/better-auth",
+      "https://github.com/better-auth/better-auth.git",
+      "git@github.com:better-auth/better-auth.git",
+      "better-auth/better-auth",
+    ];
+    const endsWithClauses = (filter?.OR ?? [])
+      .map((c) => c.repositoryUrl)
+      .filter((p): p is { endsWith: string; mode: "insensitive" } => "endsWith" in p);
+    const equalsClauses = (filter?.OR ?? [])
+      .map((c) => c.repositoryUrl)
+      .filter((p): p is { equals: string; mode: "insensitive" } => "equals" in p);
+
+    for (const url of samples) {
+      const lower = url.toLowerCase();
+      const matchesAny =
+        endsWithClauses.some((c) => lower.endsWith(c.endsWith.toLowerCase())) ||
+        equalsClauses.some((c) => lower === c.equals.toLowerCase());
+      expect(matchesAny).toBe(false);
+    }
   });
 });
 

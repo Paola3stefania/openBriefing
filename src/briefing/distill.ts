@@ -11,7 +11,7 @@
 import { prisma } from "../storage/db/prisma.js";
 import { detectProjectId } from "../config/project.js";
 import { getRecentSessions } from "./sessions.js";
-import { getProjectDiscordGuilds } from "./projectScope.js";
+import { getProjectChatWorkspaceIds } from "./projectScope.js";
 import type {
   ProjectContext,
   ActiveIssue,
@@ -56,12 +56,12 @@ export async function distillBriefingWithSessions(
   // leaking results from other repos sharing the database.
   const repo = options.repo ?? deriveRepoFromProjectId(projectId);
 
-  // Resolve which Discord guilds belong to this project. `undefined` means
+  // Resolve which chat workspaces belong to this project. `undefined` means
   // no mapping is configured anywhere (preserve legacy unfiltered behavior).
-  // An empty array means "this project owns no Discord data" — suppress
-  // Discord-derived signals so they don't leak from other projects sharing
-  // the database.
-  const discordGuilds = getProjectDiscordGuilds(projectId);
+  // An empty array means "this project owns no chat data" — suppress all
+  // chat-derived signals (Discord, Slack, Teams, ...) so they don't leak
+  // from other projects sharing the database.
+  const chatWorkspaceIds = getProjectChatWorkspaceIds(projectId);
 
   const [
     activeIssues,
@@ -74,11 +74,11 @@ export async function distillBriefingWithSessions(
     sessions,
   ] = await Promise.all([
     distillActiveIssues(since, scope, repo),
-    distillUserSignals(since, scope, discordGuilds),
+    distillUserSignals(since, scope, chatWorkspaceIds),
     distillTechSignals(since, scope),
-    distillCodebaseNotes(scope),
+    distillCodebaseNotes(scope, repo),
     distillDecisions(since, scope, repo),
-    distillRecentActivity(since, discordGuilds),
+    distillRecentActivity(since, chatWorkspaceIds, repo),
     loadPreferences(projectId),
     getRecentSessions(SESSION_HISTORY_LIMIT, projectId),
   ]);
@@ -169,18 +169,18 @@ async function distillActiveIssues(since: Date, scope?: string, repo?: string): 
 async function distillUserSignals(
   since: Date,
   scope?: string,
-  discordGuilds?: string[],
+  chatWorkspaceIds?: string[],
 ): Promise<UserSignal[]> {
-  // If the operator configured per-project Discord scoping for this project
-  // and this project owns no guilds, suppress Discord-derived signals
+  // If the operator configured per-project chat scoping for this project
+  // and this project owns no workspaces, suppress chat-derived signals
   // entirely instead of leaking other projects' groups.
-  if (discordGuilds && discordGuilds.length === 0) return [];
+  if (chatWorkspaceIds && chatWorkspaceIds.length === 0) return [];
 
   const groups = await prisma.group.findMany({
     where: {
       createdAt: { gte: since },
-      ...(discordGuilds && discordGuilds.length > 0
-        ? { channel: { guildId: { in: discordGuilds } } }
+      ...(chatWorkspaceIds && chatWorkspaceIds.length > 0
+        ? { channel: { guildId: { in: chatWorkspaceIds } } }
         : {}),
       ...(scope
         ? {
@@ -223,20 +223,90 @@ async function distillUserSignals(
   return signals;
 }
 
-async function distillCodebaseNotes(scope?: string): Promise<CodebaseNote[]> {
+/**
+ * Build a Prisma `where` clause that matches `CodeSearch` rows belonging to
+ * `projectRepo` (an `owner/repo` identifier).
+ *
+ * `CodeSearch.repositoryUrl` is written by `index_codebase` /
+ * `index_code_for_features` and may take any of these forms:
+ *   - `https://github.com/owner/repo`            (HTTPS clone URL)
+ *   - `https://github.com/owner/repo.git`        (HTTPS with .git suffix)
+ *   - `git@github.com:owner/repo`                (SSH clone URL)
+ *   - `git@github.com:owner/repo.git`            (SSH with .git suffix)
+ *   - `owner/repo`                               (short form from GITHUB_REPO_URL)
+ *   - an absolute filesystem path like `/Users/me/Projects/repo` (LOCAL_REPO_PATH)
+ *
+ * We match the GitHub-style forms exhaustively (case-insensitive) plus the
+ * exact short form. Local-path-only entries are intentionally excluded — we
+ * have no reliable way to map an arbitrary filesystem path back to a GitHub
+ * `owner/repo` without false positives, and surfacing the wrong repo's files
+ * is the bug we are fixing.
+ *
+ * Returns `undefined` when `projectRepo` is missing or not in `owner/repo`
+ * shape, which preserves the legacy unfiltered behavior so projects that
+ * pass a folder-name `projectId` (no slash) still get codebase notes.
+ */
+export function buildCodeSearchRepoFilter(
+  projectRepo: string | undefined,
+):
+  | {
+      OR: Array<{
+        repositoryUrl:
+          | { endsWith: string; mode: "insensitive" }
+          | { equals: string; mode: "insensitive" };
+      }>;
+    }
+  | undefined {
+  if (!projectRepo) return undefined;
+  const trimmed = projectRepo.trim();
+  if (!/^[^/\s]+\/[^/\s]+$/.test(trimmed)) return undefined;
+  const slash = `/${trimmed}`;
+  const colon = `:${trimmed}`;
+  return {
+    OR: [
+      { repositoryUrl: { endsWith: slash, mode: "insensitive" } },
+      { repositoryUrl: { endsWith: `${slash}.git`, mode: "insensitive" } },
+      { repositoryUrl: { endsWith: colon, mode: "insensitive" } },
+      { repositoryUrl: { endsWith: `${colon}.git`, mode: "insensitive" } },
+      { repositoryUrl: { equals: trimmed, mode: "insensitive" } },
+    ],
+  };
+}
+
+async function distillCodebaseNotes(scope?: string, projectRepo?: string): Promise<CodebaseNote[]> {
   const notes: CodebaseNote[] = [];
 
+  // Per-project scoping: `Feature` rows have no `projectId` column and are
+  // shared across every repo indexed against this database. Without filtering
+  // on the indexed repo, briefings for project A leak feature/code notes
+  // pointing at files in project B's repo (e.g. `packages/better-auth/...`
+  // surfacing in an `openRundown` briefing). We filter through the join chain
+  // `FeatureCodeMapping → CodeSection → CodeFile → CodeSearch.repositoryUrl`.
+  const repoFilter = buildCodeSearchRepoFilter(projectRepo);
+  const mappingFilter = repoFilter
+    ? { codeSection: { codeFile: { codeSearch: repoFilter } } }
+    : undefined;
+
   const features = await prisma.feature.findMany({
-    where: scope
-      ? {
-          OR: [
-            { name: { contains: scope, mode: "insensitive" } },
-            { relatedKeywords: { has: scope } },
-          ],
-        }
-      : {},
+    where: {
+      ...(scope
+        ? {
+            OR: [
+              { name: { contains: scope, mode: "insensitive" } },
+              { relatedKeywords: { has: scope } },
+            ],
+          }
+        : {}),
+      // Only consider features that actually have at least one mapping into
+      // *this* project's indexed code. Drops Features whose mappings live
+      // entirely in other repos.
+      ...(mappingFilter ? { codeMappings: { some: mappingFilter } } : {}),
+    },
     include: {
       codeMappings: {
+        // Filter the included mappings too, so we don't render file paths
+        // from another repo even when a Feature is shared across repos.
+        where: mappingFilter,
         include: {
           codeSection: {
             include: {
@@ -319,32 +389,43 @@ async function distillDecisions(since: Date, scope?: string, repo?: string): Pro
 
 async function distillRecentActivity(
   since: Date,
-  discordGuilds?: string[],
+  chatWorkspaceIds?: string[],
+  repo?: string,
 ): Promise<RecentActivity> {
+  // Per-project scoping: GitHub issues/PRs share a single table across every
+  // repo synced into this database. Without filtering on `issueRepo`/`prRepo`
+  // these counts return global aggregates (e.g. a Paola3stefania/openRundown
+  // briefing that shares the DB with better-auth/better-auth would show
+  // better-auth's issue counts as if they were openRundown's). When `repo`
+  // is undefined (folder-name-only projects) we keep the legacy unfiltered
+  // behavior so projects without an `owner/repo` identity still get counts.
+  const issueRepoFilter = repo ? { issueRepo: repo } : {};
+  const prRepoFilter = repo ? { prRepo: repo } : {};
+
   const discordCount =
-    discordGuilds && discordGuilds.length === 0
+    chatWorkspaceIds && chatWorkspaceIds.length === 0
       ? Promise.resolve(0)
       : prisma.classifiedThread.count({
           where: {
             classifiedAt: { gte: since },
-            ...(discordGuilds && discordGuilds.length > 0
-              ? { channel: { guildId: { in: discordGuilds } } }
+            ...(chatWorkspaceIds && chatWorkspaceIds.length > 0
+              ? { channel: { guildId: { in: chatWorkspaceIds } } }
               : {}),
           },
         });
 
   const [issuesOpened, issuesClosed, prsOpened, prsMerged, discordThreads] = await Promise.all([
     prisma.gitHubIssue.count({
-      where: { issueCreatedAt: { gte: since }, issueState: "open" },
+      where: { issueCreatedAt: { gte: since }, issueState: "open", ...issueRepoFilter },
     }),
     prisma.gitHubIssue.count({
-      where: { issueUpdatedAt: { gte: since }, issueState: "closed" },
+      where: { issueUpdatedAt: { gte: since }, issueState: "closed", ...issueRepoFilter },
     }),
     prisma.gitHubPullRequest.count({
-      where: { prCreatedAt: { gte: since } },
+      where: { prCreatedAt: { gte: since }, ...prRepoFilter },
     }),
     prisma.gitHubPullRequest.count({
-      where: { prCreatedAt: { gte: since }, prMerged: true },
+      where: { prCreatedAt: { gte: since }, prMerged: true, ...prRepoFilter },
     }),
     discordCount,
   ]);

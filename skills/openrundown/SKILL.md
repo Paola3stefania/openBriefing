@@ -24,7 +24,7 @@ Always do this before responding to the user:
    - Optionally pass `scope` if you know what area the user is working on
    - Optionally pass `since` with the last session timestamp
 3. Call `get_session_history` with `limit: 3` and `project` to see recent sessions
-4. **Optional (semantic memory):** Call `search_memory` with a short query, and `get_recent_memories` with `limit: 5`, if the deployment uses the memory tools
+4. **Optional (semantic memory):** Call `search_memory` with a short query and `project`, and `get_recent_memories` with `limit: 5` and `project`, if the deployment uses the memory tools. **Always pass `project`** — these tools fall back to the MCP server's CWD-detected project if omitted, which leaks memories across projects sharing the same DB.
 5. Use the briefing to understand: active issues, recent decisions, open items, active plans, user signals, tech signals from X/Twitter
 6. If a previous session has `open_items`, proactively mention them
 7. **Resume active plans**: If the last session has `planSteps` with incomplete steps (pending/in_progress/blocked), show the plan status to the user and offer to continue from where the previous agent left off.
@@ -47,8 +47,9 @@ When doing meaningful work (not just answering questions):
 
 ## Saving memories (ad-hoc)
 
-- After an architectural decision, you can call `save_memory` with reasoning and `tags` (e.g. `["area", "decision"]`) if your deployment has embeddings configured.
+- After an architectural decision, you can call `save_memory` with `project`, the reasoning, and `tags` (e.g. `["area", "decision"]`) if your deployment has embeddings configured.
 - Non-obvious codebase facts are good candidates to save.
+- **Always pass `project`** to `save_memory` / `search_memory` / `get_recent_memories`. They accept `project` (preferred) or the legacy `project_id` alias. If both are omitted, the tools fall back to the MCP server's CWD-detected project — which produces silent cross-project leaks when one DB is shared across multiple repos.
 
 ## Saving Plans (mandatory when plans exist)
 
@@ -134,7 +135,7 @@ Sessions can be lost at any time (chat disconnects, crashes, timeouts). Since yo
 
 | Tool | When to use |
 |------|-------------|
-| `classify_discord_messages` | Classify threads; may also refresh GitHub context first. |
+| `classify_discord_messages` | Classify threads; may also refresh GitHub context first. **Fast-path:** pass `skip_github_sync: true` and `skip_embeddings: true` for a quick `limit:N` classification using whatever's already in the DB. Each stage emits `[stage] ... → start / ← ok / ✕ TIMEOUT` logs on stderr; per-stage timeouts are env-tunable (see `env.example`). |
 | `check_discord_classification_completeness` | Gaps in classification. |
 | `group_github_issues` / `suggest_grouping` | Correlation / grouping of issues. |
 | `match_*` (`match_groups_to_features`, `match_ungrouped_issues_to_features`, `match_issues_to_features`, `match_database_groups_to_features`, `match_issues_to_threads`) | Map issues/groups/threads to features. |
@@ -176,3 +177,13 @@ Sessions can be lost at any time (chat disconnects, crashes, timeouts). Since yo
 | `fetch_x_posts` | Ingest from X. |
 | `manage_x_watches` | Subscriptions. |
 | `search_x_posts` | Search ingested posts. |
+
+## External chat ingest (Slack, Teams, Telegram, ... via any MCP)
+
+| Tool | When to use |
+|------|-------------|
+| `ingest_chat_messages` | Persist normalized chat messages from **any** external MCP into OpenRundown's generic chat store. The agent maps the source's payload into `{source, workspace_id, channel_id, messages[]}` and OpenRundown handles ID prefixing (`<source>:<workspace_id>:...`) so multiple sources share one DB. The returned `workspaceKey` is what to add to **`PROJECT_CHAT_WORKSPACES`** for per-project briefing scope. After ingest, the same classification / grouping / embedding pipelines work unchanged. Requires `DATABASE_URL`. |
+
+Project scoping for shared databases is controlled by two merged env vars:
+- `PROJECT_CHAT_WORKSPACES` (preferred, source-agnostic) — values are prefixed workspace IDs (e.g. `slack:T01ABC`, `teams:tenant-x`).
+- `PROJECT_DISCORD_GUILDS` (legacy, Discord-only) — values are bare Discord guild snowflakes.

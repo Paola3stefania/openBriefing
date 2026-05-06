@@ -50,6 +50,7 @@ import { fetchMultipleDocumentation } from "../export/documentationFetcher.js";
 import { extractFeaturesFromDocumentation } from "../export/featureExtractor.js";
 import type { ClassifiedThread, Group, UngroupedThread } from "../storage/types.js";
 import { detectProjectId } from "../config/project.js";
+import { runStage, readTimeoutEnv, withOverallTimeout } from "../util/stages.js";
 
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 
@@ -73,6 +74,25 @@ let discordReady = false;
 discord.once("clientReady", () => {
   discordReady = true;
 });
+
+/**
+ * Resolve the project identifier from a tool args bag.
+ *
+ * Memory tools (and a few others) historically shipped with `project_id`,
+ * while the rest of the OpenRundown surface area uses `project`. The skill
+ * tells callers to "always pass `project`", so we accept both spellings and
+ * prefer `project` to match the rest of the API. Returns `undefined` when
+ * neither is provided so the storage layer can fall back to its own
+ * `detectProjectId()` (the legacy behavior).
+ */
+function resolveProjectArg(args: Record<string, unknown> | undefined | null): string | undefined {
+  if (!args) return undefined;
+  const project = args.project;
+  if (typeof project === "string" && project.trim().length > 0) return project;
+  const projectId = args.project_id;
+  if (typeof projectId === "string" && projectId.trim().length > 0) return projectId;
+  return undefined;
+}
 
 /**
  * Safely parse JSON with better error messages
@@ -368,6 +388,18 @@ const tools: Tool[] = [
         classify_all: {
           type: "boolean",
           description: "If true, classifies all unclassified messages in the channel (ignores limit). If re_classify is also true, will re-classify all messages regardless of previous classification status. If false (default), uses limit parameter. On first-time classification, automatically processes in batches of 200 until all threads are covered.",
+          default: false,
+        },
+        skip_github_sync: {
+          type: "boolean",
+          description:
+            "If true, skip the GitHub issue resync step at the start of classification (uses whatever is already in the DB or cache). Useful when you just want to quickly classify a small batch with `limit` and don't need fresh GitHub data — this is what makes `limit: 1` actually fast. Default false (preserves the slower legacy behavior). Stage logs are emitted regardless so you can see which step is slow.",
+          default: false,
+        },
+        skip_embeddings: {
+          type: "boolean",
+          description:
+            "If true, skip the OpenAI embedding-computation steps (issue + thread embeddings) at the start of classification. Pair with `skip_github_sync: true` for the fastest possible classify-only call. Default false (preserves legacy behavior).",
           default: false,
         },
       },
@@ -1639,8 +1671,92 @@ const tools: Tool[] = [
     },
   },
   {
+    name: "ingest_chat_messages",
+    description:
+      "Persist normalized chat messages from any external MCP (Slack, Microsoft Teams, Telegram, Matrix, custom forums, ...) into OpenRundown's generic chat store. The messages flow through the same classification, grouping, and briefing pipelines as Discord ingest. IDs are prefixed with `<source>:<workspaceId>:...` so multiple chat sources can share the database without collisions; the resulting `Channel.guildId` value (`<source>:<workspaceId>`) is what should be added to `PROJECT_CHAT_WORKSPACES` for per-project scoping. Requires `DATABASE_URL`.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        source: {
+          type: "string",
+          description:
+            "Free-form source identifier (e.g. 'slack', 'teams', 'telegram', 'matrix', 'mattermost'). Lowercased; used as an ID prefix.",
+        },
+        workspace_id: {
+          type: "string",
+          description:
+            "Workspace / team / tenant ID at the source (e.g. Slack team ID 'T01ABC123').",
+        },
+        workspace_name: {
+          type: "string",
+          description: "Optional human-readable workspace name.",
+        },
+        channel_id: {
+          type: "string",
+          description: "Channel / room / conversation ID at the source.",
+        },
+        channel_name: {
+          type: "string",
+          description: "Optional human-readable channel name.",
+        },
+        messages: {
+          type: "array",
+          description: "Normalized messages to ingest. Re-ingesting the same message ID is a no-op.",
+          items: {
+            type: "object",
+            properties: {
+              id: { type: "string", description: "Native message ID at the source." },
+              author_id: { type: "string" },
+              author_name: { type: "string" },
+              author_is_bot: { type: "boolean" },
+              author_avatar: { type: "string" },
+              content: { type: "string" },
+              created_at: {
+                type: "string",
+                description: "ISO 8601 timestamp.",
+              },
+              edited_at: { type: ["string", "null"] },
+              thread_id: { type: "string" },
+              thread_name: { type: "string" },
+              reply_to: { type: "string" },
+              attachments: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    id: { type: "string" },
+                    filename: { type: "string" },
+                    url: { type: "string" },
+                    size: { type: "number" },
+                    content_type: { type: "string" },
+                  },
+                  required: ["id", "filename", "url"],
+                },
+              },
+              mentions: { type: "array", items: { type: "string" } },
+              reactions: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    emoji: { type: "string" },
+                    count: { type: "number" },
+                  },
+                  required: ["emoji", "count"],
+                },
+              },
+              url: { type: "string" },
+            },
+            required: ["id", "author_id", "content", "created_at"],
+          },
+        },
+      },
+      required: ["source", "workspace_id", "channel_id", "messages"],
+    },
+  },
+  {
     name: "save_memory",
-    description: "Save a memory entry (conversation insight, decision, learning) with semantic embedding for future retrieval. Use this to persist important things discussed so they can be recalled in future sessions.",
+    description: "Save a memory entry (conversation insight, decision, learning) with semantic embedding for future retrieval. Use this to persist important things discussed so they can be recalled in future sessions. IMPORTANT: Always pass 'project' — detect it from the workspace git remote (owner/repo) or folder name. The MCP server cannot detect your workspace, so always pass this.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1657,9 +1773,13 @@ const tools: Tool[] = [
           items: { type: "string" },
           description: "Optional tags to categorize the memory (e.g. ['ciba', 'architecture', 'decision']).",
         },
+        project: {
+          type: "string",
+          description: "Project identifier — use 'owner/repo' from the workspace git remote origin, or the workspace folder name if no remote. The MCP server cannot detect your workspace, so always pass this. Falls back to the MCP server's CWD-detected project (which leaks into other projects when the same DB is shared) only if omitted.",
+        },
         project_id: {
           type: "string",
-          description: "Project to scope the memory to. Defaults to the detected project.",
+          description: "Deprecated alias for 'project'. Prefer 'project'.",
         },
       },
       required: ["content", "summary"],
@@ -1667,7 +1787,7 @@ const tools: Tool[] = [
   },
   {
     name: "search_memory",
-    description: "Search past memories semantically using embeddings. Returns the most relevant memories for a given query. Use at session start to recall relevant context.",
+    description: "Search past memories semantically using embeddings. Returns the most relevant memories for a given query. Use at session start to recall relevant context. IMPORTANT: Always pass 'project' — detect it from the workspace git remote (owner/repo) or folder name. The MCP server cannot detect your workspace, so always pass this.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1685,9 +1805,13 @@ const tools: Tool[] = [
           items: { type: "string" },
           description: "Optional: filter results by tags.",
         },
+        project: {
+          type: "string",
+          description: "Project identifier — use 'owner/repo' from the workspace git remote origin, or the workspace folder name if no remote. The MCP server cannot detect your workspace, so always pass this. Falls back to the MCP server's CWD-detected project (which can return memories from other projects when the same DB is shared) only if omitted.",
+        },
         project_id: {
           type: "string",
-          description: "Project to search within. Defaults to the detected project.",
+          description: "Deprecated alias for 'project'. Prefer 'project'.",
         },
       },
       required: ["query"],
@@ -1695,7 +1819,7 @@ const tools: Tool[] = [
   },
   {
     name: "get_recent_memories",
-    description: "Get the most recent memory entries without a search query. Useful at session start to get a quick overview of recent context.",
+    description: "Get the most recent memory entries without a search query. Useful at session start to get a quick overview of recent context. IMPORTANT: Always pass 'project' — detect it from the workspace git remote (owner/repo) or folder name. The MCP server cannot detect your workspace, so always pass this.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1709,9 +1833,13 @@ const tools: Tool[] = [
           items: { type: "string" },
           description: "Optional: filter by tags.",
         },
+        project: {
+          type: "string",
+          description: "Project identifier — use 'owner/repo' from the workspace git remote origin, or the workspace folder name if no remote. The MCP server cannot detect your workspace, so always pass this. Falls back to the MCP server's CWD-detected project (which can return memories from other projects when the same DB is shared) only if omitted.",
+        },
         project_id: {
           type: "string",
-          description: "Project to scope to. Defaults to the detected project.",
+          description: "Deprecated alias for 'project'. Prefer 'project'.",
         },
       },
       required: [],
@@ -1795,6 +1923,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
     "fetch_x_posts",
     "manage_x_watches",
     "search_x_posts",
+    "ingest_chat_messages",
   ]);
 
   try {
@@ -3412,12 +3541,22 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     case "classify_discord_messages": {
-      const { channel_id, limit = 30, min_similarity = 20, re_classify = false, classify_all = false } = args as {
+      const {
+        channel_id,
+        limit = 30,
+        min_similarity = 20,
+        re_classify = false,
+        classify_all = false,
+        skip_github_sync = false,
+        skip_embeddings = false,
+      } = args as {
         channel_id?: string;
         limit?: number;
         min_similarity?: number;
         re_classify?: boolean;
         classify_all?: boolean;
+        skip_github_sync?: boolean;
+        skip_embeddings?: boolean;
       };
 
       const classifyConfig = getConfig();
@@ -3427,10 +3566,34 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         throw new Error("Channel ID is required. Provide channel_id parameter or set DISCORD_DEFAULT_CHANNEL_ID in environment variables.");
       }
 
+      // Stage timeouts (override via env so operators can tune without code changes).
+      const STAGE_TIMEOUTS = {
+        dbPing: readTimeoutEnv("OPENRUNDOWN_DB_PING_TIMEOUT_MS", 10_000),
+        dbIssuesLoad: readTimeoutEnv("OPENRUNDOWN_DB_ISSUES_LOAD_TIMEOUT_MS", 30_000),
+        githubSync: readTimeoutEnv("OPENRUNDOWN_GITHUB_SYNC_TIMEOUT_MS", 60_000),
+        issueEmbeddings: readTimeoutEnv("OPENRUNDOWN_ISSUE_EMBEDDINGS_TIMEOUT_MS", 90_000),
+        discordChannelFetch: readTimeoutEnv("OPENRUNDOWN_DISCORD_CHANNEL_FETCH_TIMEOUT_MS", 15_000),
+        discordMessages: readTimeoutEnv("OPENRUNDOWN_DISCORD_MESSAGES_TIMEOUT_MS", 60_000),
+        threadEmbeddings: readTimeoutEnv("OPENRUNDOWN_THREAD_EMBEDDINGS_TIMEOUT_MS", 90_000),
+        dbClassifiedThreads: readTimeoutEnv("OPENRUNDOWN_DB_CLASSIFIED_THREADS_TIMEOUT_MS", 30_000),
+      };
+      const OVERALL_TIMEOUT = readTimeoutEnv("OPENRUNDOWN_CLASSIFY_TIMEOUT_MS", 5 * 60_000);
+
+      console.error(
+        `[Classification] Starting classify_discord_messages: channel=${actualChannelId} limit=${limit} classify_all=${classify_all} skip_github_sync=${skip_github_sync} skip_embeddings=${skip_embeddings}`,
+      );
+
+      return await withOverallTimeout("classify_discord_messages", async () => {
+
       // Calculate database availability once for reuse throughout this case
       const { getStorage, hasDatabaseConfig } = await import("../storage/factory.js");
       const storage = getStorage();
-      const useDatabase = hasDatabaseConfig() && await storage.isAvailable();
+      const useDatabase =
+        hasDatabaseConfig() &&
+        (await runStage("classify:db-ping", () => storage.isAvailable(), {
+          timeoutMs: STAGE_TIMEOUTS.dbPing,
+          fallback: false,
+        }));
 
       // Step 1: Fetch/sync GitHub issues (incremental) before classification
       const issuesCachePath = join(process.cwd(), classifyConfig.paths.cacheDir, classifyConfig.paths.issuesCacheFile);
@@ -3442,24 +3605,33 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (useDatabase) {
         try {
           const { prisma } = await import("../storage/db/prisma.js");
-          const dbIssues = await prisma.gitHubIssue.findMany({
-            select: {
-              issueNumber: true,
-              issueTitle: true,
-              issueBody: true,
-              issueUrl: true,
-              issueState: true,
-              issueLabels: true,
-              issueAuthor: true,
-              issueCreatedAt: true,
-              issueUpdatedAt: true,
-              issueComments: true,
-              issueAssignees: true,
-              issueMilestone: true,
-              issueReactions: true,
+          const dbIssues = await runStage(
+            "classify:db-issues-load",
+            () =>
+              prisma.gitHubIssue.findMany({
+                select: {
+                  issueNumber: true,
+                  issueTitle: true,
+                  issueBody: true,
+                  issueUrl: true,
+                  issueState: true,
+                  issueLabels: true,
+                  issueAuthor: true,
+                  issueCreatedAt: true,
+                  issueUpdatedAt: true,
+                  issueComments: true,
+                  issueAssignees: true,
+                  issueMilestone: true,
+                  issueReactions: true,
+                },
+                orderBy: { issueNumber: "asc" },
+              }),
+            {
+              timeoutMs: STAGE_TIMEOUTS.dbIssuesLoad,
+              fallback: [],
+              detail: () => `(see count below)`,
             },
-            orderBy: { issueNumber: "asc" },
-          });
+          );
 
           // Convert database format to GitHubIssue format
           existingIssuesForResume = dbIssues.map((issue) => ({
@@ -3547,22 +3719,39 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // Use token manager for automatic token rotation (same logic as fetch_github_issues)
       const { GitHubTokenManager } = await import("../connectors/github/tokenManager.js");
       const tokenManager = await GitHubTokenManager.fromEnvironment();
-      
-      if (!tokenManager) {
-        throw new Error("GITHUB_TOKEN or GitHub App configuration is required. Configure one or both for automatic rate limit rotation. Tokens: GITHUB_TOKEN=token1,token2. GitHub App: GITHUB_APP_ID, GITHUB_APP_INSTALLATION_ID, GITHUB_APP_PRIVATE_KEY_PATH.");
-      }
 
-      // Pass existing issues to skip fetching them (more efficient)
-      const newIssues = await fetchAllGitHubIssues(
-        tokenManager, 
-        true, 
-        undefined, 
-        undefined, 
-        sinceIssuesDate,
-        undefined, // limit
-        true, // includeComments
-        existingIssuesForResume // Pass existing issues to skip fetching
-      );
+      // Skip GitHub sync entirely when caller asked for it (e.g. fast classify-only call).
+      // We still require a token manager when we DO sync — but skipping is fine if there
+      // are already issues in the DB / cache.
+      let newIssues: GitHubIssue[] = [];
+      if (skip_github_sync) {
+        console.error(
+          `[stage] classify:github-sync ⤳ skipped (skip_github_sync=true). Using ${existingIssuesForResume.length} cached/db issues only.`,
+        );
+      } else {
+        if (!tokenManager) {
+          throw new Error("GITHUB_TOKEN or GitHub App configuration is required. Configure one or both for automatic rate limit rotation. Tokens: GITHUB_TOKEN=token1,token2. GitHub App: GITHUB_APP_ID, GITHUB_APP_INSTALLATION_ID, GITHUB_APP_PRIVATE_KEY_PATH.");
+        }
+        newIssues = await runStage(
+          "classify:github-sync",
+          () =>
+            fetchAllGitHubIssues(
+              tokenManager,
+              true,
+              undefined,
+              undefined,
+              sinceIssuesDate,
+              undefined, // limit
+              true, // includeComments
+              existingIssuesForResume, // Pass existing issues to skip fetching
+            ),
+          {
+            timeoutMs: STAGE_TIMEOUTS.githubSync,
+            fallback: [],
+            detail: () => `(${newIssues.length} new from GitHub)`,
+          },
+        );
+      }
 
       // Merge with existing cache if doing incremental update
       let finalIssues: GitHubIssue[];
@@ -3590,15 +3779,26 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       // Step 1.5: Compute missing issue embeddings before classification
-      if (process.env.OPENAI_API_KEY && useDatabase) {
-        try {
-          console.error("[Classification] Computing missing GitHub issue embeddings...");
-          const { computeAndSaveIssueEmbeddings } = await import("../storage/db/embeddings.js");
-          const issueEmbeddingResult = await computeAndSaveIssueEmbeddings(process.env.OPENAI_API_KEY);
-          console.error(`[Classification] Issue embeddings: ${issueEmbeddingResult.computed} computed, ${issueEmbeddingResult.cached} cached`);
-        } catch (embeddingError) {
-          console.error(`[Classification] Warning: Failed to compute issue embeddings (continuing anyway):`, embeddingError);
-        }
+      if (skip_embeddings) {
+        console.error(
+          `[stage] classify:issue-embeddings ⤳ skipped (skip_embeddings=true).`,
+        );
+      } else if (process.env.OPENAI_API_KEY && useDatabase) {
+        const apiKey = process.env.OPENAI_API_KEY;
+        await runStage(
+          "classify:issue-embeddings",
+          async () => {
+            const { computeAndSaveIssueEmbeddings } = await import("../storage/db/embeddings.js");
+            const issueEmbeddingResult = await computeAndSaveIssueEmbeddings(apiKey);
+            console.error(
+              `[Classification] Issue embeddings: ${issueEmbeddingResult.computed} computed, ${issueEmbeddingResult.cached} cached`,
+            );
+          },
+          {
+            timeoutMs: STAGE_TIMEOUTS.issueEmbeddings,
+            fallback: undefined,
+          },
+        );
       }
 
       // Step 2: Fetch/sync Discord messages (incremental) before classification
@@ -3606,7 +3806,17 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const cacheFileName = `discord-messages-${actualChannelId}.json`;
       const discordCachePath = join(discordCacheDir, cacheFileName);
 
-      const channel = await discord.channels.fetch(actualChannelId);
+      // `discord.channels.fetch` can hang indefinitely if the Discord client
+      // never logged in (bad token, network outage). Wrap it so we fail fast
+      // and surface a useful error rather than blocking the whole MCP call.
+      const channel = await runStage(
+        "classify:discord-channel-fetch",
+        () => discord.channels.fetch(actualChannelId),
+        {
+          timeoutMs: STAGE_TIMEOUTS.discordChannelFetch,
+          critical: true,
+        },
+      );
       if (!channel ||
           (!(channel instanceof TextChannel) &&
            !(channel instanceof DMChannel) &&
@@ -3689,57 +3899,68 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
       }
 
-      // Fetch messages with pagination (incremental)
-      let fetchedMessages: Message[] = [];
-      let lastMessageId: string | undefined = undefined;
-      let hasMore = true;
+      // Fetch messages with pagination (incremental). Wrap the WHOLE pagination
+      // loop in a single stage so a slow/dead Discord channel can't hang forever.
+      const fetchedMessages: Message[] = await runStage(
+        "classify:discord-messages-fetch",
+        async () => {
+          const out: Message[] = [];
+          let lastMessageId: string | undefined = undefined;
+          let hasMore = true;
 
-      while (hasMore) {
-        const options: { limit: number; before?: string } = { limit: 100 };
-        if (lastMessageId) {
-          options.before = lastMessageId;
-        }
+          while (hasMore) {
+            const options: { limit: number; before?: string } = { limit: 100 };
+            if (lastMessageId) {
+              options.before = lastMessageId;
+            }
 
-        const messages = await channel.messages.fetch(options);
+            const messages = await channel.messages.fetch(options);
 
-        if (messages.size === 0) {
-          hasMore = false;
-          break;
-        }
-
-        const messageArray = Array.from(messages.values());
-
-        // If incremental, filter by date
-        if (sinceDiscordDate) {
-          const sinceTime = new Date(sinceDiscordDate).getTime();
-          const newMessages = messageArray.filter((msg: Message) => {
-            const createdTime = msg.createdAt.getTime();
-            const editedTime = msg.editedAt ? msg.editedAt.getTime() : 0;
-            return createdTime >= sinceTime || editedTime >= sinceTime;
-          });
-
-          if (newMessages.length === 0) {
-            const newestInBatch = messageArray[0];
-            const newestTime = Math.max(
-              newestInBatch.createdAt.getTime(),
-              newestInBatch.editedAt ? newestInBatch.editedAt.getTime() : 0
-            );
-            if (newestTime < sinceTime) {
+            if (messages.size === 0) {
               hasMore = false;
               break;
             }
+
+            const messageArray = Array.from(messages.values());
+
+            // If incremental, filter by date
+            if (sinceDiscordDate) {
+              const sinceTime = new Date(sinceDiscordDate).getTime();
+              const newMessages = messageArray.filter((msg: Message) => {
+                const createdTime = msg.createdAt.getTime();
+                const editedTime = msg.editedAt ? msg.editedAt.getTime() : 0;
+                return createdTime >= sinceTime || editedTime >= sinceTime;
+              });
+
+              if (newMessages.length === 0) {
+                const newestInBatch = messageArray[0];
+                const newestTime = Math.max(
+                  newestInBatch.createdAt.getTime(),
+                  newestInBatch.editedAt ? newestInBatch.editedAt.getTime() : 0,
+                );
+                if (newestTime < sinceTime) {
+                  hasMore = false;
+                  break;
+                }
+              }
+
+              out.push(...newMessages);
+            } else {
+              out.push(...messageArray);
+            }
+
+            lastMessageId = messageArray[messageArray.length - 1].id;
+
+            // Rate limiting
+            await new Promise((resolve) => setTimeout(resolve, 100));
           }
-
-          fetchedMessages.push(...newMessages);
-        } else {
-          fetchedMessages.push(...messageArray);
-        }
-
-        lastMessageId = messageArray[messageArray.length - 1].id;
-
-        // Rate limiting
-        await new Promise((resolve) => setTimeout(resolve, 100));
-      }
+          return out;
+        },
+        {
+          timeoutMs: STAGE_TIMEOUTS.discordMessages,
+          fallback: [],
+        },
+      );
 
       // Format messages
       const formattedMessages = fetchedMessages.map((msg: Message) => {
@@ -3831,7 +4052,11 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       let dbClassifiedThreadIds = new Set<string>();
       if (useDatabase) {
         try {
-          const dbClassifiedThreads = await storage.getClassifiedThreads(actualChannelId);
+          const dbClassifiedThreads = await runStage(
+            "classify:db-classified-threads",
+            () => storage.getClassifiedThreads(actualChannelId),
+            { timeoutMs: STAGE_TIMEOUTS.dbClassifiedThreads, fallback: [] },
+          );
           console.error(`[Classification Debug] Loaded ${dbClassifiedThreads.length} threads from database`);
           
           for (const thread of dbClassifiedThreads) {
@@ -3870,17 +4095,25 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       // Step 2.5: Compute missing thread embeddings before classification (if using semantic classification)
-      if (process.env.OPENAI_API_KEY && useDatabase) {
-        try {
-          console.error(`[Classification] Computing missing Discord thread embeddings for channel ${actualChannelId}...`);
-          const { computeAndSaveThreadEmbeddings } = await import("../storage/db/embeddings.js");
-          const threadEmbeddingResult = await computeAndSaveThreadEmbeddings(process.env.OPENAI_API_KEY, {
-            channelId: actualChannelId,
-          });
-          console.error(`[Classification] Thread embeddings: ${threadEmbeddingResult.computed} computed, ${threadEmbeddingResult.cached} cached`);
-        } catch (embeddingError) {
-          console.error(`[Classification] Warning: Failed to compute thread embeddings (continuing anyway):`, embeddingError);
-        }
+      if (skip_embeddings) {
+        console.error(
+          `[stage] classify:thread-embeddings ⤳ skipped (skip_embeddings=true).`,
+        );
+      } else if (process.env.OPENAI_API_KEY && useDatabase) {
+        const apiKey = process.env.OPENAI_API_KEY;
+        await runStage(
+          "classify:thread-embeddings",
+          async () => {
+            const { computeAndSaveThreadEmbeddings } = await import("../storage/db/embeddings.js");
+            const threadEmbeddingResult = await computeAndSaveThreadEmbeddings(apiKey, {
+              channelId: actualChannelId,
+            });
+            console.error(
+              `[Classification] Thread embeddings: ${threadEmbeddingResult.computed} computed, ${threadEmbeddingResult.cached} cached`,
+            );
+          },
+          { timeoutMs: STAGE_TIMEOUTS.threadEmbeddings, fallback: undefined },
+        );
       }
 
       // Check if this is first-time classification (no classified messages or threads)
@@ -4551,6 +4784,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           },
         ],
       };
+      }, OVERALL_TIMEOUT);
     }
 
     case "sync_classify_and_export": {
@@ -12762,6 +12996,62 @@ Example output:
       }
     }
 
+    case "ingest_chat_messages": {
+      const { ingestChatMessages } = await import("../chat/ingest.js");
+      const rawMessages = Array.isArray(args?.messages) ? args.messages as Array<Record<string, unknown>> : [];
+      const result = await ingestChatMessages({
+        source: String(args?.source ?? ""),
+        workspaceId: String(args?.workspace_id ?? ""),
+        workspaceName: args?.workspace_name ? String(args.workspace_name) : undefined,
+        channelId: String(args?.channel_id ?? ""),
+        channelName: args?.channel_name ? String(args.channel_name) : undefined,
+        messages: rawMessages.map((m) => ({
+          id: String(m?.id ?? ""),
+          authorId: String(m?.author_id ?? ""),
+          authorName: m?.author_name ? String(m.author_name) : undefined,
+          authorIsBot: typeof m?.author_is_bot === "boolean" ? m.author_is_bot : undefined,
+          authorAvatar: m?.author_avatar ? String(m.author_avatar) : undefined,
+          content: String(m?.content ?? ""),
+          createdAt: String(m?.created_at ?? ""),
+          editedAt: m?.edited_at == null ? null : String(m.edited_at),
+          threadId: m?.thread_id ? String(m.thread_id) : undefined,
+          threadName: m?.thread_name ? String(m.thread_name) : undefined,
+          replyTo: m?.reply_to ? String(m.reply_to) : undefined,
+          attachments: Array.isArray(m?.attachments)
+            ? (m.attachments as Array<Record<string, unknown>>).map((a) => ({
+                id: String(a?.id ?? ""),
+                filename: String(a?.filename ?? ""),
+                url: String(a?.url ?? ""),
+                size: typeof a?.size === "number" ? a.size : undefined,
+                contentType: a?.content_type ? String(a.content_type) : undefined,
+              }))
+            : undefined,
+          mentions: Array.isArray(m?.mentions)
+            ? (m.mentions as unknown[]).filter((x): x is string => typeof x === "string")
+            : undefined,
+          reactions: Array.isArray(m?.reactions)
+            ? (m.reactions as Array<Record<string, unknown>>).map((r) => ({
+                emoji: String(r?.emoji ?? ""),
+                count: typeof r?.count === "number" ? r.count : 0,
+              }))
+            : undefined,
+          url: m?.url ? String(m.url) : undefined,
+        })),
+      });
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            success: true,
+            ...result,
+            hint:
+              "To scope this project's briefing to these chat workspaces, add the `workspaceKey` to PROJECT_CHAT_WORKSPACES, e.g. {\"" +
+              "owner/repo\":[\"" + result.workspaceKey + "\"]}",
+          }, null, 2),
+        }],
+      };
+    }
+
     case "save_memory": {
       const { saveMemory } = await import("../storage/db/memory.js");
       const entry = await saveMemory({
@@ -12769,7 +13059,7 @@ Example output:
         summary: String(args?.summary ?? ""),
         tags: Array.isArray(args?.tags) ? args.tags as string[] : [],
         source: "conversation",
-        projectId: args?.project_id ? String(args.project_id) : undefined,
+        projectId: resolveProjectArg(args),
       });
       return {
         content: [{
@@ -12785,7 +13075,7 @@ Example output:
         query: String(args?.query ?? ""),
         limit: typeof args?.limit === "number" ? args.limit : 5,
         tags: Array.isArray(args?.tags) ? args.tags as string[] : undefined,
-        projectId: args?.project_id ? String(args.project_id) : undefined,
+        projectId: resolveProjectArg(args),
       });
       return {
         content: [{
@@ -12800,7 +13090,7 @@ Example output:
       const results = await getRecentMemories({
         limit: typeof args?.limit === "number" ? args.limit : 10,
         tags: Array.isArray(args?.tags) ? args.tags as string[] : undefined,
-        projectId: args?.project_id ? String(args.project_id) : undefined,
+        projectId: resolveProjectArg(args),
       });
       return {
         content: [{
