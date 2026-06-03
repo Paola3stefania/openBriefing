@@ -92,6 +92,16 @@ This document lists all environment variables used by OpenBriefing MCP Server, o
 > (plus `OPENAI_API_KEY`). For embeddings, pick an `OPENAI_EMBEDDING_MODEL` that
 > emits 1024 dims (or write a new `halfvec(N)` migration + run `npm run reembed:all`).
 
+> **Future embedding upgrade (tracked).** We deliberately stay on
+> `mxbai-embed-large` (1024-dim) for now because it's a no-migration default. When
+> we want a measurable retrieval-quality jump, switch to **Qwen3-Embedding** (e.g.
+> `Qwen3-Embedding-4B`, 2560-dim) — it's at the top of current retrieval
+> benchmarks, clearly above both `mxbai-embed-large` and `bge-m3`. It is **not** a
+> drop-in: it requires a new `halfvec(2560)` migration on every embedding column,
+> a full `npm run reembed:all`, and a local re-seed from Neon. `bge-m3` is also
+> 1024-dim (no migration) but only meaningfully helps long-context/multilingual
+> corpora, so it's not worth the re-embed for an English code/issues/docs set.
+
 ### PM Tool Integration (Linear/Jira)
 
 | Variable | Description | Required For |
