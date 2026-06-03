@@ -18,6 +18,7 @@
     "db:import": "tsx scripts/db-import-json.ts",
     "db:backup": "bash scripts/backup-db.sh",
     "db:setup-local": "bash scripts/setup-local-db.sh",
+    "db:seed-local-from-neon": "bash scripts/seed-local-from-neon.sh",
     "test-discord": "tsx scripts/test-discord.ts",
     "read-channel": "tsx scripts/read-channel.ts",
     "list-servers": "tsx scripts/list-servers.ts",
