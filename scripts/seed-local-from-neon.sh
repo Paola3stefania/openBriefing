@@ -32,7 +32,14 @@ cd "$ROOT"
 
 LOCAL_DB_NAME="${1:-briefings}"
 PG_USER="${PGUSER:-$(whoami)}"
-LOCAL_URL="postgresql://${PG_USER}@localhost:5432/${LOCAL_DB_NAME}"
+
+# Local URL: prefer MEMORY_MIRROR_DATABASE_URL from .env if set (single source
+# of truth — same value the app uses for the local DB), fall back to building
+# one from $LOCAL_DB_NAME and the current user.
+LOCAL_URL="$(grep -E '^MEMORY_MIRROR_DATABASE_URL=' .env 2>/dev/null | head -1 | cut -d= -f2-)"
+if [ -z "${LOCAL_URL:-}" ]; then
+  LOCAL_URL="postgresql://${PG_USER}@localhost:5432/${LOCAL_DB_NAME}"
+fi
 
 # Resolve PG client tools — prefer the brew @17 install if present so the
 # version matches Neon (Postgres 17). Falls back to whatever's on PATH.
