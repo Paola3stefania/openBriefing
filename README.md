@@ -246,6 +246,7 @@ No manual context passing. No copy-pasting. The memory just flows.
 
 - [AGENTS.md](AGENTS.md) — onramp for contributors and AI agents (read first in this repo)
 - [CONTRIBUTING.md](CONTRIBUTING.md) — short guide for pull requests
+- [Install from scratch](docs/INSTALL.md)
 - [Environment Variables](docs/ENVIRONMENT_VARIABLES.md)
 - [Database Setup](docs/DATABASE_SETUP.md)
 - [GitHub Integration](docs/GITHUB_INTEGRATION.md)

@@ -65,7 +65,12 @@ git clone https://github.com/Paola3stefania/openBriefing.git
 cd openBriefing
 npm install
 npm run build
+cp run-mcp.sh.example run-mcp.sh && chmod +x run-mcp.sh
 ```
+
+> That last line creates the small "launcher" file Claude Desktop needs. It does
+> **not** come with the download, so don't skip it — without it Claude will say
+> "Failed to spawn process".
 
 ---
 
@@ -83,7 +88,16 @@ in a file named `.env` inside the project folder.
    ```
 2. A text editor opens. Fill in the values your team gave you (GitHub token,
    database URL, etc.). If you don't have a value, leave that line as it is.
-3. Save and close the editor (`Cmd + S`, then `Cmd + W`).
+3. **If you're using the database on your own computer** (not a shared cloud one),
+   make sure these lines are present (your team will tell you if so):
+
+   ```bash
+   OFFLINE_DB=true
+   ```
+
+   Without this line, OpenBriefing will try to use a cloud database instead of the
+   one on your Mac. If your team set you up with a cloud database, leave it out.
+4. Save and close the editor (`Cmd + S`, then `Cmd + W`).
 
 > If your team gave you these settings already filled in, you can skip this section.
 
@@ -155,6 +169,15 @@ That's it — you're done. 🎉
 - Did you fully quit Claude with `Cmd + Q` and reopen it? Try once more.
 - Re-check the file from the "Tell Claude Desktop" step — the username must be
   correct and the text must match exactly (it's easy to delete a `{` or `"`).
+
+**It says "Failed to spawn process: No such file or directory".**
+- The launcher file is missing. Recreate it — copy/paste into Terminal:
+
+  ```bash
+  cd ~/openBriefing && npm run setup:launcher
+  ```
+
+  Then fully quit Claude (`Cmd + Q`) and reopen.
 
 **It shows an error or "failed to start".**
 - Make sure you ran `npm run build` (in the "Get the project" step).

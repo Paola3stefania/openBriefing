@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Launch the OpenBriefing MCP server with .env loaded from the repo root.
+#
+# This is the COMMITTED template. The real launcher (run-mcp.sh) is gitignored
+# so each machine can tweak PATH/node location without touching version control.
+# Create it once after cloning:
+#
+#   cp run-mcp.sh.example run-mcp.sh && chmod +x run-mcp.sh
+#
+# Then point your MCP client (Cursor / Claude Desktop) at the ABSOLUTE path to
+# run-mcp.sh. MCP clients spawn this with an arbitrary cwd, so we cd into the
+# repo dir first (so `dotenv/config` in src/mcp/server.ts picks up ./.env), then
+# exec the compiled entrypoint. Run `npm run build` first so dist/index.js exists.
+cd "$(dirname "$0")" || exit 1
+
+# Clients often spawn with a minimal PATH that omits Homebrew/nvm, so `node`
+# isn't found. Prepend common install locations before resolving it.
+export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.nvm/versions/node/*/bin:$PATH"
+
+NODE_BIN="$(command -v node || true)"
+if [ -z "$NODE_BIN" ]; then
+  for candidate in /opt/homebrew/bin/node /usr/local/bin/node; do
+    [ -x "$candidate" ] && NODE_BIN="$candidate" && break
+  done
+fi
+: "${NODE_BIN:=node}"
+
+exec "$NODE_BIN" dist/index.js "$@"
