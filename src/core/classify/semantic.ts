@@ -7,12 +7,14 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import { join } from "path";
 import { createHash } from "crypto";
-import type { Prisma } from "@prisma/client";
 import type { GitHubIssue, DiscordMessage, ClassifiedMessage } from "./classifier.js";
 import { logWarn } from "../../mcp/logger.js";
 import { getConfig } from "../../config/index.js";
 import { prisma, checkPrismaConnection } from "../../storage/db/prisma.js";
 import { getThreadEmbedding } from "../../storage/db/embeddings.js";
+import { upsertEmbedding, getEmbeddingsBatch } from "../../storage/db/vectorIO.js";
+import { embedText, embedTexts } from "../../embeddings/embed.js";
+import { getEmbeddingProvider } from "../../config/classification.js";
 
 // Progress logging to stderr (doesn't interfere with MCP JSON-RPC on stdout)
 function logProgress(message: string) {
@@ -109,27 +111,33 @@ async function isDatabaseAvailable(): Promise<boolean> {
 async function loadPersistentCache(): Promise<PersistentEmbeddingCache> {
   const currentModel = getEmbeddingModel();
   
-  // Try database first if available
+  // Try database first if available. Two-step load: pull issueId+contentHash
+  // through Prisma (no embedding column) then materialise the halfvec column
+  // via the vectorIO batch helper.
   if (await isDatabaseAvailable()) {
     try {
-      const embeddings = await prisma.issueEmbedding.findMany({
+      const meta = await prisma.issueEmbedding.findMany({
         where: { model: currentModel },
-        select: {
-          issueId: true,
-          embedding: true,
-          contentHash: true,
-        },
+        select: { issueId: true, contentHash: true },
       });
-      
+      const embeddingsMap = await getEmbeddingsBatch({
+        table: "issue_embeddings",
+        pkValues: meta.map((m) => m.issueId),
+        model: currentModel,
+      });
+
       const entries: { [key: string]: PersistentEmbeddingEntry } = {};
-      for (const row of embeddings) {
-        entries[row.issueId] = {
-          embedding: row.embedding as number[],
-          contentHash: row.contentHash,
-          createdAt: new Date().toISOString(),
+      const createdAt = new Date().toISOString();
+      for (const m of meta) {
+        const embedding = embeddingsMap.get(m.issueId);
+        if (!embedding) continue;
+        entries[m.issueId] = {
+          embedding,
+          contentHash: m.contentHash,
+          createdAt,
         };
       }
-      
+
       logProgress(`Loaded ${Object.keys(entries).length} issue embeddings from database`);
       return { version: CACHE_VERSION, model: currentModel, entries };
     } catch (error) {
@@ -207,39 +215,37 @@ async function savePersistentCache(cache: PersistentEmbeddingCache): Promise<voi
       
       const existingIssueIds = new Set(existingIssues.map(i => i.id));
       
-      // Only save embeddings for issues that exist in the database
-      const operations = Object.entries(entries)
-        .filter(([key]) => {
-          const issueId = key.includes("#") ? key : `${defaultRepo}#${parseInt(key, 10)}`;
-          return existingIssueIds.has(issueId);
-        })
+      // Only save embeddings for issues that actually exist in gitHubIssue
+      // (the FK target). Halfvec writes go through raw SQL — Promise.all
+      // instead of $transaction (idempotent upserts; partial-failure recovery
+      // happens on the next save_persistent_cache call when the cache is
+      // re-snapshotted).
+      const writes = Object.entries(entries)
         .map(([key, entry]) => {
           const issueId = key.includes("#") ? key : `${defaultRepo}#${parseInt(key, 10)}`;
-          return prisma.issueEmbedding.upsert({
-            where: { issueId },
-            update: {
-              embedding: entry.embedding as Prisma.InputJsonValue,
+          return { issueId, entry };
+        })
+        .filter(({ issueId }) => existingIssueIds.has(issueId));
+
+      if (writes.length > 0) {
+        await Promise.all(
+          writes.map(({ issueId, entry }) =>
+            upsertEmbedding({
+              table: "issue_embeddings",
+              pkValue: issueId,
+              embedding: entry.embedding,
               contentHash: entry.contentHash,
               model: currentModel,
-            },
-            create: {
-              issueId,
-              embedding: entry.embedding as Prisma.InputJsonValue,
-              contentHash: entry.contentHash,
-              model: currentModel,
-            },
-          });
-        });
-      
-      if (operations.length > 0) {
-        await prisma.$transaction(operations);
+            }),
+          ),
+        );
       }
-      
+
       const skippedCount = validIssueIds.length - existingIssueIds.size;
       if (skippedCount > 0) {
         logProgress(`Skipped ${skippedCount} issue embeddings (issues not found in database)`);
       }
-      logProgress(`Saved ${operations.length} issue embeddings to database`);
+      logProgress(`Saved ${writes.length} issue embeddings to database`);
       return;
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
@@ -266,109 +272,40 @@ function getOpenAIApiKey(): string | null {
 }
 
 /**
- * Check if LLM-based classification is available and enabled
+ * Check if semantic classification is available and enabled.
+ *
+ * Config-only check — does not ping the provider. With Ollama (default), we
+ * trust it's reachable; if it isn't, `embedTexts` throws a clear error at
+ * call time. With OpenAI, we require OPENAI_API_KEY to be set.
  */
 export function isLLMClassificationAvailable(): boolean {
-  return getOpenAIApiKey() !== null;
+  if (process.env.USE_SEMANTIC_CLASSIFICATION === "false") return false;
+  return getEmbeddingProvider() === "ollama" || getOpenAIApiKey() !== null;
 }
 
 /**
- * Truncate text to OpenAI's token limit
- */
-function truncateText(text: string, maxLength = 6000): string {
-  return text.length > maxLength ? text.substring(0, maxLength) : text;
-}
-
-/**
- * Create embeddings for multiple texts in a single API call (batch)
- * OpenAI API supports up to 2048 inputs per request
- * Each input has a token limit of 8191 tokens (text-embedding-ada-002) or 8192 tokens (text-embedding-3)
- * Batch sizes should be chosen based on average content length to stay within token limits
- * Returns embeddings in the same order as input texts
+ * Create embeddings for multiple texts. Routed through the active provider
+ * (Ollama by default, OpenAI when EMBEDDING_PROVIDER=openai). The `apiKey`
+ * argument is preserved for backwards compatibility with callsites that
+ * thread `OPENAI_API_KEY` through; with Ollama it's ignored, with OpenAI it
+ * overrides the env var.
+ *
+ * Returns embeddings in the same order as input texts.
  */
 export async function createEmbeddings(
   texts: string[],
   apiKey: string,
-  retries = 3
+  retries = 3,
 ): Promise<Embedding[]> {
-  if (texts.length === 0) {
-    return [];
-  }
-
-  // Truncate all texts
-  const truncatedTexts = texts.map(text => truncateText(text));
-
-  for (let attempt = 0; attempt < retries; attempt++) {
-    try {
-      const response = await fetch("https://api.openai.com/v1/embeddings", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify({
-          model: getEmbeddingModel(),
-          input: truncatedTexts,
-        }),
-      });
-
-      if (!response.ok) {
-        let errorData: { error?: { message?: string } } | undefined;
-        try {
-          errorData = await response.json() as { error?: { message?: string } };
-        } catch {
-          const errorText = await response.text();
-          errorData = { error: { message: errorText } };
-        }
-        
-        // Handle rate limit errors with exponential backoff
-        if (response.status === 429 && attempt < retries - 1) {
-          let delay = Math.pow(2, attempt) * 2000;
-          
-          const retryAfter = response.headers.get("retry-after");
-          if (retryAfter) {
-            delay = parseInt(retryAfter) * 1000;
-          } else if (errorData?.error?.message) {
-            const match = errorData.error.message.match(/try again in (\d+)(ms|s)/i);
-            if (match) {
-              const value = parseInt(match[1]);
-              delay = match[2].toLowerCase() === 's' ? value * 1000 : value;
-              delay = Math.max(delay + 1000, 2000);
-            }
-          }
-          
-          await new Promise(resolve => setTimeout(resolve, delay));
-          continue;
-        }
-        
-        throw new Error(`OpenAI API error: ${response.status} ${JSON.stringify(errorData)}`);
-      }
-
-      const data = await response.json() as { data?: Array<{ embedding: number[] }> };
-      // Return embeddings in the same order as input texts
-      return (data.data || []).map((item) => item.embedding);
-    } catch (error) {
-      if (attempt === retries - 1) {
-        throw error;
-      }
-      const delay = Math.pow(2, attempt) * 1000;
-      await new Promise(resolve => setTimeout(resolve, delay));
-    }
-  }
-  
-  throw new Error("Failed to create embeddings after retries");
+  return embedTexts(texts, { apiKey, retries });
 }
 
 /**
- * Create embeddings for text using OpenAI API with retry logic
- * For multiple texts, use createEmbeddings() for better performance
+ * Single-text variant. Prefer `createEmbeddings` for multiple texts so we
+ * batch into one provider round-trip.
  */
 export async function createEmbedding(text: string, apiKey: string, retries = 3): Promise<Embedding> {
-  const embeddings = await createEmbeddings([text], apiKey, retries);
-  if (embeddings.length === 0) {
-    throw new Error("Failed to create embedding: API returned empty result");
-  }
-  return embeddings[0];
+  return embedText(text, { apiKey, retries });
 }
 
 /**

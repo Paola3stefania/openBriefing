@@ -9,7 +9,7 @@ import { join } from "path";
 import { createHash } from "crypto";
 import { getConfig } from "../../config/index.js";
 import { prisma, checkPrismaConnection } from "../db/prisma.js";
-import type { Prisma } from "@prisma/client";
+import { upsertEmbedding, getEmbedding, getEmbeddingsBatch } from "../db/vectorIO.js";
 
 /** Resolve cache id (issue number or issueId) to Prisma issueId for IssueEmbedding. Returns null if invalid. */
 function resolveIssueId(id: string): string | null {
@@ -190,63 +190,43 @@ export async function getCachedEmbedding(
     return memoryCache.get(memKey);
   }
   
-  // For issue embeddings, try database first if available
+  // For issue embeddings, try database first if available. The `currentContentHash`
+  // arg makes vectorIO short-circuit to null on hash drift, which is exactly the
+  // re-embed signal the caller wants.
   if (cacheType === "issues" && await isDatabaseAvailable()) {
     try {
       const issueId = resolveIssueId(id);
       if (issueId) {
-        const currentModel = getEmbeddingModel();
-        const result = await prisma.issueEmbedding.findUnique({
-        where: { issueId },
-        select: {
-          embedding: true,
-          contentHash: true,
-          model: true,
-        },
-      });
-        
-        if (result && result.model === currentModel) {
-          if (result.contentHash === contentHash) {
-            // Content matches, use cached embedding
-            const embedding = result.embedding as number[];
-            memoryCache.set(memKey, embedding);
-            return embedding;
-          }
-          // Content hash mismatch means issue changed, return undefined to re-embed
-          return undefined;
-        }
-      }
-    } catch (error) {
-      // Database error, fall back to JSON cache
-      console.error(`[EmbeddingCache] Database error, falling back to JSON:`, error);
-    }
-  }
-  
-  // For thread embeddings, try database first if available
-  if (cacheType === "discord" && await isDatabaseAvailable()) {
-    try {
-      const currentModel = getEmbeddingModel();
-      const result = await prisma.threadEmbedding.findUnique({
-        where: { threadId: id },
-        select: {
-          embedding: true,
-          contentHash: true,
-          model: true,
-        },
-      });
-      
-      if (result && result.model === currentModel) {
-        if (result.contentHash === contentHash) {
-          // Content matches, use cached embedding
-          const embedding = result.embedding as number[];
+        const embedding = await getEmbedding({
+          table: "issue_embeddings",
+          pkValue: issueId,
+          model: getEmbeddingModel(),
+          currentContentHash: contentHash,
+        });
+        if (embedding) {
           memoryCache.set(memKey, embedding);
           return embedding;
         }
-        // Content hash mismatch means thread changed, return undefined to re-embed
-        return undefined;
       }
     } catch (error) {
-      // Database error, fall back to JSON cache
+      console.error(`[EmbeddingCache] Database error, falling back to JSON:`, error);
+    }
+  }
+
+  // For thread embeddings, try database first if available
+  if (cacheType === "discord" && await isDatabaseAvailable()) {
+    try {
+      const embedding = await getEmbedding({
+        table: "thread_embeddings",
+        pkValue: id,
+        model: getEmbeddingModel(),
+        currentContentHash: contentHash,
+      });
+      if (embedding) {
+        memoryCache.set(memKey, embedding);
+        return embedding;
+      }
+    } catch (error) {
       console.error(`[EmbeddingCache] Database error, falling back to JSON:`, error);
     }
   }
@@ -280,61 +260,41 @@ export async function setCachedEmbedding(
   // Check if database is configured
   const hasDatabase = !!(process.env.DATABASE_URL || (process.env.DB_HOST && process.env.DB_NAME));
   
-  // For issue embeddings, save to database if configured
   if (cacheType === "issues" && hasDatabase) {
     if (!(await isDatabaseAvailable())) {
       throw new Error("DATABASE_URL is set but database is not available for issue embedding cache");
     }
-    
     try {
       const issueId = resolveIssueId(id);
       if (issueId) {
-        const currentModel = getEmbeddingModel();
-        await prisma.issueEmbedding.upsert({
-        where: { issueId },
-        update: {
-          embedding: embedding as Prisma.InputJsonValue,
+        await upsertEmbedding({
+          table: "issue_embeddings",
+          pkValue: issueId,
+          embedding,
           contentHash,
-          model: currentModel,
-        },
-        create: {
-          issueId,
-          embedding: embedding as Prisma.InputJsonValue,
-          contentHash,
-          model: currentModel,
-        },
-      });
-        return; // Successfully saved to database, skip JSON cache
+          model: getEmbeddingModel(),
+        });
+        return;
       }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       throw new Error(`Failed to save issue embedding to database: ${errorMessage}`);
     }
   }
-  
-  // For thread embeddings, save to database if configured
+
   if (cacheType === "discord" && hasDatabase) {
     if (!(await isDatabaseAvailable())) {
       throw new Error("DATABASE_URL is set but database is not available for thread embedding cache");
     }
-    
     try {
-      const currentModel = getEmbeddingModel();
-      await prisma.threadEmbedding.upsert({
-        where: { threadId: id },
-        update: {
-          embedding: embedding as Prisma.InputJsonValue,
-          contentHash,
-          model: currentModel,
-        },
-        create: {
-          threadId: id,
-          embedding: embedding as Prisma.InputJsonValue,
-          contentHash,
-          model: currentModel,
-        },
+      await upsertEmbedding({
+        table: "thread_embeddings",
+        pkValue: id,
+        embedding,
+        contentHash,
+        model: getEmbeddingModel(),
       });
-      return; // Successfully saved to database, skip JSON cache
+      return;
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       throw new Error(`Failed to save thread embedding to database: ${errorMessage}`);
@@ -361,88 +321,66 @@ export async function batchSetCachedEmbeddings(
   // Check if database is configured
   const hasDatabase = !!(process.env.DATABASE_URL || (process.env.DB_HOST && process.env.DB_NAME));
   
-  // For issue embeddings, save to database if configured
   if (cacheType === "issues" && hasDatabase) {
     if (!(await isDatabaseAvailable())) {
       throw new Error("DATABASE_URL is set but database is not available for issue embedding batch save");
     }
-    
     try {
       const currentModel = getEmbeddingModel();
       const itemsToSave = items
         .map((item) => ({ ...item, issueId: resolveIssueId(item.id) }))
         .filter((item): item is typeof item & { issueId: string } => item.issueId !== null);
-      
+
       if (itemsToSave.length > 0) {
-        // Save to memory cache
         for (const item of itemsToSave) {
           const memKey = `${cacheType}:${item.id}`;
           memoryCache.set(memKey, item.embedding);
         }
-        
-        // Batch save in a single transaction
-        await prisma.$transaction(async (tx) => {
-          await Promise.all(itemsToSave.map((item) => {
-            return tx.issueEmbedding.upsert({
-              where: { issueId: item.issueId },
-              update: {
-                embedding: item.embedding as Prisma.InputJsonValue,
-                contentHash: item.contentHash,
-                model: currentModel,
-              },
-              create: {
-                issueId: item.issueId,
-                embedding: item.embedding as Prisma.InputJsonValue,
-                contentHash: item.contentHash,
-                model: currentModel,
-              },
-            });
-          }));
-        });
-        return; // Successfully saved to database, skip JSON cache
+        // No transaction wrapper: halfvec writes go through raw SQL and
+        // upserts are idempotent — the caller's batch retry path covers
+        // partial failures.
+        await Promise.all(
+          itemsToSave.map((item) =>
+            upsertEmbedding({
+              table: "issue_embeddings",
+              pkValue: item.issueId,
+              embedding: item.embedding,
+              contentHash: item.contentHash,
+              model: currentModel,
+            }),
+          ),
+        );
+        return;
       }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       throw new Error(`Failed to batch save issue embeddings to database: ${errorMessage}`);
     }
   }
-  
-  // For thread embeddings, save to database if configured
+
   if (cacheType === "discord" && hasDatabase) {
     if (!(await isDatabaseAvailable())) {
       throw new Error("DATABASE_URL is set but database is not available for thread embedding batch save");
     }
-    
     try {
       const currentModel = getEmbeddingModel();
-      
       if (items.length > 0) {
-        // Save to memory cache
         for (const item of items) {
           const memKey = `${cacheType}:${item.id}`;
           memoryCache.set(memKey, item.embedding);
         }
-        
-        // Batch save in a single transaction
-        await prisma.$transaction(async (tx) => {
-          await Promise.all(items.map((item) => {
-            return tx.threadEmbedding.upsert({
-              where: { threadId: item.id },
-              update: {
-                embedding: item.embedding as Prisma.InputJsonValue,
-                contentHash: item.contentHash,
-                model: currentModel,
-              },
-              create: {
-                threadId: item.id,
-                embedding: item.embedding as Prisma.InputJsonValue,
-                contentHash: item.contentHash,
-                model: currentModel,
-              },
-            });
-          }));
-        });
-        return; // Successfully saved to database, skip JSON cache
+        await Promise.all(
+          items.map((item) =>
+            upsertEmbedding({
+              table: "thread_embeddings",
+              pkValue: item.id,
+              embedding: item.embedding,
+              contentHash: item.contentHash,
+              model: currentModel,
+            }),
+          ),
+        );
+        return;
       }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
@@ -476,60 +414,56 @@ export async function batchSetCachedEmbeddings(
 export async function getAllCachedEmbeddings(
   cacheType: "issues" | "discord"
 ): Promise<Map<string, Embedding>> {
-  // For issue embeddings, load from database first if available
+  // For issue embeddings, load from database first if available. We have to
+  // know the set of pk values up-front for the batch helper, so we fetch
+  // matching ids via Prisma (a normal column read — no embedding selected),
+  // then materialise the embeddings via vectorIO in a single round-trip.
   if (cacheType === "issues" && await isDatabaseAvailable()) {
     try {
       const currentModel = getEmbeddingModel();
-      const embeddings = await prisma.issueEmbedding.findMany({
-        where: { model: currentModel },
-        select: {
-          issueId: true,
-          embedding: true,
-        },
+      const ids = (
+        await prisma.issueEmbedding.findMany({
+          where: { model: currentModel },
+          select: { issueId: true },
+        })
+      ).map((r) => r.issueId);
+
+      const embeddingsMap = await getEmbeddingsBatch({
+        table: "issue_embeddings",
+        pkValues: ids,
+        model: currentModel,
       });
-      
-      const embeddingsMap = new Map<string, Embedding>();
-      for (const row of embeddings) {
-        const id = row.issueId;
-        const embedding = row.embedding as number[];
-        embeddingsMap.set(id, embedding);
-        // Also populate memory cache
-        const memKey = `${cacheType}:${id}`;
-        memoryCache.set(memKey, embedding);
+
+      for (const [id, embedding] of embeddingsMap) {
+        memoryCache.set(`${cacheType}:${id}`, embedding);
       }
-      
       return embeddingsMap;
     } catch (error) {
-      // Database error, fall back to JSON cache
       console.error(`[EmbeddingCache] Database load error, falling back to JSON:`, error);
     }
   }
-  
-  // For thread embeddings, load from database first if available
+
   if (cacheType === "discord" && await isDatabaseAvailable()) {
     try {
       const currentModel = getEmbeddingModel();
-      const embeddings = await prisma.threadEmbedding.findMany({
-        where: { model: currentModel },
-        select: {
-          threadId: true,
-          embedding: true,
-        },
+      const ids = (
+        await prisma.threadEmbedding.findMany({
+          where: { model: currentModel },
+          select: { threadId: true },
+        })
+      ).map((r) => r.threadId);
+
+      const embeddingsMap = await getEmbeddingsBatch({
+        table: "thread_embeddings",
+        pkValues: ids,
+        model: currentModel,
       });
-      
-      const embeddingsMap = new Map<string, Embedding>();
-      for (const row of embeddings) {
-        const id = row.threadId;
-        const embedding = row.embedding as number[];
-        embeddingsMap.set(id, embedding);
-        // Also populate memory cache
-        const memKey = `${cacheType}:${id}`;
-        memoryCache.set(memKey, embedding);
+
+      for (const [id, embedding] of embeddingsMap) {
+        memoryCache.set(`${cacheType}:${id}`, embedding);
       }
-      
       return embeddingsMap;
     } catch (error) {
-      // Database error, fall back to JSON cache
       console.error(`[EmbeddingCache] Database load error, falling back to JSON:`, error);
     }
   }

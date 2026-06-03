@@ -2,8 +2,9 @@
  * Persistent conversation memory with semantic search.
  *
  * Stores memory entries (conversation snippets, decisions, learnings) as text
- * with OpenAI embeddings in JSONB. Cosine similarity search is done in JS,
- * consistent with how the rest of OpenBriefing handles embeddings.
+ * plus an OpenAI embedding in `memory_entry_embeddings.embedding`, which is
+ * pgvector `halfvec(1024)` with an HNSW cosine index. Search uses the
+ * indexed `<=>` operator, ordering and top-k happen in Postgres.
  */
 
 import { createHash } from "crypto";
@@ -15,6 +16,7 @@ import { createEmbedding } from "../../core/classify/semantic.js";
 import { getConfig } from "../../config/index.js";
 import { detectProjectId } from "../../config/project.js";
 import { toSqlVector } from "./vector.js";
+import { upsertEmbedding } from "./vectorIO.js";
 
 function getEmbeddingModel(): string {
   return getConfig().classification.embeddingModel;
@@ -40,9 +42,8 @@ function hashContent(content: string): string {
  */
 /**
  * Raw upsert of a single embedding row into the given client's
- * `memory_entry_embeddings`. The embedding column is a pgvector `vector`
- * (Unsupported in Prisma), so the literal is bound as a parameter and cast to
- * `vector` in-query (no injection, no client-side type support needed). The
+ * `memory_entry_embeddings`. Defers to the generic vectorIO helper so the
+ * pgvector cast (`::halfvec`) and ON CONFLICT shape live in one place. The
  * memory row it references must already exist in that client's DB.
  */
 async function upsertEmbeddingRow(
@@ -51,23 +52,14 @@ async function upsertEmbeddingRow(
   embedding: number[],
   content: string,
 ): Promise<void> {
-  await client.$executeRaw`
-    INSERT INTO "memory_entry_embeddings"
-      ("memory_id", "embedding", "content_hash", "model", "created_at", "updated_at")
-    VALUES (
-      ${memoryId},
-      ${toSqlVector(embedding)}::vector,
-      ${hashContent(content)},
-      ${getEmbeddingModel()},
-      now(),
-      now()
-    )
-    ON CONFLICT ("memory_id") DO UPDATE SET
-      "embedding" = EXCLUDED."embedding",
-      "content_hash" = EXCLUDED."content_hash",
-      "model" = EXCLUDED."model",
-      "updated_at" = now()
-  `;
+  await upsertEmbedding({
+    client,
+    table: "memory_entry_embeddings",
+    pkValue: memoryId,
+    embedding,
+    contentHash: hashContent(content),
+    model: getEmbeddingModel(),
+  });
 }
 
 export async function embedAndStoreMemoryEmbedding(options: {
@@ -298,12 +290,12 @@ export async function searchMemory(options: {
           m."source",
           m."session_id"  AS "sessionId",
           m."created_at"  AS "createdAt",
-          1 - (e."embedding" <=> ${queryVec}::vector) AS "similarity"
+          1 - (e."embedding" <=> ${queryVec}::halfvec) AS "similarity"
         FROM "memory_entries" m
         JOIN "memory_entry_embeddings" e ON e."memory_id" = m."id"
         WHERE m."project_id" = ${projectId}
         ${tagCond}
-        ORDER BY e."embedding" <=> ${queryVec}::vector
+        ORDER BY e."embedding" <=> ${queryVec}::halfvec
         LIMIT ${limit}
       `);
 

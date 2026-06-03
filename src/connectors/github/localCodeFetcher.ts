@@ -123,19 +123,26 @@ export async function fetchLocalCodeContext(
                 filePath: relativePath,
                 contentHash: contentHash,
               },
-              include: {
-                embeddings: true,
-              },
+              select: { id: true, embeddings: { select: { codeFileId: true } } },
             });
-            
+
             let fileEmbedding: number[] | null = null;
-            
-            if (existingCodeFile?.embeddings) {
-              // Reuse existing embedding from database
-              // The embedding is stored as JSON in the database, convert it
-              const savedEmbedding = existingCodeFile.embeddings.embedding;
-              if (savedEmbedding && Array.isArray(savedEmbedding)) {
-                fileEmbedding = savedEmbedding as number[];
+
+            if (existingCodeFile?.embeddings?.codeFileId) {
+              // Reuse the cached halfvec embedding via vectorIO. We can't
+              // pull the column through Prisma's typed includes any more, so
+              // fetch by id only when the row exists.
+              const { getEmbedding: getEmbeddingFromTable } = await import(
+                "../../storage/db/vectorIO.js"
+              );
+              const { getConfig } = await import("../../config/index.js");
+              const saved = await getEmbeddingFromTable({
+                table: "code_file_embeddings",
+                pkValue: existingCodeFile.embeddings.codeFileId,
+                model: getConfig().classification.embeddingModel,
+              });
+              if (saved) {
+                fileEmbedding = saved;
                 reusedEmbeddings++;
               }
             }

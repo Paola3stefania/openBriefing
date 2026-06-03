@@ -440,16 +440,19 @@ async function parseAndIndexCode(
       
       log(`[CodeIndexer] Processing file path: "${filePath}" (normalized relative path, will be stored in database)`);
 
-      // Check if file already indexed with embedding
+      // Check if file already indexed with embedding. We only need to know
+      // whether the associated halfvec row exists, not its contents — so
+      // `select: codeFileId` instead of `include: true` keeps the halfvec
+      // column off the wire entirely.
       const existingFile = await prisma.codeFile.findFirst({
         where: {
           codeSearchId: searchId,
           filePath,
         },
-        include: { 
-          embeddings: true,
+        include: {
+          embeddings: { select: { codeFileId: true } },
           codeSections: {
-            include: { embedding: true },
+            include: { embedding: { select: { codeSectionId: true } } },
           },
         },
       });
@@ -624,10 +627,11 @@ async function parseAndIndexCode(
         const sections = parseCodeIntoSections(fileContent, filePath, language);
         log(`[CodeIndexer] Parsed ${sections.length} sections from new/changed file ${filePath} (language: ${language || "unknown"})`);
         
-        // Get existing sections for this file
+        // Get existing sections for this file. As above, we only need
+        // existence of the embedding row, not its halfvec column.
         const existingSections = await prisma.codeSection.findMany({
           where: { codeFileId: newFileId },
-          include: { embedding: true },
+          include: { embedding: { select: { codeSectionId: true } } },
         });
         
         const existingSectionsMap = new Map(
