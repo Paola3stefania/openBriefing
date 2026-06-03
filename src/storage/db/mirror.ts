@@ -19,6 +19,7 @@
  */
 
 import { PrismaClient } from "@prisma/client";
+import { getActiveDatabase } from "./prisma.js";
 
 // `undefined` = not yet resolved, `null` = resolved to "no mirror configured".
 let mirrorClient: PrismaClient | null | undefined;
@@ -26,12 +27,22 @@ let mirrorClient: PrismaClient | null | undefined;
 /**
  * Get the mirror Prisma client, or `null` when no mirror is configured.
  * Lazily instantiated and cached for the process lifetime.
+ *
+ * Returns null when OFFLINE_DB=true and the active primary IS the local
+ * mirror DB — mirroring there would write the same row twice to the same
+ * physical database.
  */
 export function getMirrorPrisma(): PrismaClient | null {
   if (mirrorClient !== undefined) return mirrorClient;
 
   const url = process.env.MEMORY_MIRROR_DATABASE_URL?.trim();
   if (!url) {
+    mirrorClient = null;
+    return null;
+  }
+
+  // If the app's active DB IS the mirror URL (offline mode), skip mirroring.
+  if (getActiveDatabase().url === url) {
     mirrorClient = null;
     return null;
   }

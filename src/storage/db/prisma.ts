@@ -1,22 +1,61 @@
 /**
- * Prisma client singleton for OpenBriefing
- * Provides type-safe database access
+ * Prisma client singleton for OpenBriefing.
+ *
+ * Routes to one of two databases based on the `OFFLINE_DB` env flag:
+ *   - OFFLINE_DB=false (default) → DATABASE_URL (Neon / cloud)
+ *   - OFFLINE_DB=true            → MEMORY_MIRROR_DATABASE_URL (local Postgres)
+ *
+ * MEMORY_MIRROR_DATABASE_URL doubles as the local URL because that's already
+ * where memory writes are dual-mirrored — it's the same physical DB whether
+ * we're using it as a mirror (OFFLINE_DB=false) or as the primary
+ * (OFFLINE_DB=true). When primary == mirror URL, mirror.ts skips its
+ * dual-write to avoid writing the same row twice.
+ *
+ * The choice is resolved once at module load, so flipping the flag requires
+ * a process restart (e.g. restart the MCP server / `npm run dev` / Cursor).
+ * Prisma CLI calls (migrate, generate, etc.) honor the same flag via the
+ * `scripts/db-cli.sh` wrapper — see package.json `db:*` scripts.
  */
 
 import { PrismaClient } from "@prisma/client";
 
-// PrismaClient is attached to the `global` object to prevent
-// exhausting your database connection limit during development/hot-reloads.
-// In production, a single instance is used for the lifetime of the process.
-// Learn more: https://pris.ly/d/help/next-js-best-practices
+/**
+ * Decide which database the app is currently pointed at. Logged once on
+ * startup so it's visible in MCP server logs whether you're talking to
+ * Neon or local. Returns the resolved URL plus a short label for logs.
+ */
+export function getActiveDatabase(): { url: string; label: "neon" | "local" } {
+  const offline = process.env.OFFLINE_DB === "true";
+  const localUrl = process.env.MEMORY_MIRROR_DATABASE_URL?.trim();
+  const cloudUrl = process.env.DATABASE_URL?.trim();
+
+  if (offline && localUrl) {
+    return { url: localUrl, label: "local" };
+  }
+  // Fall back to DATABASE_URL even if offline=true but the mirror URL isn't
+  // set; Prisma will still error clearly if neither is defined.
+  return { url: cloudUrl ?? "", label: "neon" };
+}
 
 const globalForPrisma = globalThis as unknown as {
   prisma: PrismaClient | undefined;
 };
 
+const active = getActiveDatabase();
+
+if (!globalForPrisma.prisma && process.env.NODE_ENV !== "test") {
+  // One-time startup log: which DB the agent will read/write through this run.
+  // stderr keeps it out of the MCP JSON-RPC stdout channel.
+  console.error(
+    `[prisma] active database: ${active.label}` +
+      (active.label === "local" ? " (OFFLINE_DB=true)" : ""),
+  );
+}
+
 export const prisma =
   globalForPrisma.prisma ??
   new PrismaClient({
+    datasourceUrl: active.url || undefined,
     log: process.env.NODE_ENV === "development" ? ["error", "warn"] : ["error"],
   });
 
