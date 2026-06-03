@@ -103,6 +103,26 @@ MEMORY_MIRROR_DATABASE_URL=postgresql://<user>@localhost:5432/briefings  # local
 flag is read once at process startup. Prisma CLI (`npm run db:migrate` etc.)
 honors the flag too via `scripts/db-cli.sh`.
 
+#### Daily flow cheat sheet
+
+```
+Going offline (e.g., flight)
+────────────────────────────────────
+  1. edit .env → OFFLINE_DB=true
+  2. restart MCP server / npm run dev / Cursor
+  → reading + writing to local. Mirror auto-disables.
+
+Reconnecting
+────────────────────────────────────
+  1. npm run db:sync-local-to-neon    # push offline work to Neon
+  2. edit .env → OFFLINE_DB=false
+  3. restart
+  → back to cloud-primary, mirror re-enabled.
+```
+
+Or with the cloud-primary cron set up, you don't need to do anything
+end-of-day — the 3am job pulls Neon → local automatically.
+
 #### Cloud-primary day (`OFFLINE_DB=false`)
 
 - Every read/write hits Neon directly. `saveMemory` dual-writes to local.
