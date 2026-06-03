@@ -6,6 +6,7 @@
 import { log, logError, logWarn } from "../mcp/logger.js";
 import { ProductFeature } from "./types.js";
 import { DocumentationContent } from "./documentationFetcher.js";
+import { llmChat } from "../llm/chat.js";
 
 /**
  * Extract product features from documentation using LLM
@@ -14,12 +15,6 @@ export async function extractFeaturesFromDocumentation(
   documentation: DocumentationContent | DocumentationContent[],
   apiKey?: string
 ): Promise<ProductFeature[]> {
-  const openaiKey = apiKey || process.env.OPENAI_API_KEY;
-  
-  if (!openaiKey) {
-    throw new Error("OPENAI_API_KEY environment variable is required for feature extraction");
-  }
-
   const docs = Array.isArray(documentation) ? documentation : [documentation];
   
   // Combine all documentation content
@@ -39,18 +34,11 @@ export async function extractFeaturesFromDocumentation(
     : combinedContent;
 
   try {
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${openaiKey}`,
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini", // Using mini for cost efficiency
-        messages: [
-          {
-            role: "system",
-            content: `You are a product manager analyzing documentation to extract product features. 
+    const content = await llmChat(
+      [
+        {
+          role: "system",
+          content: `You are a product manager analyzing documentation to extract product features. 
 Extract distinct features, capabilities, and functionalities from the documentation.
 
 For each feature, provide:
@@ -69,29 +57,15 @@ Return the result as a JSON array of features. Each feature should have:
   "priority": "high|medium|low"
 }
 
-Focus on user-facing features and capabilities, not implementation details.`
-          },
-          {
-            role: "user",
-            content: `Analyze the following documentation and extract all distinct product features:\n\n${contentToAnalyze}`
-          }
-        ],
-        response_format: { type: "json_object" },
-        temperature: 0.3,
-      }),
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`OpenAI API error: ${response.status} ${errorText}`);
-    }
-
-    const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
-    const content = data.choices?.[0]?.message?.content;
-    
-    if (!content) {
-      throw new Error("No content in OpenAI response");
-    }
+Focus on user-facing features and capabilities, not implementation details.`,
+        },
+        {
+          role: "user",
+          content: `Analyze the following documentation and extract all distinct product features:\n\n${contentToAnalyze}`,
+        },
+      ],
+      { jsonMode: true, temperature: 0.3 },
+    );
 
     const parsed = JSON.parse(content);
     

@@ -10,6 +10,7 @@
 
 import { Prisma } from "@prisma/client";
 import { prisma } from "../storage/db/prisma.js";
+import { getLLMApiKey } from "../llm/chat.js";
 import { toSqlVector } from "../storage/db/vector.js";
 import { detectProjectId } from "../config/project.js";
 import { getRecentSessions } from "./sessions.js";
@@ -621,7 +622,7 @@ async function distillRelatedInsights(input: {
   });
   if (focusQuery.length === 0) return [];
 
-  const apiKey = process.env.OPENAI_API_KEY ?? null;
+  const apiKey = getLLMApiKey() ?? null;
   if (!apiKey) return [];
 
   let queryEmbedding: number[];

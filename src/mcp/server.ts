@@ -31,6 +31,7 @@ import {
 import { loadDiscordCache, getAllMessagesFromCache, getMostRecentMessageDate, mergeMessagesByThread, organizeMessagesByThread, getThreadContextForMessage, type DiscordCache, type DiscordMessage as CachedDiscordMessage } from "../storage/cache/discordCache.js";
 import { loadClassificationHistory, saveClassificationHistory, filterUnclassifiedMessages, addMessageClassification, updateThreadStatus, getThreadStatus, migrateStandaloneToThread, filterUngroupedSignals, addGroup, getGroupingStats, type ClassificationHistory } from "../storage/cache/classificationHistory.js";
 import { getConfig } from "../config/index.js";
+import { llmChat, getLLMApiKey } from "../llm/chat.js";
 import {
   classifyMessagesWithCache,
   type DiscordMessage,
@@ -3101,7 +3102,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
     case "compute_discord_embeddings": {
       const { channel_id } = args as { channel_id?: string };
       
-      if (!process.env.OPENAI_API_KEY) {
+      if (!getLLMApiKey()) {
         throw new Error("OPENAI_API_KEY is required for computing embeddings.");
       }
 
@@ -3114,7 +3115,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
       
       // Compute embeddings (with optional channel filter)
-      const result = await computeAndSaveThreadEmbeddings(process.env.OPENAI_API_KEY, {
+      const result = await computeAndSaveThreadEmbeddings(getLLMApiKey(), {
         channelId: channel_id,
       });
       
@@ -3138,7 +3139,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     case "compute_github_issue_embeddings": {
-      if (!process.env.OPENAI_API_KEY) {
+      if (!getLLMApiKey()) {
         throw new Error("OPENAI_API_KEY is required for computing embeddings.");
       }
 
@@ -3153,7 +3154,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         console.error(`[Embeddings] Incremental mode - will only compute embeddings for issues that don't have them or have changed content`);
       }
       
-      const result = await computeAndSaveIssueEmbeddings(process.env.OPENAI_API_KEY, undefined, force);
+      const result = await computeAndSaveIssueEmbeddings(getLLMApiKey(), undefined, force);
 
       return {
         content: [
@@ -3172,7 +3173,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     case "compute_feature_embeddings": {
-      if (!process.env.OPENAI_API_KEY) {
+      if (!getLLMApiKey()) {
         throw new Error("OPENAI_API_KEY is required for computing feature embeddings.");
       }
 
@@ -3193,7 +3194,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         console.error("[Embeddings] Force mode enabled - will recompute all embeddings");
       }
       
-      await computeAndSaveFeatureEmbeddings(process.env.OPENAI_API_KEY, undefined, force, codeContext);
+      await computeAndSaveFeatureEmbeddings(getLLMApiKey(), undefined, force, codeContext);
 
       return {
         content: [
@@ -3211,7 +3212,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     case "compute_group_embeddings": {
-      if (!process.env.OPENAI_API_KEY) {
+      if (!getLLMApiKey()) {
         throw new Error("OPENAI_API_KEY is required for computing group embeddings.");
       }
 
@@ -3226,7 +3227,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         console.error("[Embeddings] Incremental mode - will only compute embeddings for groups that don't have them or have changed content");
       }
       
-      const result = await computeAndSaveGroupEmbeddings(process.env.OPENAI_API_KEY, undefined, force);
+      const result = await computeAndSaveGroupEmbeddings(getLLMApiKey(), undefined, force);
 
       return {
         content: [
@@ -3950,8 +3951,8 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         console.error(
           `[stage] classify:issue-embeddings ⤳ skipped (skip_embeddings=true).`,
         );
-      } else if (process.env.OPENAI_API_KEY && useDatabase) {
-        const apiKey = process.env.OPENAI_API_KEY;
+      } else if (getLLMApiKey() && useDatabase) {
+        const apiKey = getLLMApiKey();
         await runStage(
           "classify:issue-embeddings",
           async () => {
@@ -4266,8 +4267,8 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         console.error(
           `[stage] classify:thread-embeddings ⤳ skipped (skip_embeddings=true).`,
         );
-      } else if (process.env.OPENAI_API_KEY && useDatabase) {
-        const apiKey = process.env.OPENAI_API_KEY;
+      } else if (getLLMApiKey() && useDatabase) {
+        const apiKey = getLLMApiKey();
         await runStage(
           "classify:thread-embeddings",
           async () => {
@@ -4980,7 +4981,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         throw new Error("Database is not available.");
       }
 
-      const apiKey = process.env.OPENAI_API_KEY;
+      const apiKey = getLLMApiKey();
       if (!apiKey) {
         throw new Error("OPENAI_API_KEY is required for embeddings-based matching.");
       }
@@ -5277,30 +5278,21 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             ).join("\n\n---\n\n");
             
             try {
-              const response = await fetch("https://api.openai.com/v1/chat/completions", {
-                method: "POST",
-                headers: {
-                  "Content-Type": "application/json",
-                  "Authorization": `Bearer ${apiKey}`,
-                },
-                body: JSON.stringify({
-                  model: "gpt-4o-mini",
-                  messages: [{
+              const text = await llmChat(
+                [
+                  {
                     role: "system",
                     content: `You are an issue classifier. For each issue, output ONLY valid labels from: ${validLabels.join(", ")}. Format: [1] label1, label2\n[2] label1`,
-                  }, {
+                  },
+                  {
                     role: "user",
                     content: batchContent,
-                  }],
-                  temperature: 0,
-                  max_tokens: 500,
-                }),
-              });
-              
-              if (response.ok) {
-                const data = await response.json() as { choices: Array<{ message: { content: string } }> };
-                const text = data.choices[0]?.message?.content || "";
-                
+                  },
+                ],
+                { temperature: 0, maxTokens: 500 },
+              );
+
+              {
                 // Parse labels for each issue
                 for (let j = 0; j < batch.length; j++) {
                   const pattern = new RegExp(`\\[${j + 1}\\]\\s*([^\\[\\n]+)`, "i");
@@ -6912,7 +6904,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           throw new Error("Channel ID is required. Provide channel_id parameter or set DISCORD_DEFAULT_CHANNEL_ID.");
         }
 
-        if (!process.env.OPENAI_API_KEY) {
+        if (!getLLMApiKey()) {
           throw new Error("OPENAI_API_KEY is required for grouping.");
         }
 
@@ -6938,13 +6930,13 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             // Compute missing issue embeddings
             console.error("[Grouping] Computing missing GitHub issue embeddings...");
             const { computeAndSaveIssueEmbeddings } = await import("../storage/db/embeddings.js");
-            const issueEmbeddingResult = await computeAndSaveIssueEmbeddings(process.env.OPENAI_API_KEY);
+            const issueEmbeddingResult = await computeAndSaveIssueEmbeddings(getLLMApiKey());
             console.error(`[Grouping] Issue embeddings: ${issueEmbeddingResult.computed} computed, ${issueEmbeddingResult.cached} cached`);
             
             // Compute missing thread embeddings
             console.error(`[Grouping] Computing missing Discord thread embeddings for channel ${actualChannelId}...`);
             const { computeAndSaveThreadEmbeddings } = await import("../storage/db/embeddings.js");
-            const threadEmbeddingResult = await computeAndSaveThreadEmbeddings(process.env.OPENAI_API_KEY, {
+            const threadEmbeddingResult = await computeAndSaveThreadEmbeddings(getLLMApiKey(), {
               channelId: actualChannelId,
             });
             console.error(`[Grouping] Thread embeddings: ${threadEmbeddingResult.computed} computed, ${threadEmbeddingResult.cached} cached`);
@@ -7138,15 +7130,15 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
               }
               
               // Compute embeddings for issues and threads
-              if (process.env.OPENAI_API_KEY) {
+              if (getLLMApiKey()) {
                 try {
                   console.error(`[Grouping] Computing embeddings...`);
                   const { computeAndSaveIssueEmbeddings, computeAndSaveThreadEmbeddings } = await import("../storage/db/embeddings.js");
                   
-                  const issueEmbeddingResult = await computeAndSaveIssueEmbeddings(process.env.OPENAI_API_KEY);
+                  const issueEmbeddingResult = await computeAndSaveIssueEmbeddings(getLLMApiKey());
                   console.error(`[Grouping] Issue embeddings: ${issueEmbeddingResult.computed} computed, ${issueEmbeddingResult.cached} cached`);
                   
-                  const threadEmbeddingResult = await computeAndSaveThreadEmbeddings(process.env.OPENAI_API_KEY, {
+                  const threadEmbeddingResult = await computeAndSaveThreadEmbeddings(getLLMApiKey(), {
                     channelId: actualChannelId,
                   });
                   console.error(`[Grouping] Thread embeddings: ${threadEmbeddingResult.computed} computed, ${threadEmbeddingResult.cached} cached`);
@@ -8366,7 +8358,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           throw new Error("Channel ID is required. Provide channel_id parameter or set DISCORD_DEFAULT_CHANNEL_ID.");
         }
 
-        if (!process.env.OPENAI_API_KEY) {
+        if (!getLLMApiKey()) {
           throw new Error("OPENAI_API_KEY is required for issue grouping.");
         }
 
@@ -8409,7 +8401,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         console.error(`[GroupIssues] Computing GitHub issue embeddings...`);
         const { computeAndSaveIssueEmbeddings } = await import("../storage/db/embeddings.js");
         // Parameters: apiKey, onProgress callback (undefined), force flag
-        const embeddingResult = await computeAndSaveIssueEmbeddings(process.env.OPENAI_API_KEY, undefined, force);
+        const embeddingResult = await computeAndSaveIssueEmbeddings(getLLMApiKey(), undefined, force);
         console.error(`[GroupIssues] GitHub issue embeddings: ${embeddingResult.computed} computed, ${embeddingResult.cached} cached, ${embeddingResult.total} total`);
 
         // STEP 3: Load all issue embeddings for grouping
@@ -8523,7 +8515,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // First, compute thread embeddings if needed
         console.error(`[GroupIssues] Computing Discord thread embeddings...`);
         const { computeAndSaveThreadEmbeddings } = await import("../storage/db/embeddings.js");
-        const threadEmbeddingResult = await computeAndSaveThreadEmbeddings(process.env.OPENAI_API_KEY, {
+        const threadEmbeddingResult = await computeAndSaveThreadEmbeddings(getLLMApiKey(), {
           channelId: actualChannelId,
         });
         console.error(`[GroupIssues] Thread embeddings: ${threadEmbeddingResult.computed} computed, ${threadEmbeddingResult.cached} cached`);
@@ -9015,7 +9007,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         // Compute feature embeddings if needed (before mapping groups to features)
         // This ensures embeddings are available for semantic similarity matching
-        if (process.env.OPENAI_API_KEY) {
+        if (getLLMApiKey()) {
           try {
             const { hasDatabaseConfig, getStorage } = await import("../storage/factory.js");
             const useDatabase = hasDatabaseConfig() && await getStorage().isAvailable();
@@ -9025,7 +9017,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
               // Now compute embeddings for any features that don't have them yet
               const { computeAndSaveFeatureEmbeddings } = await import("../storage/db/embeddings.js");
               console.error(`[Feature Matching] Computing feature embeddings if needed...`);
-              const embeddingResult = await computeAndSaveFeatureEmbeddings(process.env.OPENAI_API_KEY);
+              const embeddingResult = await computeAndSaveFeatureEmbeddings(getLLMApiKey());
               console.error(`[Feature Matching] Feature embeddings ready: ${embeddingResult.computed} computed, ${embeddingResult.cached} cached, ${embeddingResult.total} total`);
               
               // Ensure code is indexed for features (checks hashes and skips if unchanged)
@@ -9436,7 +9428,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       };
 
       try {
-        if (!process.env.OPENAI_API_KEY) {
+        if (!getLLMApiKey()) {
           throw new Error("OPENAI_API_KEY is required for feature matching.");
         }
 
@@ -9512,13 +9504,13 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // STEP 3: Compute/load issue embeddings
         console.error(`[Issue Feature Matching] Computing issue embeddings...`);
         const { computeAndSaveIssueEmbeddings } = await import("../storage/db/embeddings.js");
-        const embeddingResult = await computeAndSaveIssueEmbeddings(process.env.OPENAI_API_KEY, undefined, false);
+        const embeddingResult = await computeAndSaveIssueEmbeddings(getLLMApiKey(), undefined, false);
         console.error(`[Issue Feature Matching] Issue embeddings: ${embeddingResult.computed} computed, ${embeddingResult.cached} cached`);
 
         // STEP 4: Load feature embeddings (compute if missing)
         console.error(`[Issue Feature Matching] Loading feature embeddings...`);
         const { computeAndSaveFeatureEmbeddings } = await import("../storage/db/embeddings.js");
-        await computeAndSaveFeatureEmbeddings(process.env.OPENAI_API_KEY);
+        await computeAndSaveFeatureEmbeddings(getLLMApiKey());
         
         const featuresWithEmbeddings = await prisma.feature.findMany();
         const featureEmbeddingMap = await getEmbeddingsBatch({
@@ -9690,7 +9682,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       };
 
       try {
-        if (!process.env.OPENAI_API_KEY) {
+        if (!getLLMApiKey()) {
           throw new Error("OPENAI_API_KEY is required for ungrouped issue feature matching.");
         }
 
@@ -9772,12 +9764,12 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // STEP 3: Ensure issue embeddings exist (ungrouped issues can reuse embeddings from GitHubIssue table)
         console.error(`[Ungrouped Issue Feature Matching] Ensuring issue embeddings exist...`);
         const { computeAndSaveIssueEmbeddings } = await import("../storage/db/embeddings.js");
-        await computeAndSaveIssueEmbeddings(process.env.OPENAI_API_KEY, undefined, false);
+        await computeAndSaveIssueEmbeddings(getLLMApiKey(), undefined, false);
 
         // STEP 4: Load feature embeddings (compute if missing)
         console.error(`[Ungrouped Issue Feature Matching] Loading feature embeddings...`);
         const { computeAndSaveFeatureEmbeddings } = await import("../storage/db/embeddings.js");
-        await computeAndSaveFeatureEmbeddings(process.env.OPENAI_API_KEY);
+        await computeAndSaveFeatureEmbeddings(getLLMApiKey());
         
         const featuresWithEmbeddings = await prisma.feature.findMany();
         const featureEmbeddingMap = await getEmbeddingsBatch({
@@ -9949,7 +9941,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       };
 
       try {
-        if (!process.env.OPENAI_API_KEY) {
+        if (!getLLMApiKey()) {
           throw new Error("OPENAI_API_KEY is required for group feature matching.");
         }
 
@@ -10030,13 +10022,13 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // STEP 3: Compute/load group embeddings
         console.error(`[Group Feature Matching] Computing group embeddings...`);
         const { computeAndSaveGroupEmbeddings } = await import("../storage/db/embeddings.js");
-        const embeddingResult = await computeAndSaveGroupEmbeddings(process.env.OPENAI_API_KEY, undefined, false);
+        const embeddingResult = await computeAndSaveGroupEmbeddings(getLLMApiKey(), undefined, false);
         console.error(`[Group Feature Matching] Group embeddings: ${embeddingResult.computed} computed, ${embeddingResult.cached} cached`);
 
         // STEP 4: Load feature embeddings (compute if missing)
         console.error(`[Group Feature Matching] Loading feature embeddings...`);
         const { computeAndSaveFeatureEmbeddings } = await import("../storage/db/embeddings.js");
-        await computeAndSaveFeatureEmbeddings(process.env.OPENAI_API_KEY);
+        await computeAndSaveFeatureEmbeddings(getLLMApiKey());
         
         const featuresWithEmbeddings = await prisma.feature.findMany();
         const featureEmbeddingMap = await getEmbeddingsBatch({
@@ -10208,7 +10200,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       };
 
       try {
-        const apiKey = process.env.OPENAI_API_KEY;
+        const apiKey = getLLMApiKey();
         if (!apiKey) {
           throw new Error("OPENAI_API_KEY is required for label detection.");
         }
@@ -10274,18 +10266,11 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           ).join("\n\n---\n\n");
           
           try {
-            const response = await fetch("https://api.openai.com/v1/chat/completions", {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                "Authorization": `Bearer ${apiKey}`,
-              },
-              body: JSON.stringify({
-                model: "gpt-4o-mini",
-                messages: [
-                  {
-                    role: "system",
-                    content: `You are a technical issue classifier. Analyze each issue and return applicable labels.
+            const result = (await llmChat(
+              [
+                {
+                  role: "system",
+                  content: `You are a technical issue classifier. Analyze each issue and return applicable labels.
 
 Available labels:
 - security: Security vulnerabilities, auth bypasses, data leaks, XSS, CSRF, injection
@@ -10310,26 +10295,15 @@ Example output:
 [3] regression, bug
 [4] enhancement
 [5] documentation
-[6] assistance`
-                  },
-                  {
-                    role: "user",
-                    content: `Classify these ${batch.length} issues:\n\n${batchContent}`
-                  }
-                ],
-                temperature: 0.1,
-                max_tokens: 200,
-              }),
-            });
-            
-            if (!response.ok) {
-              console.error(`[Label Issues] LLM API error for batch ${i / batchSize + 1}`);
-              skippedCount += batch.length;
-              continue;
-            }
-            
-            const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
-            const result = data.choices?.[0]?.message?.content?.trim() || "";
+[6] assistance`,
+                },
+                {
+                  role: "user",
+                  content: `Classify these ${batch.length} issues:\n\n${batchContent}`,
+                },
+              ],
+              { temperature: 0.1, maxTokens: 200 },
+            )).trim() || "";
             
             // Parse results
             const lines = result.split("\n").filter((l: string) => l.trim());
@@ -10416,7 +10390,7 @@ Example output:
       };
 
       try {
-        const apiKey = process.env.OPENAI_API_KEY;
+        const apiKey = getLLMApiKey();
         if (!apiKey) {
           throw new Error("OPENAI_API_KEY is required for computing embeddings.");
         }
@@ -11388,11 +11362,11 @@ Example output:
             let matchedProjectId: string | undefined;
             
             // Try to match with existing projects using semantic similarity
-            if (features.length > 0 && process.env.OPENAI_API_KEY) {
+            if (features.length > 0 && getLLMApiKey()) {
               try {
                 const { createEmbedding } = await import("../core/classify/semantic.js");
                 const issueText = `${issue.title} ${issue.description || ""}`.trim();
-                const issueEmbedding = await createEmbedding(issueText, process.env.OPENAI_API_KEY);
+                const issueEmbedding = await createEmbedding(issueText, getLLMApiKey());
                 
                 let bestMatch: { feature: typeof features[0]; similarity: number; projectId?: string } | null = null;
                 let allSimilarities: Array<{ name: string; similarity: number; hasProject: boolean }> = [];
@@ -11440,7 +11414,7 @@ Example output:
                     }
                   }
                   
-                  const featureEmbedding = await createEmbedding(featureText, process.env.OPENAI_API_KEY);
+                  const featureEmbedding = await createEmbedding(featureText, getLLMApiKey());
                   
                   // Calculate cosine similarity
                   let dotProduct = 0;
@@ -11485,7 +11459,7 @@ Example output:
               if (features.length === 0) {
                 console.error(`[Linear Classification] No features available for matching issue ${issue.identifier}`);
               }
-              if (!process.env.OPENAI_API_KEY) {
+              if (!getLLMApiKey()) {
                 console.error(`[Linear Classification] OPENAI_API_KEY not set, skipping semantic matching for issue ${issue.identifier}`);
               }
             }
@@ -11558,7 +11532,7 @@ Example output:
           throw new Error("Linear API key is required. Set PM_TOOL_API_KEY in environment variables.");
         }
 
-        if (!process.env.OPENAI_API_KEY) {
+        if (!getLLMApiKey()) {
           throw new Error("OPENAI_API_KEY is required for LLM-based label detection.");
         }
 
@@ -11632,18 +11606,11 @@ Example output:
           ).join("\n\n---\n\n");
 
           try {
-            const response = await fetch("https://api.openai.com/v1/chat/completions", {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
-              },
-              body: JSON.stringify({
-                model: "gpt-4o-mini",
-                messages: [
-                  {
-                    role: "system",
-                    content: `You are a technical issue classifier. Analyze each issue and return applicable labels.
+            const result = (await llmChat(
+              [
+                {
+                  role: "system",
+                  content: `You are a technical issue classifier. Analyze each issue and return applicable labels.
 
 Available labels:
 - security: Security vulnerabilities, auth issues, data leaks, XSS, CSRF, injection
@@ -11663,27 +11630,15 @@ Example output:
 [2] security
 [3] regression, bug
 [4] enhancement
-[5] none`
-                  },
-                  {
-                    role: "user",
-                    content: `Classify these ${batch.length} issues:\n\n${batchContent}`
-                  }
-                ],
-                temperature: 0.1,
-                max_tokens: 200,
-              }),
-            });
-
-            if (!response.ok) {
-              const errorText = await response.text();
-              console.error(`[Label Linear Issues] LLM API error: ${response.status} ${errorText}`);
-              results.errors.push(`LLM API error for batch ${Math.floor(i / batchSize) + 1}: ${response.status}`);
-              continue;
-            }
-
-            const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
-            const result = data.choices?.[0]?.message?.content?.trim() || "";
+[5] none`,
+                },
+                {
+                  role: "user",
+                  content: `Classify these ${batch.length} issues:\n\n${batchContent}`,
+                },
+              ],
+              { temperature: 0.1, maxTokens: 200 },
+            )).trim() || "";
 
             // Parse results
             const validLabels = ["security", "bug", "regression", "urgent", "enhancement"];
@@ -11915,7 +11870,7 @@ Example output:
               throw new Error("No documentation URLs configured. Set DOCUMENTATION_URLS in environment variables or provide 'urls' parameter.");
             }
 
-            if (!process.env.OPENAI_API_KEY) {
+            if (!getLLMApiKey()) {
               throw new Error("OPENAI_API_KEY is required for feature extraction.");
             }
 
@@ -11955,14 +11910,14 @@ Example output:
 
           case "compute_embeddings": {
             // Compute embeddings for documentation, sections, and features
-            if (!process.env.OPENAI_API_KEY) {
+            if (!getLLMApiKey()) {
               throw new Error("OPENAI_API_KEY is required for computing embeddings.");
             }
 
             const { computeAllEmbeddings } = await import("../storage/db/embeddings.js");
             
             console.error("[Embeddings] Starting embedding computation for documentation, sections, and features...");
-            await computeAllEmbeddings(process.env.OPENAI_API_KEY, {
+            await computeAllEmbeddings(getLLMApiKey(), {
               skipThreads: true,
               skipIssues: true,
             });
@@ -11982,14 +11937,14 @@ Example output:
 
           case "compute_docs_embeddings": {
             // Compute embeddings for documentation pages only
-            if (!process.env.OPENAI_API_KEY) {
+            if (!getLLMApiKey()) {
               throw new Error("OPENAI_API_KEY is required for computing embeddings.");
             }
 
             const { computeAndSaveDocumentationEmbeddings } = await import("../storage/db/embeddings.js");
             
             console.error("[Documentation Cache] Starting documentation embeddings computation...");
-            await computeAndSaveDocumentationEmbeddings(process.env.OPENAI_API_KEY);
+            await computeAndSaveDocumentationEmbeddings(getLLMApiKey());
 
             return {
               content: [
@@ -12006,14 +11961,14 @@ Example output:
 
           case "compute_sections_embeddings": {
             // Compute embeddings for documentation sections only
-            if (!process.env.OPENAI_API_KEY) {
+            if (!getLLMApiKey()) {
               throw new Error("OPENAI_API_KEY is required for computing embeddings.");
             }
 
             const { computeAndSaveDocumentationSectionEmbeddings } = await import("../storage/db/embeddings.js");
             
             console.error("[Documentation Cache] Starting documentation section embeddings computation...");
-            await computeAndSaveDocumentationSectionEmbeddings(process.env.OPENAI_API_KEY);
+            await computeAndSaveDocumentationSectionEmbeddings(getLLMApiKey());
 
             return {
               content: [
@@ -12030,14 +11985,14 @@ Example output:
 
           case "compute_features_embeddings": {
             // Compute embeddings for features only
-            if (!process.env.OPENAI_API_KEY) {
+            if (!getLLMApiKey()) {
               throw new Error("OPENAI_API_KEY is required for computing embeddings.");
             }
 
             const { computeAndSaveFeatureEmbeddings } = await import("../storage/db/embeddings.js");
             
             console.error("[Embeddings] Starting feature embeddings computation...");
-            await computeAndSaveFeatureEmbeddings(process.env.OPENAI_API_KEY);
+            await computeAndSaveFeatureEmbeddings(getLLMApiKey());
 
             return {
               content: [

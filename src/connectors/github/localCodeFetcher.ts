@@ -6,6 +6,7 @@
 import { readdir, readFile, stat } from "fs/promises";
 import { join, extname, relative, resolve } from "path";
 import { log } from "../../mcp/logger.js";
+import { getLLMApiKey } from "../../llm/chat.js";
 
 /**
  * Fetch code context from local repository
@@ -56,13 +57,7 @@ export async function fetchLocalCodeContext(
     }
 
     // Use semantic search to rank files by relevance
-    const apiKey = process.env.OPENAI_API_KEY;
-    if (!apiKey) {
-      log(`[LocalCodeFetcher] OPENAI_API_KEY not set, falling back to keyword matching`);
-      // Fallback to keyword matching if no API key
-      const codeFiles = await findCodeFiles(resolvedPath, searchQuery, maxFiles || 100);
-      return await readAndFormatFiles(codeFiles, resolvedPath);
-    }
+    const apiKey = getLLMApiKey();
 
     // Compute embedding for search query
     const { createEmbedding } = await import("../../core/classify/semantic.js");

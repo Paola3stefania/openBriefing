@@ -4,6 +4,7 @@
 
 import type { IStorage, GitHubReactions } from "../interface.js";
 import type { ClassifiedThread, Group, UngroupedThread, StorageStats } from "../types.js";
+import { getLLMApiKey } from "../../llm/chat.js";
 import type { DocumentationContent } from "../../export/documentationFetcher.js";
 import type { ProductFeature } from "../../export/types.js";
 import { prisma } from "./prisma.js";
@@ -1087,12 +1088,12 @@ export class DatabaseStorage implements IStorage {
 
     // After saving features, compute embeddings if OPENAI_API_KEY is available
     // This ensures embeddings are ready when matching groups/threads to features
-    if (process.env.OPENAI_API_KEY && features.length > 0) {
+    if (getLLMApiKey() && features.length > 0) {
       try {
         const { computeAndSaveFeatureEmbeddings } = await import("./embeddings.js");
         // Only compute embeddings for newly saved features (computeAndSaveFeatureEmbeddings
         // will check which features already have embeddings and skip them)
-        await computeAndSaveFeatureEmbeddings(process.env.OPENAI_API_KEY);
+        await computeAndSaveFeatureEmbeddings(getLLMApiKey());
       } catch (error) {
         // Log but don't fail - embeddings can be computed on-demand later
         console.error(`[saveFeatures] Warning: Failed to compute feature embeddings automatically:`, error);

@@ -9,6 +9,7 @@ import { readFile } from "fs/promises";
 import { existsSync } from "fs";
 import { join, isAbsolute } from "path";
 import { getStorage } from "../storage/factory.js";
+import { llmChat, getLLMApiKey } from "../llm/chat.js";
 
 export interface DocumentationContent {
   url: string;
@@ -47,15 +48,9 @@ function cleanText(text: string): string {
 async function parseHTMLWithLLM(
   html: string,
   url: string,
-  apiKey?: string
+  _apiKey?: string
 ): Promise<{ title?: string; content: string; sections?: Array<{ title: string; content: string; url?: string }> }> {
-  const openaiKey = apiKey || process.env.OPENAI_API_KEY;
-  
-  if (!openaiKey) {
-    throw new Error("OPENAI_API_KEY is required for LLM-based HTML parsing");
-  }
-
-  // Truncate HTML if too long (OpenAI has token limits)
+  // Truncate HTML if too long (token limits)
   // Keep a reasonable amount for context
   const maxHtmlChars = 100000; // ~25k tokens
   const htmlToParse = html.length > maxHtmlChars 
@@ -63,18 +58,11 @@ async function parseHTMLWithLLM(
     : html;
 
   try {
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${openaiKey}`,
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini", // Using mini for cost efficiency
-        messages: [
-          {
-            role: "system",
-            content: `You are an expert at parsing HTML documentation pages. Extract clean, readable text content and identify logical sections.
+    const content = await llmChat(
+      [
+        {
+          role: "system",
+          content: `You are an expert at parsing HTML documentation pages. Extract clean, readable text content and identify logical sections.
 
 Your task:
 1. Extract the main title from the page (usually in <title> tag or the first major heading)
@@ -95,29 +83,15 @@ Return a JSON object with this structure:
 }
 
 Focus on actual documentation content. Ignore navigation menus, headers, footers, sidebars, and other UI elements.
-Preserve the logical structure and hierarchy of the content.`
-          },
-          {
-            role: "user",
-            content: `Parse this HTML documentation page and extract the content and sections:\n\n${htmlToParse}`
-          }
-        ],
-        response_format: { type: "json_object" },
-        temperature: 0.1, // Low temperature for consistent, accurate parsing
-      }),
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`OpenAI API error: ${response.status} ${errorText}`);
-    }
-
-    const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
-    const content = data.choices?.[0]?.message?.content;
-    
-    if (!content) {
-      throw new Error("No content in OpenAI response");
-    }
+Preserve the logical structure and hierarchy of the content.`,
+        },
+        {
+          role: "user",
+          content: `Parse this HTML documentation page and extract the content and sections:\n\n${htmlToParse}`,
+        },
+      ],
+      { jsonMode: true, temperature: 0.1 },
+    );
 
     const parsed = JSON.parse(content);
     
@@ -180,7 +154,7 @@ export async function fetchDocumentation(urlOrPath: string): Promise<Documentati
       // Extract text content and sections from HTML if needed
       if (contentType.includes("text/html")) {
         // Try LLM-based parsing if API key is available
-        const openaiKey = process.env.OPENAI_API_KEY;
+        const openaiKey = getLLMApiKey();
         if (openaiKey) {
           try {
             const parsed = await parseHTMLWithLLM(content, urlOrPath, openaiKey);
@@ -448,7 +422,7 @@ export async function crawlDocumentation(baseUrl: string, maxPages = 100, useCac
       
       if (contentType.includes("text/html")) {
         // Try LLM-based parsing if API key is available
-        const openaiKey = process.env.OPENAI_API_KEY;
+        const openaiKey = getLLMApiKey();
         if (openaiKey) {
           try {
             const parsed = await parseHTMLWithLLM(rawHtml, currentUrl, openaiKey);
