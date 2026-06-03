@@ -84,10 +84,76 @@ npm run db:seed-local-from-neon     # parallel pg_dump from Neon → local
 npm run reembed:all -- --resume
 ```
 
-After step 4, the local DB is an exact mirror of Neon. Future writes from this
-machine flow to both via `src/storage/db/mirror.ts`. To refresh the local
-mirror later (other agents may have written to Neon in the meantime), re-run
-`npm run db:seed-local-from-neon` — it truncates and reloads everything.
+After step 4, the local DB is an exact mirror of Neon at that moment.
+From here, **one env flag** picks which database the agent reads/writes:
+
+```ini
+# .env
+OFFLINE_DB=false                                    # ← the only thing you toggle
+DATABASE_URL=<neon-url>                             # cloud DB, never edited
+MEMORY_MIRROR_DATABASE_URL=postgresql://<user>@localhost:5432/briefings  # local DB
+```
+
+| `OFFLINE_DB` | Active DB | Memory mirror | When to use |
+|---|---|---|---|
+| `false` (default) | Neon | local (dual-write of `saveMemory` only) | stable internet, multi-Mac collaboration |
+| `true` | local | disabled (active IS the mirror — no dual-write needed) | offline / flaky network / saving free-tier compute |
+
+**Restart** the MCP server / `npm run dev` / Cursor after toggling — the
+flag is read once at process startup. Prisma CLI (`npm run db:migrate` etc.)
+honors the flag too via `scripts/db-cli.sh`.
+
+#### Daily flow cheat sheet
+
+```
+Going offline (e.g., flight)
+────────────────────────────────────
+  1. edit .env → OFFLINE_DB=true
+  2. restart MCP server / npm run dev / Cursor
+  → reading + writing to local. Mirror auto-disables.
+
+Reconnecting
+────────────────────────────────────
+  1. npm run db:sync-local-to-neon    # push offline work to Neon
+  2. edit .env → OFFLINE_DB=false
+  3. restart
+  → back to cloud-primary, mirror re-enabled.
+```
+
+Or with the cloud-primary cron set up, you don't need to do anything
+end-of-day — the 3am job pulls Neon → local automatically.
+
+#### Cloud-primary day (`OFFLINE_DB=false`)
+
+- Every read/write hits Neon directly. `saveMemory` dual-writes to local.
+- Other writes (agent sessions, exports, GitHub sync, code index, etc.) land
+  on Neon only — local drifts until refreshed.
+- Refresh local periodically: `npm run db:seed-local-from-neon` (~2.5 min,
+  truncate + reload, safe to re-run).
+- Cron suggestion (nightly 3am):
+  ```cron
+  0 3 * * * cd /path/to/openbriefing && /opt/homebrew/bin/npm run db:seed-local-from-neon >> /tmp/seed.log 2>&1
+  ```
+
+#### Offline day (`OFFLINE_DB=true`)
+
+- Toggle the flag, restart the MCP server. Now every read/write goes to
+  local. Neon is untouched while you work.
+- When you reconnect, push local → Neon: `npm run db:sync-local-to-neon`
+  (interactive confirm, `--force` for cron). It's destructive — drops Neon's
+  FKs, truncates Neon's public tables, replays local, re-adds FKs.
+  ~3-5 min for ~45k rows.
+- Toggle back to `OFFLINE_DB=false`, restart, and you're cloud-primary again.
+- ⚠️ Trade-off: if another machine writes to Neon while you're offline, those
+  writes are overwritten on the next sync. Solo / single-Mac use only.
+
+#### What's NOT live-dual-written today
+
+Only `saveMemory` mirrors when `OFFLINE_DB=false`. Extending
+`start_agent_session` / `update_agent_session` / `end_agent_session` /
+`linkExternalEvent` / `saveExportResult` to dual-write is a tracked
+follow-up — meanwhile, the periodic seed/sync scripts are how everything
+else stays consistent.
 
 Data sync into **Postgres** (same as MCP `fetch_github_issues` + `fetch_discord_messages` when `DATABASE_URL` is set):
 
