@@ -134,7 +134,7 @@ The system is also split into individual MCP tools that work together:
 │     ├─→ Stash any uncommitted changes not ours                              │
 │     ├─→ git fetch origin && git checkout canary && git pull                 │
 │     ├─→ git checkout -b type/subsystem-description                          │
-│     │   (if branch exists, add -paola3stefania suffix)                      │
+│     │   (if branch exists, add -<user> suffix)                             │
 │     ├─→ Apply code changes                                                  │
 │     ├─→ git add -A && git commit -m "type(scope): description"              │
 │     └─→ git push -u origin branch-name                                      │
@@ -214,7 +214,7 @@ git pull origin canary
 # 3. Create feature branch
 BRANCH_NAME="fix/subsystem-description"
 if git show-ref --verify --quiet "refs/heads/$BRANCH_NAME"; then
-  BRANCH_NAME="${BRANCH_NAME}-paola3stefania"  # Add suffix if exists
+  BRANCH_NAME="${BRANCH_NAME}-<user>"  # Add suffix if exists
 fi
 git checkout -b "$BRANCH_NAME"
 
@@ -233,7 +233,7 @@ git push -u origin "$BRANCH_NAME"
 
 | Scenario | Action |
 |----------|--------|
-| Branch already exists | Add `-paola3stefania` suffix |
+| Branch already exists | Add `-<user>` suffix |
 | Uncommitted changes | Stash them before starting |
 | Merge conflicts | Abort and report error |
 | Push fails | Report error, don't create PR |

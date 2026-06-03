@@ -19,7 +19,7 @@ export interface ProjectContext {
   preferences: Record<string, string>;
   /**
    * Top incomplete plan steps from recent sessions, ranked by recency × scope
-   * match. The next agent's "what does Paola want me to do first?" queue.
+   * match. The next agent's "what should I work on first?" queue.
    * See {@link ActionableItem}.
    */
   actionable: ActionableItem[];
