@@ -41,6 +41,7 @@
     "sync:skill": "node scripts/sync-skill.mjs",
     "backfill:memory-embeddings": "tsx scripts/backfill-memory-embeddings.ts",
     "reembed:all": "tsx scripts/reembed-all.ts",
+    "smoke-test": "tsx scripts/smoke-test.ts",
     "test": "vitest run",
     "test:watch": "vitest"
   },
