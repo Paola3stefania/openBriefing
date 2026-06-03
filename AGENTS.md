@@ -82,7 +82,36 @@ npm run db:seed-local-from-neon     # parallel pg_dump from Neon → local
 
 # 5. (Optional) re-embed any rows missing vectors after a model swap
 npm run reembed:all -- --resume
+
+# 6. Wire OpenBriefing into Cursor as an MCP server (so Cursor agents can
+#    use get_agent_briefing, save_memory, etc. against this repo).
+npm run build                        # produces dist/index.js + run-mcp.sh
+chmod +x run-mcp.sh
 ```
+
+Then add to `~/.cursor/mcp.json` (create the file if it doesn't exist):
+
+```json
+{
+  "mcpServers": {
+    "openrundown": {
+      "command": "/path/to/openbriefing/run-mcp.sh"
+    }
+  }
+}
+```
+
+Restart Cursor (or toggle the server off/on in **Cursor Settings → MCP**).
+The MCP server inherits env from `.env` via `run-mcp.sh`, so it sees the
+same `OFFLINE_DB`, `DATABASE_URL`, `OLLAMA_*`, and `EMBEDDING_PROVIDER` the
+rest of the app uses. After toggling `OFFLINE_DB`, **toggle the MCP server
+off and on** in Cursor — env is captured at process spawn time.
+
+⚠️ **MCP processes accumulate**: every Cursor restart spawns a new MCP
+process without killing the previous one. If you've toggled `.env` and the
+MCP still hits the old DB, run `pkill -f "openbriefing/dist/index.js"`
+(or `openrundown/dist/index.js` if that's your folder name) and toggle the
+server back on in Cursor settings.
 
 After step 4, the local DB is an exact mirror of Neon at that moment.
 From here, **one env flag** picks which database the agent reads/writes:
