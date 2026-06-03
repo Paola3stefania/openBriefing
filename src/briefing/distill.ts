@@ -658,11 +658,11 @@ async function distillRelatedInsights(input: {
       m."source",
       m."session_id" AS "sessionId",
       m."created_at"  AS "createdAt",
-      1 - (e."embedding" <=> ${queryVec}::vector) AS "similarity"
+      1 - (e."embedding" <=> ${queryVec}::halfvec) AS "similarity"
     FROM "memory_entries" m
     JOIN "memory_entry_embeddings" e ON e."memory_id" = m."id"
     WHERE m."project_id" = ${input.projectId}
-    ORDER BY e."embedding" <=> ${queryVec}::vector
+    ORDER BY e."embedding" <=> ${queryVec}::halfvec
     LIMIT ${MAX_RELATED_INSIGHTS}
   `);
 

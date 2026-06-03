@@ -29,27 +29,27 @@ model Channel {
 }
 
 model ClassifiedThread {
-  threadId              String   @id @map("thread_id")
-  channelId             String   @map("channel_id")
-  threadName            String?  @map("thread_name")
-  messageCount          Int      @default(1) @map("message_count")
-  firstMessageId        String?  @map("first_message_id")
-  firstMessageAuthor    String?  @map("first_message_author")
+  threadId              String    @id @map("thread_id")
+  channelId             String    @map("channel_id")
+  threadName            String?   @map("thread_name")
+  messageCount          Int       @default(1) @map("message_count")
+  firstMessageId        String?   @map("first_message_id")
+  firstMessageAuthor    String?   @map("first_message_author")
   firstMessageTimestamp DateTime? @map("first_message_timestamp")
-  firstMessageUrl       String?  @map("first_message_url")
-  classifiedAt          DateTime @default(now()) @map("classified_at")
-  updatedAt             DateTime @updatedAt @map("updated_at")
-  status                String   @default("completed") // 'pending' | 'classifying' | 'completed' | 'failed'
-  matchStatus           String?  @map("match_status") // 'matched' | 'below_threshold' | 'no_matches' | null (not classified yet)
-  exportStatus          String?  @map("export_status") // 'pending' | 'exported' | null (not exported yet)
+  firstMessageUrl       String?   @map("first_message_url")
+  classifiedAt          DateTime  @default(now()) @map("classified_at")
+  updatedAt             DateTime  @updatedAt @map("updated_at")
+  status                String    @default("completed") // 'pending' | 'classifying' | 'completed' | 'failed'
+  matchStatus           String?   @map("match_status") // 'matched' | 'below_threshold' | 'no_matches' | null (not classified yet)
+  exportStatus          String?   @map("export_status") // 'pending' | 'exported' | null (not exported yet)
   exportedAt            DateTime? @map("exported_at")
-  resolutionStatus      String?  @map("resolution_status") // 'conversation_resolved' | null (not resolved)
+  resolutionStatus      String?   @map("resolution_status") // 'conversation_resolved' | null (not resolved)
   resolvedAt            DateTime? @map("resolved_at")
-  linearIssueId         String?  @map("linear_issue_id")
-  linearIssueUrl        String?  @map("linear_issue_url")
-  linearIssueIdentifier String?  @map("linear_issue_identifier")
+  linearIssueId         String?   @map("linear_issue_id")
+  linearIssueUrl        String?   @map("linear_issue_url")
+  linearIssueIdentifier String?   @map("linear_issue_identifier")
 
-  channel      Channel             @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  channel      Channel                 @relation(fields: [channelId], references: [id], onDelete: Cascade)
   issueMatches ThreadIssueMatch[]
   groupThreads GroupThread[]
   ungrouped    UngroupedThread?
@@ -65,18 +65,18 @@ model ClassifiedThread {
 }
 
 model ThreadIssueMatch {
-  id              Int      @id @default(autoincrement())
-  threadId        String   @map("thread_id")
-  issueNumber     Int      @map("issue_number")
-  issueTitle      String   @map("issue_title")
-  issueUrl        String   @map("issue_url")
-  issueState      String?  @map("issue_state")
-  similarityScore Decimal  @map("similarity_score") @db.Decimal(5, 2)
-  matchedTerms    String[] @map("matched_terms")
-  issueLabels     String[] @map("issue_labels")
-  issueAuthor     String?  @map("issue_author")
+  id              Int       @id @default(autoincrement())
+  threadId        String    @map("thread_id")
+  issueNumber     Int       @map("issue_number")
+  issueTitle      String    @map("issue_title")
+  issueUrl        String    @map("issue_url")
+  issueState      String?   @map("issue_state")
+  similarityScore Decimal   @map("similarity_score") @db.Decimal(5, 2)
+  matchedTerms    String[]  @map("matched_terms")
+  issueLabels     String[]  @map("issue_labels")
+  issueAuthor     String?   @map("issue_author")
   issueCreatedAt  DateTime? @map("issue_created_at")
-  createdAt       DateTime @default(now()) @map("created_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
 
   thread ClassifiedThread @relation(fields: [threadId], references: [threadId], onDelete: Cascade)
 
@@ -106,9 +106,9 @@ model Group {
   linearProjectIds      String[]  @map("linear_project_ids")
   affectsFeatures       Json      @default("[]") @map("affects_features")
 
-  channel      Channel       @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  channel      Channel         @relation(fields: [channelId], references: [id], onDelete: Cascade)
   groupThreads GroupThread[]
-  githubIssues  GitHubIssue[] // Issues in this group
+  githubIssues GitHubIssue[] // Issues in this group
   embedding    GroupEmbedding?
 
   @@index([channelId])
@@ -125,8 +125,8 @@ model GroupThread {
   similarityScore Decimal? @map("similarity_score") @db.Decimal(5, 2)
   createdAt       DateTime @default(now()) @map("created_at")
 
-  group   Group            @relation(fields: [groupId], references: [id], onDelete: Cascade)
-  thread  ClassifiedThread @relation(fields: [threadId], references: [threadId], onDelete: Cascade)
+  group  Group            @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  thread ClassifiedThread @relation(fields: [threadId], references: [threadId], onDelete: Cascade)
 
   @@unique([groupId, threadId])
   @@index([groupId])
@@ -135,22 +135,22 @@ model GroupThread {
 }
 
 model UngroupedThread {
-  threadId            String   @id @map("thread_id")
-  channelId           String   @map("channel_id")
-  reason              String   // 'no_matches' | 'below_threshold'
-  topIssueNumber      Int?     @map("top_issue_number")
-  topIssueTitle       String?  @map("top_issue_title")
-  topIssueSimilarity  Decimal? @map("top_issue_similarity") @db.Decimal(5, 2)
-  exportStatus        String?  @map("export_status") // 'pending' | 'exported' | null (not exported yet)
-  exportedAt          DateTime? @map("exported_at")
-  linearIssueId       String?  @map("linear_issue_id")
-  linearIssueUrl      String?  @map("linear_issue_url")
-  linearIssueIdentifier String? @map("linear_issue_identifier")
-  resolutionStatus    String?  @map("resolution_status") // 'closed_issue' | 'conversation_resolved' | null (not resolved/closed)
-  resolvedAt          DateTime? @map("resolved_at")
-  affectsFeatures     Json     @default("[]") @map("affects_features")
-  createdAt           DateTime @default(now()) @map("created_at")
-  updatedAt           DateTime @updatedAt @map("updated_at")
+  threadId              String    @id @map("thread_id")
+  channelId             String    @map("channel_id")
+  reason                String // 'no_matches' | 'below_threshold'
+  topIssueNumber        Int?      @map("top_issue_number")
+  topIssueTitle         String?   @map("top_issue_title")
+  topIssueSimilarity    Decimal?  @map("top_issue_similarity") @db.Decimal(5, 2)
+  exportStatus          String?   @map("export_status") // 'pending' | 'exported' | null (not exported yet)
+  exportedAt            DateTime? @map("exported_at")
+  linearIssueId         String?   @map("linear_issue_id")
+  linearIssueUrl        String?   @map("linear_issue_url")
+  linearIssueIdentifier String?   @map("linear_issue_identifier")
+  resolutionStatus      String?   @map("resolution_status") // 'closed_issue' | 'conversation_resolved' | null (not resolved/closed)
+  resolvedAt            DateTime? @map("resolved_at")
+  affectsFeatures       Json      @default("[]") @map("affects_features")
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @updatedAt @map("updated_at")
 
   channel Channel          @relation(fields: [channelId], references: [id], onDelete: Cascade)
   thread  ClassifiedThread @relation(fields: [threadId], references: [threadId], onDelete: Cascade)
@@ -163,13 +163,13 @@ model UngroupedThread {
 }
 
 model ClassificationHistory {
-  id          Int       @id @default(autoincrement())
-  channelId   String    @map("channel_id")
-  messageId   String    @map("message_id")
-  threadId    String?   @map("thread_id")
+  id           Int      @id @default(autoincrement())
+  channelId    String   @map("channel_id")
+  messageId    String   @map("message_id")
+  threadId     String?  @map("thread_id")
   classifiedAt DateTime @default(now()) @map("classified_at")
 
-  channel Channel? @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  channel Channel?          @relation(fields: [channelId], references: [id], onDelete: Cascade)
   thread  ClassifiedThread? @relation(fields: [threadId], references: [threadId], onDelete: Cascade)
 
   @@unique([channelId, messageId])
@@ -177,63 +177,63 @@ model ClassificationHistory {
 }
 
 model GitHubIssue {
-  id                   String   @id
-  issueRepo            String   @map("issue_repo")
-  issueNumber          Int      @map("issue_number")
-  issueTitle           String   @map("issue_title")
-  issueUrl             String   @map("issue_url")
-  issueState           String?  @map("issue_state")
-  issueBody            String?  @map("issue_body")
-  issueLabels          String[] @map("issue_labels")
-  issueAuthor          String?  @map("issue_author")
-  issueCreatedAt       DateTime? @map("issue_created_at")
-  issueUpdatedAt       DateTime? @map("issue_updated_at")
-  
-  // Full conversation data
-  issueComments        Json     @default("[]") @map("issue_comments") // Array of comment objects
-  issueAssignees       String[] @map("issue_assignees") // Array of assignee usernames
-  issueMilestone       String?  @map("issue_milestone") // Milestone title
-  issueReactions       Json?    @map("issue_reactions") // Reactions object
-  
-  // Group tracking
-  groupId              String?  @map("group_id") // FK to groups table (inGroup is redundant - groupId null = not in group)
-  
-  // Thread matching
-  matchedToThreads     Boolean  @default(false) @map("matched_to_threads")
-  
-  // Feature matching (issue-centric)
-  affectsFeatures      Json     @default("[]") @map("affects_features") // Array of {id, name} objects
-  
-  // LLM-detected labels (bug, security, regression, enhancement, urgent)
-  detectedLabels       String[] @default([]) @map("detected_labels")
-  
-  // Comment analysis for closure confirmation (cached LLM result)
-  waitingForClosureConfirmation Boolean? @map("waiting_for_closure_confirmation")
-  closureConfirmationReason     String?  @map("closure_confirmation_reason")
-  commentsAnalyzedAt            DateTime? @map("comments_analyzed_at")
-  commentCountAtAnalysis        Int?     @map("comment_count_at_analysis") // Track comment count when analyzed
-  
-  // Export status
-  exportStatus         String?  @map("export_status") // 'pending' | 'exported' | null (not exported yet)
-  exportedAt           DateTime? @map("exported_at")
-  linearIssueId        String?  @map("linear_issue_id")
-  linearIssueUrl       String?  @map("linear_issue_url")
-  linearIssueIdentifier String? @map("linear_issue_identifier")
-  linearLabels         String[] @default([]) @map("linear_labels") // Labels from Linear (stored to avoid fetching every time)
-  
-  // Linear sync status
-  linearStatus         String?  @map("linear_status") // 'backlog' | 'todo' | 'in_progress' | 'done' | 'canceled'
-  linearStatusSyncedAt DateTime? @map("linear_status_synced_at")
-  closedByPR           String?  @map("closed_by_pr") // PR number/URL that closed this issue (legacy, use pullRequests relation)
-  closedByPRMergedAt   DateTime? @map("closed_by_pr_merged_at")
-  
-  createdAt            DateTime @default(now()) @map("created_at")
-  updatedAt            DateTime @updatedAt @map("updated_at")
+  id             String    @id
+  issueRepo      String    @map("issue_repo")
+  issueNumber    Int       @map("issue_number")
+  issueTitle     String    @map("issue_title")
+  issueUrl       String    @map("issue_url")
+  issueState     String?   @map("issue_state")
+  issueBody      String?   @map("issue_body")
+  issueLabels    String[]  @map("issue_labels")
+  issueAuthor    String?   @map("issue_author")
+  issueCreatedAt DateTime? @map("issue_created_at")
+  issueUpdatedAt DateTime? @map("issue_updated_at")
 
-  group                Group?   @relation(fields: [groupId], references: [id])
-  embedding            IssueEmbedding?
-  threadMatches        IssueThreadMatch[] // Issue-centered thread matches
-  pullRequests         GitHubPullRequest[] // PRs that reference this issue
+  // Full conversation data
+  issueComments  Json     @default("[]") @map("issue_comments") // Array of comment objects
+  issueAssignees String[] @map("issue_assignees") // Array of assignee usernames
+  issueMilestone String?  @map("issue_milestone") // Milestone title
+  issueReactions Json?    @map("issue_reactions") // Reactions object
+
+  // Group tracking
+  groupId String? @map("group_id") // FK to groups table (inGroup is redundant - groupId null = not in group)
+
+  // Thread matching
+  matchedToThreads Boolean @default(false) @map("matched_to_threads")
+
+  // Feature matching (issue-centric)
+  affectsFeatures Json @default("[]") @map("affects_features") // Array of {id, name} objects
+
+  // LLM-detected labels (bug, security, regression, enhancement, urgent)
+  detectedLabels String[] @default([]) @map("detected_labels")
+
+  // Comment analysis for closure confirmation (cached LLM result)
+  waitingForClosureConfirmation Boolean?  @map("waiting_for_closure_confirmation")
+  closureConfirmationReason     String?   @map("closure_confirmation_reason")
+  commentsAnalyzedAt            DateTime? @map("comments_analyzed_at")
+  commentCountAtAnalysis        Int?      @map("comment_count_at_analysis") // Track comment count when analyzed
+
+  // Export status
+  exportStatus          String?   @map("export_status") // 'pending' | 'exported' | null (not exported yet)
+  exportedAt            DateTime? @map("exported_at")
+  linearIssueId         String?   @map("linear_issue_id")
+  linearIssueUrl        String?   @map("linear_issue_url")
+  linearIssueIdentifier String?   @map("linear_issue_identifier")
+  linearLabels          String[]  @default([]) @map("linear_labels") // Labels from Linear (stored to avoid fetching every time)
+
+  // Linear sync status
+  linearStatus         String?   @map("linear_status") // 'backlog' | 'todo' | 'in_progress' | 'done' | 'canceled'
+  linearStatusSyncedAt DateTime? @map("linear_status_synced_at")
+  closedByPR           String?   @map("closed_by_pr") // PR number/URL that closed this issue (legacy, use pullRequests relation)
+  closedByPRMergedAt   DateTime? @map("closed_by_pr_merged_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  group         Group?              @relation(fields: [groupId], references: [id])
+  embedding     IssueEmbedding?
+  threadMatches IssueThreadMatch[] // Issue-centered thread matches
+  pullRequests  GitHubPullRequest[] // PRs that reference this issue
 
   @@unique([issueRepo, issueNumber])
   @@index([issueRepo])
@@ -249,25 +249,25 @@ model GitHubIssue {
 
 // GitHub Pull Requests
 model GitHubPullRequest {
-  id                   String   @id
-  prRepo               String   @map("pr_repo")
-  prNumber             Int      @map("pr_number")
-  prTitle               String   @map("pr_title")
-  prUrl                 String   @unique @map("pr_url")
-  prState               String   @map("pr_state") // "open" | "closed"
-  prMerged              Boolean  @default(false) @map("pr_merged")
-  prAuthor              String   @map("pr_author") // GitHub username
-  prCreatedAt           DateTime @map("pr_created_at")
-  prUpdatedAt           DateTime @map("pr_updated_at")
-  prBody                String?  @map("pr_body")
-  prHeadRef             String?  @map("pr_head_ref")
-  prBaseRef             String?  @map("pr_base_ref")
-  
+  id          String   @id
+  prRepo      String   @map("pr_repo")
+  prNumber    Int      @map("pr_number")
+  prTitle     String   @map("pr_title")
+  prUrl       String   @unique @map("pr_url")
+  prState     String   @map("pr_state") // "open" | "closed"
+  prMerged    Boolean  @default(false) @map("pr_merged")
+  prAuthor    String   @map("pr_author") // GitHub username
+  prCreatedAt DateTime @map("pr_created_at")
+  prUpdatedAt DateTime @map("pr_updated_at")
+  prBody      String?  @map("pr_body")
+  prHeadRef   String?  @map("pr_head_ref")
+  prBaseRef   String?  @map("pr_base_ref")
+
   // Relations
-  linkedIssues          GitHubIssue[] // Issues that this PR references
-  
-  createdAt             DateTime @default(now()) @map("created_at")
-  updatedAt             DateTime @updatedAt @map("updated_at")
+  linkedIssues GitHubIssue[] // Issues that this PR references
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
 
   @@unique([prRepo, prNumber])
   @@index([prRepo])
@@ -279,21 +279,21 @@ model GitHubPullRequest {
 
 // Issue-centered thread matches (GitHub issue is primary, Discord threads are attached)
 model IssueThreadMatch {
-  id              Int      @id @default(autoincrement())
-  issueId         String   @map("issue_id")
-  issueNumber     Int      @map("issue_number")
-  threadId        String   @map("thread_id")
-  threadName      String?  @map("thread_name")
-  threadUrl       String?  @map("thread_url")
-  similarityScore Decimal  @map("similarity_score") @db.Decimal(5, 2) // 0-100 scale
-  matchMethod     String   @default("embedding") @map("match_method") // 'embedding' | 'keyword' | 'manual'
-  messageCount    Int      @default(0) @map("message_count")
+  id              Int       @id @default(autoincrement())
+  issueId         String    @map("issue_id")
+  issueNumber     Int       @map("issue_number")
+  threadId        String    @map("thread_id")
+  threadName      String?   @map("thread_name")
+  threadUrl       String?   @map("thread_url")
+  similarityScore Decimal   @map("similarity_score") @db.Decimal(5, 2) // 0-100 scale
+  matchMethod     String    @default("embedding") @map("match_method") // 'embedding' | 'keyword' | 'manual'
+  messageCount    Int       @default(0) @map("message_count")
   firstMessageAt  DateTime? @map("first_message_at")
   lastMessageAt   DateTime? @map("last_message_at")
-  createdAt       DateTime @default(now()) @map("created_at")
-  updatedAt       DateTime @updatedAt @map("updated_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
 
-  issue           GitHubIssue @relation(fields: [issueId], references: [id], onDelete: Cascade)
+  issue GitHubIssue @relation(fields: [issueId], references: [id], onDelete: Cascade)
 
   @@unique([issueId, threadId])
   @@index([issueId])
@@ -304,12 +304,15 @@ model IssueThreadMatch {
 }
 
 model IssueEmbedding {
-  issueId     String   @id @map("issue_id")
-  embedding   Json     // Array of floats (1536 dimensions)
-  contentHash String   @map("content_hash")
+  issueId     String                       @id @map("issue_id")
+  // pgvector halfvec(1024). Same Unsupported caveat as MemoryEntryEmbedding —
+  // all reads/writes go through src/storage/db/vectorIO.ts. HNSW cosine
+  // index on this column ships in migration 20260603040000_all_embeddings_halfvec.
+  embedding   Unsupported("halfvec(1024)")
+  contentHash String                       @map("content_hash")
   model       String
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
+  createdAt   DateTime                     @default(now()) @map("created_at")
+  updatedAt   DateTime                     @updatedAt @map("updated_at")
 
   issue GitHubIssue @relation(fields: [issueId], references: [id], onDelete: Cascade)
 
@@ -319,12 +322,12 @@ model IssueEmbedding {
 }
 
 model ThreadEmbedding {
-  threadId    String   @id @map("thread_id")
-  embedding   Json     // Array of floats (1536 dimensions)
-  contentHash String   @map("content_hash")
+  threadId    String                       @id @map("thread_id")
+  embedding   Unsupported("halfvec(1024)")
+  contentHash String                       @map("content_hash")
   model       String
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
+  createdAt   DateTime                     @default(now()) @map("created_at")
+  updatedAt   DateTime                     @updatedAt @map("updated_at")
 
   thread ClassifiedThread @relation(fields: [threadId], references: [threadId], onDelete: Cascade)
 
@@ -334,12 +337,12 @@ model ThreadEmbedding {
 }
 
 model GroupEmbedding {
-  groupId     String   @id @map("group_id")
-  embedding   Json     // Array of floats (1536 dimensions)
-  contentHash String   @map("content_hash")
+  groupId     String                       @id @map("group_id")
+  embedding   Unsupported("halfvec(1024)")
+  contentHash String                       @map("content_hash")
   model       String
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
+  createdAt   DateTime                     @default(now()) @map("created_at")
+  updatedAt   DateTime                     @updatedAt @map("updated_at")
 
   group Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
 
@@ -355,8 +358,8 @@ model DocumentationCache {
   fetchedAt DateTime @default(now()) @map("fetched_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
-  sections      DocumentationSection[]
-  embeddings    DocumentationEmbedding?
+  sections          DocumentationSection[]
+  embeddings        DocumentationEmbedding?
   sectionEmbeddings DocumentationSectionEmbedding[]
 
   @@index([fetchedAt(sort: Desc)])
@@ -364,16 +367,16 @@ model DocumentationCache {
 }
 
 model DocumentationSection {
-  id              Int      @id @default(autoincrement())
-  documentationUrl String  @map("documentation_url")
-  title           String
-  content         String
-  sectionUrl      String?  @map("section_url")
-  sectionOrder    Int      @default(0) @map("section_order")
-  createdAt       DateTime @default(now()) @map("created_at")
+  id               Int      @id @default(autoincrement())
+  documentationUrl String   @map("documentation_url")
+  title            String
+  content          String
+  sectionUrl       String?  @map("section_url")
+  sectionOrder     Int      @default(0) @map("section_order")
+  createdAt        DateTime @default(now()) @map("created_at")
 
-  documentation DocumentationCache @relation(fields: [documentationUrl], references: [url], onDelete: Cascade)
-  embedding      DocumentationSectionEmbedding?
+  documentation DocumentationCache             @relation(fields: [documentationUrl], references: [url], onDelete: Cascade)
+  embedding     DocumentationSectionEmbedding?
 
   @@index([documentationUrl])
   @@index([documentationUrl, sectionOrder])
@@ -381,16 +384,16 @@ model DocumentationSection {
 }
 
 model DocumentationSectionEmbedding {
-  sectionId       Int      @id @map("section_id")
-  documentationUrl String  @map("documentation_url")
-  embedding       Json     // Array of floats (1536 dimensions)
-  contentHash     String   @map("content_hash")
-  model           String
-  createdAt       DateTime @default(now()) @map("created_at")
-  updatedAt       DateTime @updatedAt @map("updated_at")
+  sectionId        Int                          @id @map("section_id")
+  documentationUrl String                       @map("documentation_url")
+  embedding        Unsupported("halfvec(1024)")
+  contentHash      String                       @map("content_hash")
+  model            String
+  createdAt        DateTime                     @default(now()) @map("created_at")
+  updatedAt        DateTime                     @updatedAt @map("updated_at")
 
-  section      DocumentationSection @relation(fields: [sectionId], references: [id], onDelete: Cascade)
-  documentation DocumentationCache  @relation(fields: [documentationUrl], references: [url], onDelete: Cascade)
+  section       DocumentationSection @relation(fields: [sectionId], references: [id], onDelete: Cascade)
+  documentation DocumentationCache   @relation(fields: [documentationUrl], references: [url], onDelete: Cascade)
 
   @@index([documentationUrl])
   @@index([contentHash])
@@ -399,12 +402,12 @@ model DocumentationSectionEmbedding {
 }
 
 model DocumentationEmbedding {
-  documentationUrl String   @id @map("documentation_url")
-  embedding        Json     // Array of floats (1536 dimensions)
-  contentHash      String   @map("content_hash")
+  documentationUrl String                       @id @map("documentation_url")
+  embedding        Unsupported("halfvec(1024)")
+  contentHash      String                       @map("content_hash")
   model            String
-  createdAt        DateTime @default(now()) @map("created_at")
-  updatedAt        DateTime @updatedAt @map("updated_at")
+  createdAt        DateTime                     @default(now()) @map("created_at")
+  updatedAt        DateTime                     @updatedAt @map("updated_at")
 
   documentation DocumentationCache @relation(fields: [documentationUrl], references: [url], onDelete: Cascade)
 
@@ -414,22 +417,22 @@ model DocumentationEmbedding {
 }
 
 model Feature {
-  id                  String   @id
-  name                String
-  description         String?
-  category            String?
-  priority            String?
-  relatedKeywords     String[] @map("related_keywords")
-  documentationSection String? @map("documentation_section")
-  documentationUrls   String[] @map("documentation_urls")
-  codeContext         String?  @db.Text @map("code_context")
-  extractedAt         DateTime @default(now()) @map("extracted_at")
-  createdAt           DateTime @default(now()) @map("created_at")
-  updatedAt           DateTime @updatedAt @map("updated_at")
+  id                   String   @id
+  name                 String
+  description          String?
+  category             String?
+  priority             String?
+  relatedKeywords      String[] @map("related_keywords")
+  documentationSection String?  @map("documentation_section")
+  documentationUrls    String[] @map("documentation_urls")
+  codeContext          String?  @map("code_context") @db.Text
+  extractedAt          DateTime @default(now()) @map("extracted_at")
+  createdAt            DateTime @default(now()) @map("created_at")
+  updatedAt            DateTime @updatedAt @map("updated_at")
 
-  embedding FeatureEmbedding?
+  embedding    FeatureEmbedding?
   codeMappings FeatureCodeMapping[]
-  ownership FeatureOwnership[]
+  ownership    FeatureOwnership[]
 
   @@index([name])
   @@index([category])
@@ -441,12 +444,12 @@ model Feature {
 }
 
 model FeatureEmbedding {
-  featureId   String   @id @map("feature_id")
-  embedding   Json     // Array of floats (1536 dimensions)
-  contentHash String   @map("content_hash")
+  featureId   String                       @id @map("feature_id")
+  embedding   Unsupported("halfvec(1024)")
+  contentHash String                       @map("content_hash")
   model       String
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
+  createdAt   DateTime                     @default(now()) @map("created_at")
+  updatedAt   DateTime                     @updatedAt @map("updated_at")
 
   feature Feature @relation(fields: [featureId], references: [id], onDelete: Cascade)
 
@@ -463,9 +466,9 @@ model CodeSearch {
   searchType    String   @map("search_type") // 'semantic', 'keyword', 'exact'
   createdAt     DateTime @default(now()) @map("created_at")
   updatedAt     DateTime @updatedAt @map("updated_at")
-  
-  codeFiles     CodeFile[]
-  
+
+  codeFiles CodeFile[]
+
   @@unique([searchQuery, repositoryUrl])
   @@index([repositoryUrl])
   @@index([createdAt(sort: Desc)])
@@ -477,16 +480,16 @@ model CodeFile {
   codeSearchId  String   @map("code_search_id")
   filePath      String   @map("file_path")
   fileName      String   @map("file_name")
-  fileContent   String   @db.Text @map("file_content") // Full file content
-  language      String?  // ts, js, py, etc.
+  fileContent   String   @map("file_content") @db.Text // Full file content
+  language      String? // ts, js, py, etc.
   contentHash   String   @map("content_hash") // To detect changes
   lastIndexedAt DateTime @default(now()) @map("last_indexed_at")
   indexedAt     DateTime @default(now()) @map("indexed_at")
-  
-  codeSearch    CodeSearch      @relation(fields: [codeSearchId], references: [id], onDelete: Cascade)
-  codeSections  CodeSection[]
-  embeddings    CodeFileEmbedding?
-  
+
+  codeSearch   CodeSearch         @relation(fields: [codeSearchId], references: [id], onDelete: Cascade)
+  codeSections CodeSection[]
+  embeddings   CodeFileEmbedding?
+
   @@unique([codeSearchId, filePath])
   @@index([codeSearchId])
   @@index([filePath])
@@ -496,20 +499,20 @@ model CodeFile {
 }
 
 model CodeSection {
-  id            String   @id
-  codeFileId    String   @map("code_file_id")
-  sectionType   String   @map("section_type") // 'function', 'class', 'interface', 'type', 'export'
-  sectionName   String   @map("section_name") // Function/class name
-  sectionContent String  @db.Text @map("section_content") // Just this section's code
-  startLine     Int?     @map("start_line")
-  endLine       Int?     @map("end_line")
-  contentHash   String   @map("content_hash")
-  createdAt     DateTime @default(now()) @map("created_at")
-  
-  codeFile      CodeFile         @relation(fields: [codeFileId], references: [id], onDelete: Cascade)
-  embedding     CodeSectionEmbedding?
+  id             String   @id
+  codeFileId     String   @map("code_file_id")
+  sectionType    String   @map("section_type") // 'function', 'class', 'interface', 'type', 'export'
+  sectionName    String   @map("section_name") // Function/class name
+  sectionContent String   @map("section_content") @db.Text // Just this section's code
+  startLine      Int?     @map("start_line")
+  endLine        Int?     @map("end_line")
+  contentHash    String   @map("content_hash")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  codeFile        CodeFile              @relation(fields: [codeFileId], references: [id], onDelete: Cascade)
+  embedding       CodeSectionEmbedding?
   featureMappings FeatureCodeMapping[]
-  
+
   @@index([codeFileId])
   @@index([sectionType])
   @@index([sectionName])
@@ -518,30 +521,30 @@ model CodeSection {
 }
 
 model CodeFileEmbedding {
-  codeFileId   String   @id @map("code_file_id")
-  embedding    Json     // Array of floats (1536 dimensions) - embedding of entire file
-  contentHash  String   @map("content_hash")
-  model        String
-  createdAt    DateTime @default(now()) @map("created_at")
-  updatedAt    DateTime @updatedAt @map("updated_at")
-  
-  codeFile     CodeFile @relation(fields: [codeFileId], references: [id], onDelete: Cascade)
-  
+  codeFileId  String                       @id @map("code_file_id")
+  embedding   Unsupported("halfvec(1024)")
+  contentHash String                       @map("content_hash")
+  model       String
+  createdAt   DateTime                     @default(now()) @map("created_at")
+  updatedAt   DateTime                     @updatedAt @map("updated_at")
+
+  codeFile CodeFile @relation(fields: [codeFileId], references: [id], onDelete: Cascade)
+
   @@index([contentHash])
   @@index([model])
   @@map("code_file_embeddings")
 }
 
 model CodeSectionEmbedding {
-  codeSectionId String   @id @map("code_section_id")
-  embedding     Json     // Array of floats (1536 dimensions) - embedding of this section
-  contentHash   String   @map("content_hash")
+  codeSectionId String                       @id @map("code_section_id")
+  embedding     Unsupported("halfvec(1024)")
+  contentHash   String                       @map("content_hash")
   model         String
-  createdAt     DateTime @default(now()) @map("created_at")
-  updatedAt     DateTime @updatedAt @map("updated_at")
-  
-  codeSection   CodeSection @relation(fields: [codeSectionId], references: [id], onDelete: Cascade)
-  
+  createdAt     DateTime                     @default(now()) @map("created_at")
+  updatedAt     DateTime                     @updatedAt @map("updated_at")
+
+  codeSection CodeSection @relation(fields: [codeSectionId], references: [id], onDelete: Cascade)
+
   @@index([contentHash])
   @@index([model])
   @@map("code_section_embeddings")
@@ -556,10 +559,10 @@ model FeatureCodeMapping {
   searchQuery   String?  @map("search_query") // Original search that found this
   createdAt     DateTime @default(now()) @map("created_at")
   updatedAt     DateTime @updatedAt @map("updated_at")
-  
-  feature    Feature    @relation(fields: [featureId], references: [id], onDelete: Cascade)
+
+  feature     Feature     @relation(fields: [featureId], references: [id], onDelete: Cascade)
   codeSection CodeSection @relation(fields: [codeSectionId], references: [id], onDelete: Cascade)
-  
+
   @@unique([featureId, codeSectionId])
   @@index([featureId])
   @@index([codeSectionId])
@@ -570,20 +573,20 @@ model FeatureCodeMapping {
 
 // Code ownership analysis based on commit history
 model CodeOwnership {
-  id            String   @id @default(uuid())
-  filePath      String   @map("file_path")
-  engineer      String   // GitHub username or email prefix (for matching)
-  engineerEmail String?  @map("engineer_email") // Full email for Linear user matching
-  engineerName  String?  @map("engineer_name") // Display name from git
-  linesAdded    Int      @default(0) @map("lines_added")
-  linesDeleted  Int      @default(0) @map("lines_deleted")
-  commitsCount  Int      @default(0) @map("commits_count")
-  ownershipPercent Decimal @db.Decimal(5, 2) @map("ownership_percent") // 0.00-100.00
-  lastCommitSha String?  @map("last_commit_sha")
-  lastCommitDate DateTime? @map("last_commit_date")
-  createdAt     DateTime @default(now()) @map("created_at")
-  updatedAt     DateTime @updatedAt @map("updated_at")
-  
+  id               String    @id @default(uuid())
+  filePath         String    @map("file_path")
+  engineer         String // GitHub username or email prefix (for matching)
+  engineerEmail    String?   @map("engineer_email") // Full email for Linear user matching
+  engineerName     String?   @map("engineer_name") // Display name from git
+  linesAdded       Int       @default(0) @map("lines_added")
+  linesDeleted     Int       @default(0) @map("lines_deleted")
+  commitsCount     Int       @default(0) @map("commits_count")
+  ownershipPercent Decimal   @map("ownership_percent") @db.Decimal(5, 2) // 0.00-100.00
+  lastCommitSha    String?   @map("last_commit_sha")
+  lastCommitDate   DateTime? @map("last_commit_date")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+
   @@unique([filePath, engineer])
   @@index([filePath])
   @@index([engineer])
@@ -594,20 +597,20 @@ model CodeOwnership {
 
 // Feature-level ownership (aggregated from file ownership)
 model FeatureOwnership {
-  id            String   @id @default(uuid())
-  featureId     String   @map("feature_id")
-  engineer      String   // GitHub username or email prefix (for matching)
-  engineerEmail String?  @map("engineer_email") // Full email for Linear user matching
-  engineerName  String?  @map("engineer_name") // Display name from git
-  ownershipPercent Decimal @db.Decimal(5, 2) @map("ownership_percent") // 0.00-100.00
-  filesCount    Int      @default(0) @map("files_count")
-  totalLines    Int      @default(0) @map("total_lines")
-  lastUpdated   DateTime @default(now()) @map("last_updated")
-  createdAt     DateTime @default(now()) @map("created_at")
-  updatedAt     DateTime @updatedAt @map("updated_at")
-  
-  feature      Feature   @relation(fields: [featureId], references: [id], onDelete: Cascade)
-  
+  id               String   @id @default(uuid())
+  featureId        String   @map("feature_id")
+  engineer         String // GitHub username or email prefix (for matching)
+  engineerEmail    String?  @map("engineer_email") // Full email for Linear user matching
+  engineerName     String?  @map("engineer_name") // Display name from git
+  ownershipPercent Decimal  @map("ownership_percent") @db.Decimal(5, 2) // 0.00-100.00
+  filesCount       Int      @default(0) @map("files_count")
+  totalLines       Int      @default(0) @map("total_lines")
+  lastUpdated      DateTime @default(now()) @map("last_updated")
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  feature Feature @relation(fields: [featureId], references: [id], onDelete: Cascade)
+
   @@unique([featureId, engineer])
   @@index([featureId])
   @@index([engineer])
@@ -617,22 +620,22 @@ model FeatureOwnership {
 }
 
 model UngroupedIssue {
-  issueNumber          Int      @id @map("issue_number")
-  issueTitle           String   @map("issue_title")
-  issueUrl             String   @map("issue_url")
-  issueState           String?  @map("issue_state")
-  issueBody            String?  @map("issue_body")
-  issueLabels          String[] @map("issue_labels")
-  issueAuthor          String?  @map("issue_author")
-  issueCreatedAt       DateTime? @map("issue_created_at")
-  exportStatus         String?  @map("export_status") // 'pending' | 'exported' | null (not exported yet)
-  exportedAt           DateTime? @map("exported_at")
-  linearIssueId        String?  @map("linear_issue_id")
-  linearIssueUrl       String?  @map("linear_issue_url")
-  linearIssueIdentifier String? @map("linear_issue_identifier")
-  affectsFeatures      Json     @default("[]") @map("affects_features")
-  createdAt            DateTime @default(now()) @map("created_at")
-  updatedAt            DateTime @updatedAt @map("updated_at")
+  issueNumber           Int       @id @map("issue_number")
+  issueTitle            String    @map("issue_title")
+  issueUrl              String    @map("issue_url")
+  issueState            String?   @map("issue_state")
+  issueBody             String?   @map("issue_body")
+  issueLabels           String[]  @map("issue_labels")
+  issueAuthor           String?   @map("issue_author")
+  issueCreatedAt        DateTime? @map("issue_created_at")
+  exportStatus          String?   @map("export_status") // 'pending' | 'exported' | null (not exported yet)
+  exportedAt            DateTime? @map("exported_at")
+  linearIssueId         String?   @map("linear_issue_id")
+  linearIssueUrl        String?   @map("linear_issue_url")
+  linearIssueIdentifier String?   @map("linear_issue_identifier")
+  affectsFeatures       Json      @default("[]") @map("affects_features")
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @updatedAt @map("updated_at")
 
   @@index([exportStatus])
   @@index([issueState])
@@ -641,30 +644,30 @@ model UngroupedIssue {
 }
 
 model DiscordMessage {
-  id              String   @id
-  channelId       String   @map("channel_id")
-  authorId        String   @map("author_id")
-  authorUsername  String?  @map("author_username")
-  authorDiscriminator String? @map("author_discriminator")
-  authorBot       Boolean  @default(false) @map("author_bot")
-  authorAvatar    String?  @map("author_avatar")
-  content         String   @db.Text
-  createdAt       DateTime @map("created_at")
-  editedAt        DateTime? @map("edited_at")
-  timestamp       String   // Discord timestamp as string
-  channelName     String?  @map("channel_name")
-  guildId         String?  @map("guild_id")
-  guildName       String?  @map("guild_name")
-  attachments     Json     @default("[]") // Array of attachment objects
-  embeds          Int      @default(0)
-  mentions        String[] // Array of user IDs
-  reactions       Json     @default("[]") // Array of reaction objects
-  threadId        String?  @map("thread_id")
-  threadName      String?  @map("thread_name")
-  messageReference Json?   @map("message_reference") // Reference object or null
-  url             String?  @map("url")
-  fetchedAt       DateTime @default(now()) @map("fetched_at")
-  updatedAt       DateTime @updatedAt @map("updated_at")
+  id                  String    @id
+  channelId           String    @map("channel_id")
+  authorId            String    @map("author_id")
+  authorUsername      String?   @map("author_username")
+  authorDiscriminator String?   @map("author_discriminator")
+  authorBot           Boolean   @default(false) @map("author_bot")
+  authorAvatar        String?   @map("author_avatar")
+  content             String    @db.Text
+  createdAt           DateTime  @map("created_at")
+  editedAt            DateTime? @map("edited_at")
+  timestamp           String // Discord timestamp as string
+  channelName         String?   @map("channel_name")
+  guildId             String?   @map("guild_id")
+  guildName           String?   @map("guild_name")
+  attachments         Json      @default("[]") // Array of attachment objects
+  embeds              Int       @default(0)
+  mentions            String[] // Array of user IDs
+  reactions           Json      @default("[]") // Array of reaction objects
+  threadId            String?   @map("thread_id")
+  threadName          String?   @map("thread_name")
+  messageReference    Json?     @map("message_reference") // Reference object or null
+  url                 String?   @map("url")
+  fetchedAt           DateTime  @default(now()) @map("fetched_at")
+  updatedAt           DateTime  @updatedAt @map("updated_at")
 
   channel Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
 
@@ -679,20 +682,20 @@ model DiscordMessage {
 model ExportResult {
   id                String   @id
   channelId         String?  @map("channel_id")
-  pmTool           String   @map("pm_tool")
-  sourceFile       String?  @map("source_file")
-  success          Boolean  @default(false)
-  featuresExtracted Int     @default(0) @map("features_extracted")
-  featuresMapped   Int     @default(0) @map("features_mapped")
-  issuesCreated    Int     @default(0) @map("issues_created")
-  issuesUpdated    Int     @default(0) @map("issues_updated")
-  issuesSkipped    Int     @default(0) @map("issues_skipped")
-  errors           Json    @default("[]")
-  exportMappings   Json?   @map("export_mappings") // Stores group_export_mappings, ungrouped_thread_export_mappings, etc.
-  closedItemsCount Json?   @map("closed_items_count") // Stores closed_items_count data
-  closedItemsFile  String? @map("closed_items_file")
-  createdAt        DateTime @default(now()) @map("created_at")
-  updatedAt        DateTime @updatedAt @map("updated_at")
+  pmTool            String   @map("pm_tool")
+  sourceFile        String?  @map("source_file")
+  success           Boolean  @default(false)
+  featuresExtracted Int      @default(0) @map("features_extracted")
+  featuresMapped    Int      @default(0) @map("features_mapped")
+  issuesCreated     Int      @default(0) @map("issues_created")
+  issuesUpdated     Int      @default(0) @map("issues_updated")
+  issuesSkipped     Int      @default(0) @map("issues_skipped")
+  errors            Json     @default("[]")
+  exportMappings    Json?    @map("export_mappings") // Stores group_export_mappings, ungrouped_thread_export_mappings, etc.
+  closedItemsCount  Json?    @map("closed_items_count") // Stores closed_items_count data
+  closedItemsFile   String?  @map("closed_items_file")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
 
   channel Channel? @relation(fields: [channelId], references: [id], onDelete: SetNull)
 
@@ -709,42 +712,42 @@ model ExportResult {
 
 // Track fix attempts for GitHub issues
 model FixAttempt {
-  id                String   @id @default(uuid())
-  
+  id String @id @default(uuid())
+
   // Issue identification
-  issueNumber       Int      @map("issue_number")
-  issueRepo         String   @map("issue_repo")        // e.g., "acme-corp/my-project"
-  issueTitle        String   @map("issue_title")
-  
+  issueNumber Int    @map("issue_number")
+  issueRepo   String @map("issue_repo") // e.g., "acme-corp/my-project"
+  issueTitle  String @map("issue_title")
+
   // Triage results
-  triageResult      String   @map("triage_result")     // 'bug' | 'config' | 'feature' | 'question' | 'unclear'
-  triageConfidence  Decimal  @map("triage_confidence") @db.Decimal(3, 2) // 0.00 - 1.00
-  triageReasoning   String?  @map("triage_reasoning")  @db.Text
-  
+  triageResult     String  @map("triage_result") // 'bug' | 'config' | 'feature' | 'question' | 'unclear'
+  triageConfidence Decimal @map("triage_confidence") @db.Decimal(3, 2) // 0.00 - 1.00
+  triageReasoning  String? @map("triage_reasoning") @db.Text
+
   // Fix attempt
-  fixAttempted      Boolean  @default(false) @map("fix_attempted")
-  fixSucceeded      Boolean? @map("fix_succeeded")
-  
+  fixAttempted Boolean  @default(false) @map("fix_attempted")
+  fixSucceeded Boolean? @map("fix_succeeded")
+
   // PR details (if created)
-  prNumber          Int?     @map("pr_number")
-  prUrl             String?  @map("pr_url")
-  prTitle           String?  @map("pr_title")
-  branchName        String?  @map("branch_name")
-  filesChanged      String[] @default([]) @map("files_changed")
-  
+  prNumber     Int?     @map("pr_number")
+  prUrl        String?  @map("pr_url")
+  prTitle      String?  @map("pr_title")
+  branchName   String?  @map("branch_name")
+  filesChanged String[] @default([]) @map("files_changed")
+
   // If no fix was created
-  noFixReason       String?  @map("no_fix_reason")     // 'config_issue' | 'unclear_repro' | 'too_complex' | 'already_fixed'
-  
+  noFixReason String? @map("no_fix_reason") // 'config_issue' | 'unclear_repro' | 'too_complex' | 'already_fixed'
+
   // Linear integration
-  linearIssueId     String?  @map("linear_issue_id")
-  linearCommentId   String?  @map("linear_comment_id") // Comment added about result
-  linearUpdated     Boolean  @default(false) @map("linear_updated")
-  
+  linearIssueId   String? @map("linear_issue_id")
+  linearCommentId String? @map("linear_comment_id") // Comment added about result
+  linearUpdated   Boolean @default(false) @map("linear_updated")
+
   // Timestamps
-  attemptedAt       DateTime @default(now()) @map("attempted_at")
-  createdAt         DateTime @default(now()) @map("created_at")
-  updatedAt         DateTime @updatedAt @map("updated_at")
-  
+  attemptedAt DateTime @default(now()) @map("attempted_at")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
   @@unique([issueNumber, issueRepo])
   @@index([triageResult])
   @@index([fixSucceeded])
@@ -758,29 +761,29 @@ model FixAttempt {
 // ============================================================================
 
 model AgentSession {
-  id                String   @id @default(uuid())
-  projectId         String   @default("default") @map("project_id")
-  startedAt         DateTime @default(now()) @map("started_at")
-  endedAt           DateTime? @map("ended_at")
-  scope             String[] @default([])
-  filesEdited       String[] @default([]) @map("files_edited")
-  decisionsMade     String[] @default([]) @map("decisions_made")
-  openItems         String[] @default([]) @map("open_items")
-  issuesReferenced  String[] @default([]) @map("issues_referenced")
-  toolsUsed         String[] @default([]) @map("tools_used")
-  planSteps         Json?    @map("plan_steps") @db.JsonB
+  id               String    @id @default(uuid())
+  projectId        String    @default("default") @map("project_id")
+  startedAt        DateTime  @default(now()) @map("started_at")
+  endedAt          DateTime? @map("ended_at")
+  scope            String[]  @default([])
+  filesEdited      String[]  @default([]) @map("files_edited")
+  decisionsMade    String[]  @default([]) @map("decisions_made")
+  openItems        String[]  @default([]) @map("open_items")
+  issuesReferenced String[]  @default([]) @map("issues_referenced")
+  toolsUsed        String[]  @default([]) @map("tools_used")
+  planSteps        Json?     @map("plan_steps") @db.JsonB
   // Typed pointers to artifacts on other surfaces (slack threads, notion pages,
   // github PRs, files, ...). Populated by `link_external_event`. See
   // `ExternalRef` in src/briefing/types.ts for the shape. Default `[]` so old
   // rows read as an empty list without a backfill migration.
-  externalRefs      Json     @default("[]") @map("external_refs") @db.JsonB
-  summary           String?  @db.Text
-  createdAt         DateTime @default(now()) @map("created_at")
-  updatedAt         DateTime @updatedAt @map("updated_at")
+  externalRefs     Json      @default("[]") @map("external_refs") @db.JsonB
+  summary          String?   @db.Text
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
 
   // Memories whose `sessionId` points at this session. Populated when an agent
   // passes `relatedInsights` to end_agent_session.
-  memories          MemoryEntry[]
+  memories MemoryEntry[]
 
   @@index([projectId, startedAt(sort: Desc)])
   @@index([startedAt(sort: Desc)])
@@ -793,25 +796,25 @@ model AgentSession {
 // ============================================================================
 
 model XPost {
-  id               String   @id
-  authorId         String   @map("author_id")
-  authorUsername   String   @map("author_username")
+  id              String   @id
+  authorId        String   @map("author_id")
+  authorUsername  String   @map("author_username")
   authorName      String?  @map("author_name")
-  authorFollowers  Int      @default(0) @map("author_followers")
-  content          String   @db.Text
-  hashtags         String[] @default([])
-  urls             String[] @default([])
-  likeCount        Int      @default(0) @map("like_count")
-  retweetCount     Int      @default(0) @map("retweet_count")
-  replyCount       Int      @default(0) @map("reply_count")
-  quoteCount       Int      @default(0) @map("quote_count")
-  lang             String?
-  conversationId   String?  @map("conversation_id")
-  inReplyToUserId  String?  @map("in_reply_to_user_id")
-  query            String?
-  postedAt         DateTime @map("posted_at")
-  fetchedAt        DateTime @default(now()) @map("fetched_at")
-  createdAt        DateTime @default(now()) @map("created_at")
+  authorFollowers Int      @default(0) @map("author_followers")
+  content         String   @db.Text
+  hashtags        String[] @default([])
+  urls            String[] @default([])
+  likeCount       Int      @default(0) @map("like_count")
+  retweetCount    Int      @default(0) @map("retweet_count")
+  replyCount      Int      @default(0) @map("reply_count")
+  quoteCount      Int      @default(0) @map("quote_count")
+  lang            String?
+  conversationId  String?  @map("conversation_id")
+  inReplyToUserId String?  @map("in_reply_to_user_id")
+  query           String?
+  postedAt        DateTime @map("posted_at")
+  fetchedAt       DateTime @default(now()) @map("fetched_at")
+  createdAt       DateTime @default(now()) @map("created_at")
 
   @@index([postedAt(sort: Desc)])
   @@index([authorUsername])
@@ -836,45 +839,47 @@ model XWatchConfig {
 
 // Learn from past fixes - stores closed issues with their merged PRs
 model PRLearning {
-  id                String   @id @default(uuid())
-  
+  id String @id @default(uuid())
+
   // Issue info
-  issueNumber       Int      @map("issue_number")
-  issueRepo         String   @map("issue_repo")
-  issueTitle        String   @map("issue_title")
-  issueBody         String?  @map("issue_body") @db.Text
-  issueLabels       String[] @map("issue_labels")
-  issueState        String   @map("issue_state")       // 'closed'
-  
+  issueNumber Int      @map("issue_number")
+  issueRepo   String   @map("issue_repo")
+  issueTitle  String   @map("issue_title")
+  issueBody   String?  @map("issue_body") @db.Text
+  issueLabels String[] @map("issue_labels")
+  issueState  String   @map("issue_state") // 'closed'
+
   // PR info
-  prNumber          Int      @map("pr_number")
-  prTitle           String   @map("pr_title")
-  prBody            String?  @map("pr_body") @db.Text
-  prDiff            String   @map("pr_diff") @db.Text  // The actual diff
-  prFilesChanged    String[] @map("pr_files_changed")
-  prLinesAdded      Int      @map("pr_lines_added")
-  prLinesRemoved    Int      @map("pr_lines_removed")
-  prMergedAt        DateTime? @map("pr_merged_at")
-  prAuthor          String   @map("pr_author")
-  
+  prNumber       Int       @map("pr_number")
+  prTitle        String    @map("pr_title")
+  prBody         String?   @map("pr_body") @db.Text
+  prDiff         String    @map("pr_diff") @db.Text // The actual diff
+  prFilesChanged String[]  @map("pr_files_changed")
+  prLinesAdded   Int       @map("pr_lines_added")
+  prLinesRemoved Int       @map("pr_lines_removed")
+  prMergedAt     DateTime? @map("pr_merged_at")
+  prAuthor       String    @map("pr_author")
+
   // Classification
-  issueType         String   @map("issue_type")        // 'bug' | 'feature' | 'docs' | etc.
-  subsystem         String?                            // 'oauth' | 'sso' | etc.
-  fixPatterns       String[] @map("fix_patterns")      // ['null_check', 'error_handling', 'type_fix']
-  
+  issueType   String   @map("issue_type") // 'bug' | 'feature' | 'docs' | etc.
+  subsystem   String? // 'oauth' | 'sso' | etc.
+  fixPatterns String[] @map("fix_patterns") // ['null_check', 'error_handling', 'type_fix']
+
   // Reviewer feedback
-  reviewComments    Json     @default("[]") @map("review_comments")  // Array of review comments
-  reviewOutcome     String?  @map("review_outcome")    // 'approved' | 'changes_requested' | 'merged_without_review'
-  
-  // Embedding for similarity search
-  embedding         Json?    @map("embedding")         // Vector embedding of issue+PR (nullable until computed)
-  contentHash       String   @map("content_hash")      // For deduplication
-  
+  reviewComments Json    @default("[]") @map("review_comments") // Array of review comments
+  reviewOutcome  String? @map("review_outcome") // 'approved' | 'changes_requested' | 'merged_without_review'
+
+  // pgvector halfvec(1024), nullable until the post-merge embedding worker
+  // computes it. Reads/writes go through src/storage/db/vectorIO.ts; HNSW
+  // index ships in 20260603040000_all_embeddings_halfvec.
+  embedding   Unsupported("halfvec(1024)")? @map("embedding")
+  contentHash String                        @map("content_hash") // For deduplication
+
   // Timestamps
-  learnedAt         DateTime @default(now()) @map("learned_at")
-  createdAt         DateTime @default(now()) @map("created_at")
-  updatedAt         DateTime @updatedAt @map("updated_at")
-  
+  learnedAt DateTime @default(now()) @map("learned_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
   @@unique([issueNumber, prNumber, issueRepo])
   @@index([issueRepo])
   @@index([issueType])
@@ -886,12 +891,12 @@ model PRLearning {
 
 // Persistent conversation memory with semantic search
 model MemoryEntry {
-  id          String   @id @default(uuid())
-  projectId   String   @default("default") @map("project_id")
-  content     String   @db.Text
-  summary     String   @db.Text
-  tags        String[] @default([])
-  source      String   @default("conversation") // 'conversation' | 'manual' | 'session'
+  id        String   @id @default(uuid())
+  projectId String   @default("default") @map("project_id")
+  content   String   @db.Text
+  summary   String   @db.Text
+  tags      String[] @default([])
+  source    String   @default("conversation") // 'conversation' | 'manual' | 'session'
   // Optional link back to the session that authored this memory. Set when an
   // agent passes `relatedInsights` to `end_agent_session` (or future automated
   // ingestion). Lets the briefing surface "this insight came from session X"
@@ -899,12 +904,12 @@ model MemoryEntry {
   // because most memories aren't session-bound (manual save_memory calls,
   // imported context, etc.). `onDelete: SetNull` so deleting a session doesn't
   // orphan or destroy the memory.
-  sessionId   String?  @map("session_id")
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
+  sessionId String?  @map("session_id")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
 
-  embedding   MemoryEntryEmbedding?
-  session     AgentSession?         @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+  embedding MemoryEntryEmbedding?
+  session   AgentSession?         @relation(fields: [sessionId], references: [id], onDelete: SetNull)
 
   @@index([projectId, createdAt(sort: Desc)])
   @@index([tags], type: Gin)
@@ -913,20 +918,20 @@ model MemoryEntry {
 }
 
 model MemoryEntryEmbedding {
-  memoryId    String   @id @map("memory_id")
-  // pgvector column. Prisma maps `vector` as Unsupported, so this field is NOT
-  // selectable/writable via the generated client — all access goes through raw
-  // SQL in src/storage/db/vector.ts + memory.ts (write) and the `<=>` indexed
-  // search in memory.ts / briefing distill.ts (read). An HNSW index on this
-  // column (see migration 20260602000000_memory_pgvector) powers fast ANN
-  // cosine search instead of pulling rows into JS.
-  embedding   Unsupported("vector(1536)")
-  contentHash String   @map("content_hash")
+  memoryId    String                       @id @map("memory_id")
+  // pgvector halfvec(1024). Prisma maps halfvec as Unsupported, so this field
+  // is NOT selectable/writable via the generated client — all access goes
+  // through src/storage/db/vectorIO.ts (writes / single-row reads) and raw
+  // SQL `<=>` ANN queries in memory.ts and briefing distill.ts (search). An
+  // HNSW cosine index on this column (see migration
+  // 20260603040000_all_embeddings_halfvec) powers fast indexed ANN search.
+  embedding   Unsupported("halfvec(1024)")
+  contentHash String                       @map("content_hash")
   model       String
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
+  createdAt   DateTime                     @default(now()) @map("created_at")
+  updatedAt   DateTime                     @updatedAt @map("updated_at")
 
-  memory      MemoryEntry @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+  memory MemoryEntry @relation(fields: [memoryId], references: [id], onDelete: Cascade)
 
   @@map("memory_entry_embeddings")
 }

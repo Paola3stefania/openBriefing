@@ -1,15 +1,25 @@
 /**
- * Embedding storage operations for documentation, sections, and features
- * Using Prisma for type-safe database access
+ * Embedding storage operations for documentation, sections, features, code,
+ * issues, threads and groups.
+ *
+ * Every embedding column in the schema is `halfvec(1024)` (Unsupported in
+ * Prisma). Reads and writes go through the generic helpers in `vectorIO.ts`,
+ * not Prisma's typed CRUD. Rows that have content metadata (everything but
+ * the embedding column itself) are still queried via Prisma — this file just
+ * routes the embedding bytes through raw SQL while the rest of each model
+ * stays normal.
  */
 
 import { prisma } from "./prisma.js";
 import { createHash } from "crypto";
-import type { DocumentationContent } from "../../export/documentationFetcher.js";
-import type { ProductFeature } from "../../export/types.js";
 import { createEmbedding, createEmbeddings } from "../../core/classify/semantic.js";
 import { getConfig } from "../../config/index.js";
-import type { Prisma } from "@prisma/client";
+import {
+  upsertEmbedding,
+  getEmbedding as getEmbeddingFromTable,
+  getEmbeddingsBatch,
+  type EmbeddingTable,
+} from "./vectorIO.js";
 
 export type Embedding = number[];
 
@@ -28,135 +38,72 @@ function hashContent(content: string): string {
   return createHash("md5").update(content).digest("hex");
 }
 
-/**
- * Save documentation section embedding
- */
 export async function saveDocumentationSectionEmbedding(
   sectionId: number,
   documentationUrl: string,
   embedding: Embedding,
   contentHash: string
 ): Promise<void> {
-  const model = getEmbeddingModel();
-  await prisma.documentationSectionEmbedding.upsert({
-    where: { sectionId },
-    update: {
-      documentationUrl,
-      embedding: embedding as Prisma.InputJsonValue,
-      contentHash,
-      model,
-    },
-    create: {
-      sectionId,
-      documentationUrl,
-      embedding: embedding as Prisma.InputJsonValue,
-      contentHash,
-      model,
-    },
+  await upsertEmbedding({
+    table: "documentation_section_embeddings",
+    pkValue: sectionId,
+    embedding,
+    contentHash,
+    model: getEmbeddingModel(),
+    extraColumns: { documentation_url: documentationUrl },
   });
 }
 
-/**
- * Get documentation section embedding
- */
 export async function getDocumentationSectionEmbedding(sectionId: number): Promise<Embedding | null> {
-  const model = getEmbeddingModel();
-  const result = await prisma.documentationSectionEmbedding.findUnique({
-    where: {
-      sectionId,
-    },
-    select: { embedding: true, model: true },
+  return getEmbeddingFromTable({
+    table: "documentation_section_embeddings",
+    pkValue: sectionId,
+    model: getEmbeddingModel(),
   });
-
-  if (!result || result.model !== model) {
-    return null;
-  }
-
-  return result.embedding as Embedding;
 }
 
-/**
- * Save full documentation embedding
- */
 export async function saveDocumentationEmbedding(
   url: string,
   embedding: Embedding,
   contentHash: string
 ): Promise<void> {
-  const model = getEmbeddingModel();
-  await prisma.documentationEmbedding.upsert({
-    where: { documentationUrl: url },
-    update: {
-      embedding: embedding as Prisma.InputJsonValue,
-      contentHash,
-      model,
-    },
-    create: {
-      documentationUrl: url,
-      embedding: embedding as Prisma.InputJsonValue,
-      contentHash,
-      model,
-    },
+  await upsertEmbedding({
+    table: "documentation_embeddings",
+    pkValue: url,
+    embedding,
+    contentHash,
+    model: getEmbeddingModel(),
   });
 }
 
-/**
- * Get documentation embedding
- */
 export async function getDocumentationEmbedding(url: string): Promise<Embedding | null> {
-  const model = getEmbeddingModel();
-  const result = await prisma.documentationEmbedding.findUnique({
-    where: { documentationUrl: url },
-    select: { embedding: true, model: true },
+  return getEmbeddingFromTable({
+    table: "documentation_embeddings",
+    pkValue: url,
+    model: getEmbeddingModel(),
   });
-
-  if (!result || result.model !== model) {
-    return null;
-  }
-
-  return result.embedding as Embedding;
 }
 
-/**
- * Save feature embedding
- */
 export async function saveFeatureEmbedding(
   featureId: string,
   embedding: Embedding,
   contentHash: string
 ): Promise<void> {
-  const model = getEmbeddingModel();
-  await prisma.featureEmbedding.upsert({
-    where: { featureId },
-    update: {
-      embedding: embedding as Prisma.InputJsonValue,
-      contentHash,
-      model,
-    },
-    create: {
-      featureId,
-      embedding: embedding as Prisma.InputJsonValue,
-      contentHash,
-      model,
-    },
+  await upsertEmbedding({
+    table: "feature_embeddings",
+    pkValue: featureId,
+    embedding,
+    contentHash,
+    model: getEmbeddingModel(),
   });
 }
 
-/**
- * Get feature embedding
- */
 export async function getFeatureEmbedding(featureId: string): Promise<Embedding | null> {
-  const model = getEmbeddingModel();
-  const result = await prisma.featureEmbedding.findUnique({
-    where: { featureId },
-    select: { embedding: true, model: true },
+  return getEmbeddingFromTable({
+    table: "feature_embeddings",
+    pkValue: featureId,
+    model: getEmbeddingModel(),
   });
-
-  if (!result || result.model !== model) {
-    return null;
-  }
-
-  return result.embedding as Embedding;
 }
 
 /**
@@ -227,33 +174,27 @@ export async function computeAndSaveDocumentationSectionEmbeddings(
       // Batch create embeddings
       const embeddings = await createEmbeddings(textsToEmbed, apiKey);
 
-      // Batch save all embeddings in a single transaction
+      // Save embeddings in parallel. We previously wrapped this in a Prisma
+      // transaction for atomicity, but the embedding column is now halfvec
+      // (Unsupported), so the writes go through raw SQL and don't compose
+      // with Prisma's typed transaction. Upserts are idempotent and the
+      // outer batch loop already retries on failure, so dropping atomicity
+      // here is safe.
       const model = getEmbeddingModel();
-      await prisma.$transaction(async (tx: Omit<typeof prisma, "$connect" | "$disconnect" | "$on" | "$transaction" | "$use" | "$extends">) => {
-        await Promise.all(
-          embeddings.map((embedding, j) => {
-            const section = batch[j];
-            const contentText = textsToEmbed[j];
-            const contentHash = hashContent(contentText);
-            return tx.documentationSectionEmbedding.upsert({
-              where: { sectionId: section.id },
-              update: {
-                documentationUrl: section.url,
-                embedding: embedding as Prisma.InputJsonValue,
-                contentHash,
-                model,
-              },
-              create: {
-                sectionId: section.id,
-                documentationUrl: section.url,
-                embedding: embedding as Prisma.InputJsonValue,
-                contentHash,
-                model,
-              },
-            });
-          })
-        );
-      });
+      await Promise.all(
+        embeddings.map((embedding, j) => {
+          const section = batch[j];
+          const contentHash = hashContent(textsToEmbed[j]);
+          return upsertEmbedding({
+            table: "documentation_section_embeddings",
+            pkValue: section.id,
+            embedding,
+            contentHash,
+            model,
+            extraColumns: { documentation_url: section.url },
+          });
+        })
+      );
 
       processed += batch.length;
       retryCount = 0; // Reset retry count on successful batch
@@ -373,31 +314,20 @@ export async function computeAndSaveDocumentationEmbeddings(
       // Batch create embeddings
       const embeddings = await createEmbeddings(textsToEmbed, apiKey);
 
-      // Batch save all embeddings in a single transaction
       const model = getEmbeddingModel();
-      await prisma.$transaction(async (tx: Omit<typeof prisma, "$connect" | "$disconnect" | "$on" | "$transaction" | "$use" | "$extends">) => {
-        await Promise.all(
-          embeddings.map((embedding, j) => {
-            const doc = batch[j];
-            const contentText = textsToEmbed[j];
-            const contentHash = hashContent(contentText);
-            return tx.documentationEmbedding.upsert({
-              where: { documentationUrl: doc.url },
-              update: {
-                embedding: embedding as Prisma.InputJsonValue,
-                contentHash,
-                model,
-              },
-              create: {
-                documentationUrl: doc.url,
-                embedding: embedding as Prisma.InputJsonValue,
-                contentHash,
-                model,
-              },
-            });
-          })
-        );
-      });
+      await Promise.all(
+        embeddings.map((embedding, j) => {
+          const doc = batch[j];
+          const contentHash = hashContent(textsToEmbed[j]);
+          return upsertEmbedding({
+            table: "documentation_embeddings",
+            pkValue: doc.url,
+            embedding,
+            contentHash,
+            model,
+          });
+        })
+      );
 
       processed += batch.length;
       retryCount = 0; // Reset retry count on successful batch
@@ -975,45 +905,30 @@ export async function computeAndSaveFeatureEmbeddings(
       const embeddings = await createEmbeddings(textsToEmbed, apiKey);
       console.error(`[Embeddings] Successfully computed ${embeddings.length} embeddings`);
 
-      // Batch save all embeddings and code context in a single transaction
       const model = getEmbeddingModel();
       console.error(`[Embeddings] Saving ${embeddings.length} embeddings and code context to database...`);
-      await prisma.$transaction(async (tx: Omit<typeof prisma, "$connect" | "$disconnect" | "$on" | "$transaction" | "$use" | "$extends">) => {
-        await Promise.all(
-          embeddings.map(async (embedding, j) => {
-            const feature = batch[j];
-            const contentText = textsToEmbed[j];
-            const contentHash = hashContent(contentText);
-            
-            // Save embedding
-            await tx.featureEmbedding.upsert({
-              where: { featureId: feature.id },
-              update: {
-                embedding: embedding as Prisma.InputJsonValue,
-                contentHash,
-                model,
-              },
-              create: {
-                featureId: feature.id,
-                embedding: embedding as Prisma.InputJsonValue,
-                contentHash,
-                model,
-              },
+      await Promise.all(
+        embeddings.map(async (embedding, j) => {
+          const feature = batch[j];
+          const contentHash = hashContent(textsToEmbed[j]);
+
+          await upsertEmbedding({
+            table: "feature_embeddings",
+            pkValue: feature.id,
+            embedding,
+            contentHash,
+            model,
+          });
+
+          if (feature.codeContextToSave) {
+            await prisma.feature.update({
+              where: { id: feature.id },
+              data: { codeContext: feature.codeContextToSave },
             });
-            
-            // Save code context to Feature model if available
-            if (feature.codeContextToSave) {
-              await tx.feature.update({
-                where: { id: feature.id },
-                data: {
-                  codeContext: feature.codeContextToSave,
-                },
-              });
-              console.error(`[Embeddings] Saved code context for feature ${feature.id} (${feature.codeContextToSave.length} characters)`);
-            }
-          })
-        );
-      });
+            console.error(`[Embeddings] Saved code context for feature ${feature.id} (${feature.codeContextToSave.length} characters)`);
+          }
+        })
+      );
       console.error(`[Embeddings] Successfully saved ${embeddings.length} embeddings to database`);
 
       processed += batch.length;
@@ -1095,238 +1010,123 @@ export async function computeAndSaveFeatureEmbeddings(
   return { computed: processed, cached, total: allFeatures.length };
 }
 
-/**
- * Save thread embedding
- */
 export async function saveThreadEmbedding(
   threadId: string,
   embedding: Embedding,
   contentHash: string
 ): Promise<void> {
-  const model = getEmbeddingModel();
-  await prisma.threadEmbedding.upsert({
-    where: { threadId },
-    update: {
-      embedding: embedding as Prisma.InputJsonValue,
-      contentHash,
-      model,
-    },
-    create: {
-      threadId,
-      embedding: embedding as Prisma.InputJsonValue,
-      contentHash,
-      model,
-    },
+  await upsertEmbedding({
+    table: "thread_embeddings",
+    pkValue: threadId,
+    embedding,
+    contentHash,
+    model: getEmbeddingModel(),
   });
 }
 
-/**
- * Get thread embedding
- * @param currentContentHash Optional - if provided, validates that content hasn't changed
- * @returns Embedding if exists and contentHash matches (if provided), null otherwise
- */
 export async function getThreadEmbedding(
   threadId: string,
   currentContentHash?: string
 ): Promise<Embedding | null> {
-  const model = getEmbeddingModel();
-  const result = await prisma.threadEmbedding.findUnique({
-    where: { threadId },
-    select: { embedding: true, model: true, contentHash: true },
+  return getEmbeddingFromTable({
+    table: "thread_embeddings",
+    pkValue: threadId,
+    model: getEmbeddingModel(),
+    currentContentHash,
   });
-
-  if (!result || result.model !== model) {
-    return null;
-  }
-
-  // If currentContentHash provided, validate content hasn't changed
-  if (currentContentHash && result.contentHash !== currentContentHash) {
-    return null; // Content changed, need to recompute
-  }
-
-  return result.embedding as Embedding;
 }
 
-/**
- * Save group embedding
- */
 export async function saveGroupEmbedding(
   groupId: string,
   embedding: Embedding,
   contentHash: string
 ): Promise<void> {
-  const model = getEmbeddingModel();
-  await prisma.groupEmbedding.upsert({
-    where: { groupId },
-    update: {
-      embedding: embedding as Prisma.InputJsonValue,
-      contentHash,
-      model,
-    },
-    create: {
-      groupId,
-      embedding: embedding as Prisma.InputJsonValue,
-      contentHash,
-      model,
-    },
+  await upsertEmbedding({
+    table: "group_embeddings",
+    pkValue: groupId,
+    embedding,
+    contentHash,
+    model: getEmbeddingModel(),
   });
 }
 
-/**
- * Get group embedding
- * @param currentContentHash Optional - if provided, validates that content hasn't changed
- * @returns Embedding if exists and contentHash matches (if provided), null otherwise
- */
 export async function getGroupEmbedding(
   groupId: string,
   currentContentHash?: string
 ): Promise<Embedding | null> {
-  const model = getEmbeddingModel();
-  const result = await prisma.groupEmbedding.findUnique({
-    where: { groupId },
-    select: { embedding: true, model: true, contentHash: true },
+  return getEmbeddingFromTable({
+    table: "group_embeddings",
+    pkValue: groupId,
+    model: getEmbeddingModel(),
+    currentContentHash,
   });
-
-  if (!result || result.model !== model) {
-    return null;
-  }
-
-  // If currentContentHash provided, validate content hasn't changed
-  if (currentContentHash && result.contentHash !== currentContentHash) {
-    return null; // Content changed, need to recompute
-  }
-
-  return result.embedding as Embedding;
 }
 
-/**
- * Save code section embedding
- */
 export async function saveCodeSectionEmbedding(
   codeSectionId: string,
   embedding: Embedding,
   contentHash: string
 ): Promise<void> {
-  const model = getEmbeddingModel();
-  await prisma.codeSectionEmbedding.upsert({
-    where: { codeSectionId },
-    update: {
-      embedding: embedding as Prisma.InputJsonValue,
-      contentHash,
-      model,
-    },
-    create: {
-      codeSectionId,
-      embedding: embedding as Prisma.InputJsonValue,
-      contentHash,
-      model,
-    },
+  await upsertEmbedding({
+    table: "code_section_embeddings",
+    pkValue: codeSectionId,
+    embedding,
+    contentHash,
+    model: getEmbeddingModel(),
   });
 }
 
-/**
- * Get code section embedding
- * @param currentContentHash Optional - if provided, validates that content hasn't changed
- * @returns Embedding if exists and contentHash matches (if provided), null otherwise
- */
 export async function getCodeSectionEmbedding(
   codeSectionId: string,
   currentContentHash?: string
 ): Promise<Embedding | null> {
-  const model = getEmbeddingModel();
-  const result = await prisma.codeSectionEmbedding.findUnique({
-    where: { codeSectionId },
-    select: { embedding: true, model: true, contentHash: true },
+  return getEmbeddingFromTable({
+    table: "code_section_embeddings",
+    pkValue: codeSectionId,
+    model: getEmbeddingModel(),
+    currentContentHash,
   });
-
-  if (!result || result.model !== model) {
-    return null;
-  }
-
-  // If currentContentHash provided, validate content hasn't changed
-  if (currentContentHash && result.contentHash !== currentContentHash) {
-    return null; // Content changed, need to recompute
-  }
-
-  return result.embedding as Embedding;
 }
 
 /**
- * Batch get code section embeddings (avoids N+1 queries)
- * @param sectionIds Array of section IDs to fetch
- * @returns Map of sectionId -> embedding (only includes valid embeddings)
+ * Batch get code section embeddings (avoids N+1 queries).
+ * Returns a Map of sectionId → embedding for entries whose `model` matches the
+ * configured one. Caller should treat missing keys as "no embedding".
  */
 export async function getCodeSectionEmbeddingsBatch(
   sectionIds: string[]
 ): Promise<Map<string, Embedding>> {
-  if (sectionIds.length === 0) return new Map();
-
-  const model = getEmbeddingModel();
-  const results = await prisma.codeSectionEmbedding.findMany({
-    where: {
-      codeSectionId: { in: sectionIds },
-      model: model, // Only get embeddings with correct model
-    },
-    select: { codeSectionId: true, embedding: true, contentHash: true },
+  return getEmbeddingsBatch({
+    table: "code_section_embeddings",
+    pkValues: sectionIds,
+    model: getEmbeddingModel(),
   });
-
-  const embeddings = new Map<string, Embedding>();
-  for (const result of results) {
-    embeddings.set(result.codeSectionId, result.embedding as Embedding);
-  }
-  return embeddings;
 }
 
-/**
- * Save code file embedding
- */
 export async function saveCodeFileEmbedding(
   codeFileId: string,
   embedding: Embedding,
   contentHash: string
 ): Promise<void> {
-  const model = getEmbeddingModel();
-  await prisma.codeFileEmbedding.upsert({
-    where: { codeFileId },
-    update: {
-      embedding: embedding as Prisma.InputJsonValue,
-      contentHash,
-      model,
-    },
-    create: {
-      codeFileId,
-      embedding: embedding as Prisma.InputJsonValue,
-      contentHash,
-      model,
-    },
+  await upsertEmbedding({
+    table: "code_file_embeddings",
+    pkValue: codeFileId,
+    embedding,
+    contentHash,
+    model: getEmbeddingModel(),
   });
 }
 
-/**
- * Get code file embedding
- * @param currentContentHash Optional - if provided, validates that content hasn't changed
- * @returns Embedding if exists and contentHash matches (if provided), null otherwise
- */
 export async function getCodeFileEmbedding(
   codeFileId: string,
   currentContentHash?: string
 ): Promise<Embedding | null> {
-  const model = getEmbeddingModel();
-  const result = await prisma.codeFileEmbedding.findUnique({
-    where: { codeFileId },
-    select: { embedding: true, model: true, contentHash: true },
+  return getEmbeddingFromTable({
+    table: "code_file_embeddings",
+    pkValue: codeFileId,
+    model: getEmbeddingModel(),
+    currentContentHash,
   });
-
-  if (!result || result.model !== model) {
-    return null;
-  }
-
-  // If currentContentHash provided, validate content hasn't changed
-  if (currentContentHash && result.contentHash !== currentContentHash) {
-    return null; // Content changed, need to recompute
-  }
-
-  return result.embedding as Embedding;
 }
 
 /**
@@ -1546,30 +1346,19 @@ export async function computeAndSaveThreadEmbeddings(
       // Batch create embeddings
       const embeddings = await createEmbeddings(textsToEmbed, apiKey);
 
-      // Batch save all embeddings in a single transaction
-      await prisma.$transaction(async (tx: Omit<typeof prisma, "$connect" | "$disconnect" | "$on" | "$transaction" | "$use" | "$extends">) => {
-        await Promise.all(
-          embeddings.map((embedding, j) => {
-            const thread = batch[j];
-            const contentText = textsToEmbed[j];
-            const contentHash = hashContent(contentText);
-            return tx.threadEmbedding.upsert({
-              where: { threadId: thread.threadId },
-              update: {
-                embedding: embedding as Prisma.InputJsonValue,
-                contentHash,
-                model,
-              },
-              create: {
-                threadId: thread.threadId,
-                embedding: embedding as Prisma.InputJsonValue,
-                contentHash,
-                model,
-              },
-            });
-          })
-        );
-      });
+      await Promise.all(
+        embeddings.map((embedding, j) => {
+          const thread = batch[j];
+          const contentHash = hashContent(textsToEmbed[j]);
+          return upsertEmbedding({
+            table: "thread_embeddings",
+            pkValue: thread.threadId,
+            embedding,
+            contentHash,
+            model,
+          });
+        })
+      );
 
       processed += batch.length;
       retryCount = 0; // Reset retry count on successful batch
@@ -1623,60 +1412,32 @@ export async function computeAndSaveThreadEmbeddings(
   return { computed: processed, cached, total: totalItems };
 }
 
-/**
- * Get issue embedding
- */
 export async function saveIssueEmbedding(
   issueNumber: number,
   embedding: Embedding,
   contentHash: string,
   issueId?: string
 ): Promise<void> {
-  const model = getEmbeddingModel();
-  const id = issueId || `${issueNumber}`;
-  await prisma.issueEmbedding.upsert({
-    where: { issueId: id },
-    update: {
-      embedding: embedding as Prisma.InputJsonValue,
-      contentHash,
-      model,
-    },
-    create: {
-      issueId: id,
-      embedding: embedding as Prisma.InputJsonValue,
-      contentHash,
-      model,
-    },
+  await upsertEmbedding({
+    table: "issue_embeddings",
+    pkValue: issueId || `${issueNumber}`,
+    embedding,
+    contentHash,
+    model: getEmbeddingModel(),
   });
 }
 
-/**
- * Get issue embedding
- * @param currentContentHash Optional - if provided, validates that content hasn't changed
- * @returns Embedding if exists and contentHash matches (if provided), null otherwise
- */
 export async function getIssueEmbedding(
   issueNumber: number,
   currentContentHash?: string,
   issueId?: string
 ): Promise<Embedding | null> {
-  const model = getEmbeddingModel();
-  const id = issueId || `${issueNumber}`;
-  const result = await prisma.issueEmbedding.findUnique({
-    where: { issueId: id },
-    select: { embedding: true, model: true, contentHash: true },
+  return getEmbeddingFromTable({
+    table: "issue_embeddings",
+    pkValue: issueId || `${issueNumber}`,
+    model: getEmbeddingModel(),
+    currentContentHash,
   });
-
-  if (!result || result.model !== model) {
-    return null;
-  }
-
-  // If currentContentHash provided, validate content hasn't changed
-  if (currentContentHash && result.contentHash !== currentContentHash) {
-    return null; // Content changed, need to recompute
-  }
-
-  return result.embedding as Embedding;
 }
 
 /**
@@ -1803,30 +1564,19 @@ export async function computeAndSaveIssueEmbeddings(
       // Batch create embeddings
       const embeddings = await createEmbeddings(textsToEmbed, apiKey);
 
-      // Batch save all embeddings in a single transaction
-      await prisma.$transaction(async (tx: Omit<typeof prisma, "$connect" | "$disconnect" | "$on" | "$transaction" | "$use" | "$extends">) => {
-        await Promise.all(
-          embeddings.map((embedding, j) => {
-            const issue = batch[j];
-            const contentText = textsToEmbed[j];
-            const contentHash = hashContent(contentText);
-            return tx.issueEmbedding.upsert({
-              where: { issueId: issue.id },
-              update: {
-                embedding: embedding as Prisma.InputJsonValue,
-                contentHash,
-                model,
-              },
-              create: {
-                issueId: issue.id,
-                embedding: embedding as Prisma.InputJsonValue,
-                contentHash,
-                model,
-              },
-            });
-          })
-        );
-      });
+      await Promise.all(
+        embeddings.map((embedding, j) => {
+          const issue = batch[j];
+          const contentHash = hashContent(textsToEmbed[j]);
+          return upsertEmbedding({
+            table: "issue_embeddings",
+            pkValue: issue.id,
+            embedding,
+            contentHash,
+            model,
+          });
+        })
+      );
 
       processed += batch.length;
       retryCount = 0; // Reset retry count on successful batch
@@ -1855,19 +1605,12 @@ export async function computeAndSaveIssueEmbeddings(
           const embedding = await createEmbedding(issue.content, apiKey);
           const contentHash = hashContent(issue.content);
 
-          await prisma.issueEmbedding.upsert({
-            where: { issueId: issue.id },
-            update: {
-              embedding: embedding as Prisma.InputJsonValue,
-              contentHash,
-              model,
-            },
-            create: {
-              issueId: issue.id,
-              embedding: embedding as Prisma.InputJsonValue,
-              contentHash,
-              model,
-            },
+          await upsertEmbedding({
+            table: "issue_embeddings",
+            pkValue: issue.id,
+            embedding,
+            contentHash,
+            model,
           });
           processed++;
 
@@ -2048,30 +1791,19 @@ export async function computeAndSaveGroupEmbeddings(
       const embeddings = await createEmbeddings(textsToEmbed, apiKey);
       console.error(`[Embeddings] Successfully computed ${embeddings.length} group embeddings`);
 
-      // Batch save all embeddings in a single transaction
-      await prisma.$transaction(async (tx: Omit<typeof prisma, "$connect" | "$disconnect" | "$on" | "$transaction" | "$use" | "$extends">) => {
-        await Promise.all(
-          embeddings.map((embedding, j) => {
-            const group = batch[j];
-            const contentText = textsToEmbed[j];
-            const contentHash = hashContent(contentText);
-            return tx.groupEmbedding.upsert({
-              where: { groupId: group.groupId },
-              update: {
-                embedding: embedding as Prisma.InputJsonValue,
-                contentHash,
-                model,
-              },
-              create: {
-                groupId: group.groupId,
-                embedding: embedding as Prisma.InputJsonValue,
-                contentHash,
-                model,
-              },
-            });
-          })
-        );
-      });
+      await Promise.all(
+        embeddings.map((embedding, j) => {
+          const group = batch[j];
+          const contentHash = hashContent(textsToEmbed[j]);
+          return upsertEmbedding({
+            table: "group_embeddings",
+            pkValue: group.groupId,
+            embedding,
+            contentHash,
+            model,
+          });
+        })
+      );
 
       processed += batch.length;
       retryCount = 0; // Reset retry count on successful batch

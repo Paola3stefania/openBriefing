@@ -58,6 +58,26 @@ npm run build      # prisma generate, migrate deploy, tsc
 npm test           # vitest
 ```
 
+### First-time setup on a new machine (incl. picking up after another agent)
+
+```bash
+# 1. Ollama (default embedding provider — no API key, no rate limits)
+brew install --cask ollama-app
+open -a Ollama
+ollama pull mxbai-embed-large       # 1024-dim, ~670 MB
+
+# 2. App + DB
+npm install
+npx prisma migrate deploy           # applies any pending migrations to Neon
+npx prisma generate
+
+# 3. (Optional) local Postgres mirror for offline reads
+DATABASE_URL=postgresql://<user>@localhost:5432/briefings npx prisma migrate deploy
+
+# 4. (Optional) re-embed any rows missing vectors after a model swap
+npm run reembed:all -- --resume
+```
+
 Data sync into **Postgres** (same as MCP `fetch_github_issues` + `fetch_discord_messages` when `DATABASE_URL` is set):
 
 ```bash
@@ -74,12 +94,21 @@ npm run briefing
 npm run briefing -- --json
 ```
 
-Recover memories that were saved while `OPENAI_API_KEY` was broken/expired (rows land without an embedding row, so semantic search can't surface them):
+Recover memories that were saved while the embedding provider was unreachable (rows land without an embedding row, so semantic search can't surface them):
 
 ```bash
 npm run backfill:memory-embeddings -- --dry-run
 npm run backfill:memory-embeddings
 npm run backfill:memory-embeddings -- --project=owner/repo --limit=20
+```
+
+Re-embed every persisted source row (run after a model dim change or a provider swap; idempotent — `--resume` skips rows already embedded with the active model):
+
+```bash
+npm run reembed:all                                # all 9 sources
+npm run reembed:all -- --resume                    # skip already-done
+npm run reembed:all -- --table=code_files          # one source
+npm run reembed:all -- --dry-run                   # count only
 ```
 
 **Install OpenBriefing into another project** (copies skill, rule, hooks, writes `.cursor/mcp.json`):
@@ -213,10 +242,12 @@ After data is stored, the existing **classification, grouping, and embedding** t
 ### Classifications and embeddings (for LLMs, but stored in *your* DB)
 
 - **Classification** (e.g. `classify_discord_messages`) is a **separate step** from “fetch.” It reads stored messages, runs the classification pipeline, and **writes** structured results back. Run it when you need new threads classified, or use a chained workflow like `sync_classify_and_export` where the pipeline does multiple steps in order.
-- **Embeddings** are **vector representations** (typically via **`OPENAI_API_KEY`**) used for **similarity** (grouping issues, matching threads, etc.). They live in **Postgres** (embedding tables / columns) via tools like `compute_*_embeddings` or inside larger workflows. This is not a second proprietary “LLM database” product — it is **your** database plus embedding fields used by those features.
+- **Embeddings** are **vector representations** used for **similarity** (grouping issues, matching threads, semantic memory search, etc.). They live in **Postgres** (embedding tables / columns) via tools like `compute_*_embeddings` or inside larger workflows. This is not a second proprietary "LLM database" product — it is **your** database plus embedding fields used by those features.
   - **Storage backend is now mandatory.** There is no local-JSON fallback: if `DATABASE_URL`/`DB_*` is unset the server throws on startup (`src/storage/factory.ts`). `STORAGE_BACKEND=json` is honored only under `NODE_ENV=test`. Use a local Postgres for dev or a cloud Postgres (Neon/Supabase/Vercel) to share the brain.
-  - **Agent memory uses `pgvector`.** `memory_entry_embeddings.embedding` is a real `vector(1536)` column with an HNSW cosine index (migration `20260602000000_memory_pgvector`). Prisma maps `vector` as `Unsupported`, so that column is read/written via raw SQL only — see `src/storage/db/vector.ts`, the raw upsert in `src/storage/db/memory.ts`, and the indexed `<=>` search in `searchMemory` + `distillRelatedInsights`. Apply with `npm run db:migrate` (deploy); do **not** `migrate dev` against it. The other embedding tables (issues/threads/groups/docs/code/features) are still JSONB + JS cosine — converting them is a tracked follow-up (50+ `include:{embedding:true}` call sites).
-  - **Optional local mirror (dual-write).** Set `MEMORY_MIRROR_DATABASE_URL` and every `saveMemory` writes the row + embedding to that second DB too (`src/storage/db/mirror.ts`). It's best-effort (mirror failure never fails the primary), embeds once for both, and nulls the `sessionId` FK in the mirror when the session isn't present there. The mirror DB needs the same schema incl. pgvector. For point-in-time snapshots instead of live mirroring, use `npm run db:backup` (`scripts/backup-db.sh`).
+  - **All embedding columns are `pgvector` `halfvec(1024)`** (migration `20260603100000_embeddings_ollama_1024`) with an HNSW cosine index. Prisma maps `halfvec` as `Unsupported`, so the embedding column is read/written via raw SQL only — see `src/storage/db/vector.ts` (`EMBEDDING_DIM = 1024`, `toSqlVector`), the generic helpers in `src/storage/db/vectorIO.ts` (`upsertEmbedding`, `getEmbedding`, `getEmbeddingsBatch`), the raw upsert in `src/storage/db/memory.ts`, and the indexed `<=>` searches in `searchMemory` + `distillRelatedInsights`. Apply schema changes with `npm run db:migrate` (deploy); do **not** `migrate dev` against pgvector indexes.
+  - **Embedding provider is pluggable** (`src/embeddings/embed.ts`). Defaults to a **local Ollama** daemon running `mxbai-embed-large` (1024-dim, retrieval-tuned, no per-token cost, no rate limits). Set `EMBEDDING_PROVIDER=openai` to fall back to the OpenAI API (requires `OPENAI_API_KEY`). Switching providers/models means re-embedding everything because vectors from different models live in different vector spaces — see `npm run reembed:all`. Required env for Ollama: `EMBEDDING_PROVIDER=ollama`, `OLLAMA_BASE_URL=http://localhost:11434`, `OLLAMA_EMBEDDING_MODEL=mxbai-embed-large`. If Ollama isn't running, `embedTexts` throws with a clear error rather than silently degrading; start Ollama via the menu bar app (or `open -a Ollama`).
+  - **Database scope (single source of truth).** The Neon DB holds **briefings + repo context only**: agent_sessions, memory_entries, export_results, github_issues / pull_requests / pr_learnings, code_files / sections / searches / ownership, features and feature mappings, documentation, groups, channels. Discord/X/thread tables (`discord_messages`, `x_posts`, `classified_threads`, `thread_embeddings`, `group_threads`) are intentionally empty on Neon — they will be owned by a separate database belonging to the future `unmute` repo.
+  - **Optional local mirror (dual-write).** Set `MEMORY_MIRROR_DATABASE_URL` and every `saveMemory` writes the row + embedding to that second DB too (`src/storage/db/mirror.ts`). It's best-effort (mirror failure never fails the primary), embeds once for both, and nulls the `sessionId` FK in the mirror when the session isn't present there. The mirror DB needs the same schema incl. pgvector + `halfvec(1024)`. For point-in-time snapshots instead of live mirroring, use `npm run db:backup` (`scripts/backup-db.sh`).
 
 ### One shared database, many `project` IDs (e.g. better-auth repos)
 

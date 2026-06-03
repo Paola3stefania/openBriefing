@@ -51,6 +51,7 @@ import { extractFeaturesFromDocumentation } from "../export/featureExtractor.js"
 import type { ClassifiedThread, Group, UngroupedThread } from "../storage/types.js";
 import { detectProjectId } from "../config/project.js";
 import { runStage, readTimeoutEnv, withOverallTimeout } from "../util/stages.js";
+import { getEmbeddingsBatch } from "../storage/db/vectorIO.js";
 
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 
@@ -5105,10 +5106,11 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         if (ungroupedIssues.length > 0) {
           // Load embeddings for ungrouped issues
-          const issueEmbs = await prisma.issueEmbedding.findMany({
-            where: { issueId: { in: ungroupedIssues.map(i => i.id) } },
+          const embMap = await getEmbeddingsBatch({
+            table: "issue_embeddings",
+            pkValues: ungroupedIssues.map((i) => i.id),
+            model: getConfig().classification.embeddingModel,
           });
-          const embMap = new Map(issueEmbs.map(e => [e.issueId, e.embedding as number[]]));
 
           // Simple clustering: group issues with similarity >= 80%
           const grouped = new Set<string>();
@@ -5186,34 +5188,44 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         let matchesCreated = 0;
 
         if (unmatchedIssues.length > 0 && discordCount > 0) {
-          const issueEmbs = await prisma.issueEmbedding.findMany({
-            where: { issueId: { in: unmatchedIssues.map(i => i.id) } },
+          const issueEmbMap = await getEmbeddingsBatch({
+            table: "issue_embeddings",
+            pkValues: unmatchedIssues.map((i) => i.id),
+            model: getConfig().classification.embeddingModel,
           });
           const issueIdToNumber = new Map(unmatchedIssues.map(i => [i.id, i.issueNumber]));
-          const threadEmbs = await prisma.threadEmbedding.findMany({
-            include: { thread: { select: { threadName: true, firstMessageUrl: true } } },
+          const threadMeta = await prisma.threadEmbedding.findMany({
+            select: {
+              threadId: true,
+              thread: { select: { threadName: true, firstMessageUrl: true } },
+            },
+          });
+          const threadEmbVecs = await getEmbeddingsBatch({
+            table: "thread_embeddings",
+            pkValues: threadMeta.map((m) => m.threadId),
+            model: getConfig().classification.embeddingModel,
           });
 
-          for (const issueEmb of issueEmbs) {
-            const issueVec = issueEmb.embedding as number[];
+          for (const [issueId, issueVec] of issueEmbMap) {
             const matches: Array<{ threadId: string; similarity: number; threadName: string | null }> = [];
 
-            for (const threadEmb of threadEmbs) {
-              const threadVec = threadEmb.embedding as number[];
+            for (const m of threadMeta) {
+              const threadVec = threadEmbVecs.get(m.threadId);
+              if (!threadVec) continue;
               const sim = cosineSimilarity(issueVec, threadVec) * 100;
               if (sim >= min_similarity) {
-                matches.push({ threadId: threadEmb.threadId, similarity: sim, threadName: threadEmb.thread?.threadName || null });
+                matches.push({ threadId: m.threadId, similarity: sim, threadName: m.thread?.threadName || null });
               }
             }
 
             if (matches.length > 0) {
-              const issueNumber = issueIdToNumber.get(issueEmb.issueId);
+              const issueNumber = issueIdToNumber.get(issueId);
               // Save top matches
               for (const match of matches.slice(0, 5)) {
                 await prisma.issueThreadMatch.upsert({
-                  where: { issueId_threadId: { issueId: issueEmb.issueId, threadId: match.threadId } },
+                  where: { issueId_threadId: { issueId, threadId: match.threadId } },
                   create: {
-                    issueId: issueEmb.issueId,
+                    issueId,
                     issueNumber: issueNumber ?? 0,
                     threadId: match.threadId,
                     threadName: match.threadName,
@@ -5226,7 +5238,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
               }
 
               await prisma.gitHubIssue.update({
-                where: { id: issueEmb.issueId },
+                where: { id: issueId },
                 data: { matchedToThreads: true },
               });
             }
@@ -5338,22 +5350,26 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         let ungroupedFeaturesMatched = 0;
 
         if (unmatchedUngroupedIssues.length > 0) {
-          const features = await prisma.feature.findMany({
-            include: { embedding: true },
+          const features = await prisma.feature.findMany();
+          const featureEmbMap = await getEmbeddingsBatch({
+            table: "feature_embeddings",
+            pkValues: features.map((f) => f.id),
+            model: getConfig().classification.embeddingModel,
           });
 
-          if (features.length > 0) {
-            const issueEmbs = await prisma.issueEmbedding.findMany({
-              where: { issueId: { in: unmatchedUngroupedIssues.map(i => i.id) } },
+          if (features.length > 0 && featureEmbMap.size > 0) {
+            const issueIds = unmatchedUngroupedIssues.map((i) => i.id);
+            const issueEmbMap = await getEmbeddingsBatch({
+              table: "issue_embeddings",
+              pkValues: issueIds,
+              model: getConfig().classification.embeddingModel,
             });
 
-            for (const issueEmb of issueEmbs) {
-              const issueVec = issueEmb.embedding as number[];
+            for (const [issueId, issueVec] of issueEmbMap) {
               const matchedFeatures: Array<{ id: string; name: string }> = [];
-
               for (const feature of features) {
-                if (!feature.embedding) continue;
-                const featureVec = feature.embedding.embedding as number[];
+                const featureVec = featureEmbMap.get(feature.id);
+                if (!featureVec) continue;
                 const sim = cosineSimilarity(issueVec, featureVec);
                 if (sim >= 0.5) {
                   matchedFeatures.push({ id: feature.id, name: feature.name });
@@ -5362,7 +5378,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
               if (matchedFeatures.length > 0) {
                 await prisma.gitHubIssue.update({
-                  where: { id: issueEmb.issueId },
+                  where: { id: issueId },
                   data: { affectsFeatures: matchedFeatures },
                 });
                 ungroupedFeaturesMatched++;
@@ -5386,22 +5402,26 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         let groupedIssuesFeaturesMatched = 0;
 
         if (unmatchedGroupedIssues.length > 0) {
-          const features = await prisma.feature.findMany({
-            include: { embedding: true },
+          const features = await prisma.feature.findMany();
+          const featureEmbMap = await getEmbeddingsBatch({
+            table: "feature_embeddings",
+            pkValues: features.map((f) => f.id),
+            model: getConfig().classification.embeddingModel,
           });
 
-          if (features.length > 0) {
-            const issueEmbs = await prisma.issueEmbedding.findMany({
-              where: { issueId: { in: unmatchedGroupedIssues.map(i => i.id) } },
+          if (features.length > 0 && featureEmbMap.size > 0) {
+            const issueIds = unmatchedGroupedIssues.map((i) => i.id);
+            const issueEmbMap = await getEmbeddingsBatch({
+              table: "issue_embeddings",
+              pkValues: issueIds,
+              model: getConfig().classification.embeddingModel,
             });
 
-            for (const issueEmb of issueEmbs) {
-              const issueVec = issueEmb.embedding as number[];
+            for (const [issueId, issueVec] of issueEmbMap) {
               const matchedFeatures: Array<{ id: string; name: string }> = [];
-
               for (const feature of features) {
-                if (!feature.embedding) continue;
-                const featureVec = feature.embedding.embedding as number[];
+                const featureVec = featureEmbMap.get(feature.id);
+                if (!featureVec) continue;
                 const sim = cosineSimilarity(issueVec, featureVec);
                 if (sim >= 0.5) {
                   matchedFeatures.push({ id: feature.id, name: feature.name });
@@ -5410,7 +5430,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
               if (matchedFeatures.length > 0) {
                 await prisma.gitHubIssue.update({
-                  where: { id: issueEmb.issueId },
+                  where: { id: issueId },
                   data: { affectsFeatures: matchedFeatures },
                 });
                 groupedIssuesFeaturesMatched++;
@@ -5449,38 +5469,30 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           });
           
           if (groupsToMatch.length > 0) {
-            // Load feature embeddings
-            const featuresWithEmbeddings = await prisma.feature.findMany({
-              include: { embedding: true },
+            const featuresWithEmbeddings = await prisma.feature.findMany();
+            const featureEmbeddingMap = await getEmbeddingsBatch({
+              table: "feature_embeddings",
+              pkValues: featuresWithEmbeddings.map((f) => f.id),
+              model: getConfig().classification.embeddingModel,
             });
-            
-            // Load group embeddings (should already be computed in Step 3)
-            const groupEmbeddings = await prisma.groupEmbedding.findMany({
-              where: { groupId: { in: groupsToMatch.map(g => g.id) } },
+
+            const groupEmbMap = await getEmbeddingsBatch({
+              table: "group_embeddings",
+              pkValues: groupsToMatch.map((g) => g.id),
+              model: getConfig().classification.embeddingModel,
             });
-            const groupEmbMap = new Map(groupEmbeddings.map(ge => [ge.groupId, ge.embedding as number[]]));
-            
-            // Build feature embedding map
-            const featureEmbeddingMap = new Map<string, number[]>();
-            for (const feature of featuresWithEmbeddings) {
-              if (feature.embedding?.embedding) {
-                featureEmbeddingMap.set(feature.id, feature.embedding.embedding as number[]);
-              }
-            }
-            
-            // Match each group to features
+
             for (const group of groupsToMatch) {
               const groupEmb = groupEmbMap.get(group.id);
               if (!groupEmb) {
                 console.error(`[Sync] No embedding found for group ${group.id}, skipping`);
                 continue;
               }
-              
+
               const matchedFeatures: Array<{ id: string; name: string }> = [];
-              
               for (const feature of featuresWithEmbeddings) {
-                if (!feature.embedding) continue;
-                const featureVec = feature.embedding.embedding as number[];
+                const featureVec = featureEmbeddingMap.get(feature.id);
+                if (!featureVec) continue;
                 const sim = cosineSimilarity(groupEmb, featureVec);
                 if (sim >= 0.5) {
                   matchedFeatures.push({ id: feature.id, name: feature.name });
@@ -8401,18 +8413,12 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         console.error(`[GroupIssues] GitHub issue embeddings: ${embeddingResult.computed} computed, ${embeddingResult.cached} cached, ${embeddingResult.total} total`);
 
         // STEP 3: Load all issue embeddings for grouping
-        const issueEmbeddings = await prisma.issueEmbedding.findMany({
-          where: {
-            issueId: { in: allIssues.map(i => i.id) },
-          },
+        const embeddingMap = await getEmbeddingsBatch({
+          table: "issue_embeddings",
+          pkValues: allIssues.map((i) => i.id),
+          model: getConfig().classification.embeddingModel,
         });
-        console.error(`[GroupIssues] Loaded ${issueEmbeddings.length} embeddings`);
-
-        // Create embedding map (keyed by issue id)
-        const embeddingMap = new Map<string, number[]>();
-        for (const emb of issueEmbeddings) {
-          embeddingMap.set(emb.issueId, emb.embedding as number[]);
-        }
+        console.error(`[GroupIssues] Loaded ${embeddingMap.size} embeddings`);
 
         // STEP 4: Group issues by similarity using embeddings
         console.error(`[GroupIssues] Grouping issues by similarity (threshold: ${min_similarity}%)...`);
@@ -8522,20 +8528,28 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         });
         console.error(`[GroupIssues] Thread embeddings: ${threadEmbeddingResult.computed} computed, ${threadEmbeddingResult.cached} cached`);
 
-        // Load all thread embeddings
-        const threadEmbeddings = await prisma.threadEmbedding.findMany({
-          include: {
-            thread: true,
+        // Load all thread embeddings. Two-step: pull metadata + thread name
+        // through Prisma, then materialise the halfvec column via vectorIO.
+        const threadMeta = await prisma.threadEmbedding.findMany({
+          select: {
+            threadId: true,
+            thread: { select: { threadName: true } },
           },
         });
-        console.error(`[GroupIssues] Loaded ${threadEmbeddings.length} thread embeddings`);
+        const threadEmbVecs = await getEmbeddingsBatch({
+          table: "thread_embeddings",
+          pkValues: threadMeta.map((m) => m.threadId),
+          model: getConfig().classification.embeddingModel,
+        });
+        console.error(`[GroupIssues] Loaded ${threadEmbVecs.size} thread embeddings`);
 
-        // Create thread embedding map
         const threadEmbeddingMap = new Map<string, { embedding: number[]; threadName: string | null }>();
-        for (const emb of threadEmbeddings) {
-          threadEmbeddingMap.set(emb.threadId, {
-            embedding: emb.embedding as number[],
-            threadName: emb.thread.threadName,
+        for (const m of threadMeta) {
+          const embedding = threadEmbVecs.get(m.threadId);
+          if (!embedding) continue;
+          threadEmbeddingMap.set(m.threadId, {
+            embedding,
+            threadName: m.thread?.threadName ?? null,
           });
         }
 
@@ -9506,18 +9520,12 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const { computeAndSaveFeatureEmbeddings } = await import("../storage/db/embeddings.js");
         await computeAndSaveFeatureEmbeddings(process.env.OPENAI_API_KEY);
         
-        // Reload features with embeddings
-        const featuresWithEmbeddings = await prisma.feature.findMany({
-          include: { embedding: true },
+        const featuresWithEmbeddings = await prisma.feature.findMany();
+        const featureEmbeddingMap = await getEmbeddingsBatch({
+          table: "feature_embeddings",
+          pkValues: featuresWithEmbeddings.map((f) => f.id),
+          model: getConfig().classification.embeddingModel,
         });
-        
-        // Build feature embedding map
-        const featureEmbeddingMap = new Map<string, number[]>();
-        for (const feature of featuresWithEmbeddings) {
-          if (feature.embedding?.embedding) {
-            featureEmbeddingMap.set(feature.id, feature.embedding.embedding as number[]);
-          }
-        }
         console.error(`[Issue Feature Matching] Loaded ${featureEmbeddingMap.size} feature embeddings`);
 
         // STEP 5: Load code-to-feature mappings for additional matching
@@ -9560,13 +9568,11 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const matchResults: Array<{ issueNumber: number; features: Array<{ id: string; name: string; similarity: number }> }> = [];
 
         // Reload issue embeddings
-        const issueEmbeddings = await prisma.issueEmbedding.findMany({
-          where: { issueId: { in: allIssues.map(i => i.id) } },
+        const issueEmbeddingMap = await getEmbeddingsBatch({
+          table: "issue_embeddings",
+          pkValues: allIssues.map((i) => i.id),
+          model: getConfig().classification.embeddingModel,
         });
-        const issueEmbeddingMap = new Map<string, number[]>();
-        for (const emb of issueEmbeddings) {
-          issueEmbeddingMap.set(emb.issueId, emb.embedding as number[]);
-        }
 
         for (const issue of allIssues) {
           const issueEmb = issueEmbeddingMap.get(issue.id);
@@ -9773,18 +9779,12 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const { computeAndSaveFeatureEmbeddings } = await import("../storage/db/embeddings.js");
         await computeAndSaveFeatureEmbeddings(process.env.OPENAI_API_KEY);
         
-        // Reload features with embeddings
-        const featuresWithEmbeddings = await prisma.feature.findMany({
-          include: { embedding: true },
+        const featuresWithEmbeddings = await prisma.feature.findMany();
+        const featureEmbeddingMap = await getEmbeddingsBatch({
+          table: "feature_embeddings",
+          pkValues: featuresWithEmbeddings.map((f) => f.id),
+          model: getConfig().classification.embeddingModel,
         });
-        
-        // Build feature embedding map
-        const featureEmbeddingMap = new Map<string, number[]>();
-        for (const feature of featuresWithEmbeddings) {
-          if (feature.embedding?.embedding) {
-            featureEmbeddingMap.set(feature.id, feature.embedding.embedding as number[]);
-          }
-        }
         console.error(`[Ungrouped Issue Feature Matching] Loaded ${featureEmbeddingMap.size} feature embeddings`);
 
         // STEP 5: Load code-to-feature mappings for additional matching
@@ -9827,13 +9827,11 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const matchResults: Array<{ issueNumber: number; features: Array<{ id: string; name: string; similarity: number }> }> = [];
 
         // Load issue embeddings (ungrouped issues reuse embeddings from IssueEmbedding table)
-        const issueEmbeddings = await prisma.issueEmbedding.findMany({
-          where: { issueId: { in: allUngroupedIssues.map(i => i.id) } },
+        const issueEmbeddingMap = await getEmbeddingsBatch({
+          table: "issue_embeddings",
+          pkValues: allUngroupedIssues.map((i) => i.id),
+          model: getConfig().classification.embeddingModel,
         });
-        const issueEmbeddingMap = new Map<string, number[]>();
-        for (const emb of issueEmbeddings) {
-          issueEmbeddingMap.set(emb.issueId, emb.embedding as number[]);
-        }
 
         for (const issue of allUngroupedIssues) {
           const issueEmb = issueEmbeddingMap.get(issue.id);
@@ -10040,18 +10038,12 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const { computeAndSaveFeatureEmbeddings } = await import("../storage/db/embeddings.js");
         await computeAndSaveFeatureEmbeddings(process.env.OPENAI_API_KEY);
         
-        // Reload features with embeddings
-        const featuresWithEmbeddings = await prisma.feature.findMany({
-          include: { embedding: true },
+        const featuresWithEmbeddings = await prisma.feature.findMany();
+        const featureEmbeddingMap = await getEmbeddingsBatch({
+          table: "feature_embeddings",
+          pkValues: featuresWithEmbeddings.map((f) => f.id),
+          model: getConfig().classification.embeddingModel,
         });
-        
-        // Build feature embedding map
-        const featureEmbeddingMap = new Map<string, number[]>();
-        for (const feature of featuresWithEmbeddings) {
-          if (feature.embedding?.embedding) {
-            featureEmbeddingMap.set(feature.id, feature.embedding.embedding as number[]);
-          }
-        }
         console.error(`[Group Feature Matching] Loaded ${featureEmbeddingMap.size} feature embeddings`);
 
         // STEP 5: Load code-to-feature mappings for additional matching
@@ -10094,13 +10086,11 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const matchResults: Array<{ groupId: string; features: Array<{ id: string; name: string; similarity: number }> }> = [];
 
         // Reload group embeddings
-        const groupEmbeddings = await prisma.groupEmbedding.findMany({
-          where: { groupId: { in: allGroups.map(g => g.id) } },
+        const groupEmbeddingMap = await getEmbeddingsBatch({
+          table: "group_embeddings",
+          pkValues: allGroups.map((g) => g.id),
+          model: getConfig().classification.embeddingModel,
         });
-        const groupEmbeddingMap = new Map<string, number[]>();
-        for (const emb of groupEmbeddings) {
-          groupEmbeddingMap.set(emb.groupId, emb.embedding as number[]);
-        }
 
         for (const group of allGroups) {
           const groupEmb = groupEmbeddingMap.get(group.id);
@@ -10490,19 +10480,13 @@ Example output:
         const embeddingResult = await computeAndSaveIssueEmbeddings(apiKey, undefined, false);
         console.error(`[MatchIssues] Issue embeddings: ${embeddingResult.computed} computed, ${embeddingResult.cached} cached`);
 
-        // Load issue embeddings
-        const issueEmbeddings = await prisma.issueEmbedding.findMany({
-          where: {
-            issueId: { in: allIssues.map(i => i.id) },
-          },
+        // Load issue embeddings (halfvec via vectorIO)
+        const issueEmbeddingMap = await getEmbeddingsBatch({
+          table: "issue_embeddings",
+          pkValues: allIssues.map((i) => i.id),
+          model: getConfig().classification.embeddingModel,
         });
-        console.error(`[MatchIssues] Loaded ${issueEmbeddings.length} issue embeddings`);
-
-        // Create issue embedding map (keyed by issue id)
-        const issueEmbeddingMap = new Map<string, number[]>();
-        for (const emb of issueEmbeddings) {
-          issueEmbeddingMap.set(emb.issueId, emb.embedding as number[]);
-        }
+        console.error(`[MatchIssues] Loaded ${issueEmbeddingMap.size} issue embeddings`);
 
         // STEP 3: Compute/load thread embeddings
         console.error(`[MatchIssues] Computing thread embeddings...`);
@@ -10511,13 +10495,15 @@ Example output:
         const threadEmbResult = await computeAndSaveThreadEmbeddings(apiKey, threadEmbeddingOpts);
         console.error(`[MatchIssues] Thread embeddings: ${threadEmbResult.computed} computed, ${threadEmbResult.cached} cached`);
 
-        // Load thread embeddings
-        const threadEmbeddingQuery = channel_id 
+        // Load thread embeddings (two-step: thread metadata via Prisma,
+        // halfvec column via vectorIO).
+        const threadEmbeddingQuery = channel_id
           ? { thread: { channelId: channel_id } }
           : {};
-        const threadEmbeddings = await prisma.threadEmbedding.findMany({
+        const threadMeta = await prisma.threadEmbedding.findMany({
           where: threadEmbeddingQuery,
-          include: {
+          select: {
+            threadId: true,
             thread: {
               select: {
                 threadId: true,
@@ -10529,6 +10515,17 @@ Example output:
             },
           },
         });
+        const threadEmbVecs = await getEmbeddingsBatch({
+          table: "thread_embeddings",
+          pkValues: threadMeta.map((m) => m.threadId),
+          model: getConfig().classification.embeddingModel,
+        });
+        const threadEmbeddings = threadMeta
+          .map((m) => {
+            const embedding = threadEmbVecs.get(m.threadId);
+            return embedding ? { ...m, embedding } : null;
+          })
+          .filter((m): m is NonNullable<typeof m> => m !== null);
         console.error(`[MatchIssues] Loaded ${threadEmbeddings.length} thread embeddings`);
 
         if (threadEmbeddings.length === 0) {
