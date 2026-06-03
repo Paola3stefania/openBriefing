@@ -16,6 +16,7 @@ import { LinearIntegration } from "../export/linear/client.js";
 import { log, logError } from "../mcp/logger.js";
 import { getConfig } from "../config/index.js";
 import { GitHubTokenManager } from "../connectors/github/tokenManager.js";
+import { llmChat } from "../llm/chat.js";
 // Reuse functions from prBasedSync
 import { 
   savePRsToDatabase
@@ -228,24 +229,12 @@ async function analyzeCommentsForClosureConfirmation(
 
     const fullContext = `Issue:\n${issueText}\n\nComments:\n${commentsText}`;
 
-    // Use LLM to analyze if waiting for closure confirmation
-    const apiKey = process.env.OPENAI_API_KEY;
-    if (!apiKey) {
-      log("[Sync] OPENAI_API_KEY not set, skipping comment analysis");
-      return { waitingForConfirmation: false, reason: "OpenAI API key not configured" };
-    }
-
     log(`[Sync] Analyzing comments for issue #${issueNumber} using LLM...`);
 
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        messages: [
+    let content: string;
+    try {
+      content = await llmChat(
+        [
           {
             role: "system",
             content: `You are analyzing GitHub issue comments to determine if the issue owner/maintainer is waiting for the user/contributor to confirm that the issue is resolved before closing it.
@@ -267,24 +256,11 @@ Return JSON: {"waiting": true/false, "reason": "brief explanation"}`,
             content: fullContext,
           },
         ],
-        response_format: { type: "json_object" },
-        temperature: 0.3,
-      }),
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      logError(`[Sync] OpenAI API error: ${response.status} ${errorText}`);
-      return { waitingForConfirmation: false, reason: `API error: ${response.status}` };
-    }
-
-    const result = await response.json() as {
-      choices?: Array<{ message?: { content?: string } }>;
-    };
-
-    const content = result.choices?.[0]?.message?.content;
-    if (!content) {
-      return { waitingForConfirmation: false, reason: "No response from LLM" };
+        { jsonMode: true, temperature: 0.3 },
+      );
+    } catch (err) {
+      logError(`[Sync] LLM error analyzing comments:`, err);
+      return { waitingForConfirmation: false, reason: "LLM analysis failed" };
     }
 
     try {

@@ -9,6 +9,7 @@ import type { PMToolConfig, PMToolIssue } from "./types.js";
 import type { ExportWorkflowResult } from "./workflow.js";
 import { getConfig } from "../config/index.js";
 import { join } from "path";
+import { llmChat } from "../llm/chat.js";
 
 interface GroupingSignal {
   source: string;
@@ -90,12 +91,6 @@ interface GroupingData {
  * Creates concise, descriptive titles following PR naming conventions
  */
 async function generateGroupTitleWithLLM(group: GroupingGroup): Promise<string> {
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) {
-    // Fallback to non-LLM title if API key not available
-    return generateFallbackTitle(group);
-  }
-
   // Collect content from GitHub issues and threads
   const contentParts: string[] = [];
   
@@ -118,18 +113,11 @@ async function generateGroupTitleWithLLM(group: GroupingGroup): Promise<string> 
   const contentToAnalyze = contentParts.join("\n\n");
 
   try {
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        messages: [
-          {
-            role: "system",
-            content: `You are a technical writer creating concise issue titles. Generate a single, clear title (max 100 characters) that summarizes the problem or feature request.
+    const title = (await llmChat(
+      [
+        {
+          role: "system",
+          content: `You are a technical writer creating concise issue titles. Generate a single, clear title (max 100 characters) that summarizes the problem or feature request.
 
 Follow these guidelines:
 - Be specific and actionable
@@ -141,27 +129,16 @@ Follow these guidelines:
 - Don't include issue numbers or IDs
 - Focus on the core problem or request
 
-Return ONLY the title text, nothing else.`
-          },
-          {
-            role: "user",
-            content: `Generate a concise title for this group:\n\n${contentToAnalyze}`
-          }
-        ],
-        temperature: 0.3,
-        max_tokens: 150,
-      }),
-    });
+Return ONLY the title text, nothing else.`,
+        },
+        {
+          role: "user",
+          content: `Generate a concise title for this group:\n\n${contentToAnalyze}`,
+        },
+      ],
+      { temperature: 0.3, maxTokens: 150 },
+    )).trim();
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      logError(`OpenAI API error for title generation: ${response.status} ${errorText}`);
-      return generateFallbackTitle(group);
-    }
-
-    const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
-    const title = data.choices?.[0]?.message?.content?.trim();
-    
     if (title && title.length > 0 && title.length <= 150) {
       // Truncate if slightly over limit
       return title.length > 100 ? title.substring(0, 97) + "..." : title;
@@ -590,12 +567,6 @@ async function getAutoLabelsWithLLM(options: {
 }): Promise<string[]> {
   const { labels = [], title = "", description = "", threadContent = "" } = options;
   
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) {
-    // Fallback to pattern matching if no API key
-    return getAutoLabelsFromPatterns({ labels, title });
-  }
-  
   // Build content to analyze
   const contentParts: string[] = [];
   if (title) contentParts.push(`Title: ${title}`);
@@ -610,18 +581,11 @@ async function getAutoLabelsWithLLM(options: {
   }
   
   try {
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        messages: [
-          {
-            role: "system",
-            content: `You are a technical issue classifier. Analyze the issue and return applicable labels.
+    const result = (await llmChat(
+      [
+        {
+          role: "system",
+          content: `You are a technical issue classifier. Analyze the issue and return applicable labels.
 
 Available labels (return ONLY these, comma-separated):
 - security: Security vulnerabilities, auth issues, data leaks, XSS, CSRF, injection attacks
@@ -646,25 +610,15 @@ Examples:
 - "URGENT: Production database is down" -> urgent, bug
 - "How do I configure OAuth?" -> none (this is a question, not an issue)
 
-Return ONLY the labels, nothing else.`
-          },
-          {
-            role: "user",
-            content: contentToAnalyze
-          }
-        ],
-        temperature: 0.1,
-        max_tokens: 50,
-      }),
-    });
-    
-    if (!response.ok) {
-      logError(`OpenAI API error for label detection: ${response.status}`);
-      return getAutoLabelsFromPatterns({ labels, title });
-    }
-    
-    const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
-    const result = data.choices?.[0]?.message?.content?.trim().toLowerCase() || "";
+Return ONLY the labels, nothing else.`,
+        },
+        {
+          role: "user",
+          content: contentToAnalyze,
+        },
+      ],
+      { temperature: 0.1, maxTokens: 50 },
+    )).trim().toLowerCase() || "";
     
     if (result === "none" || !result) {
       return [];
@@ -712,18 +666,6 @@ async function batchDetectLabelsWithLLM(issues: Array<{
 }>): Promise<Map<number, string[]>> {
   const results = new Map<number, string[]>();
   
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) {
-    // Fallback to pattern matching for all
-    for (const issue of issues) {
-      results.set(issue.index, getAutoLabelsFromPatterns({ 
-        labels: issue.existingLabels, 
-        title: issue.title 
-      }));
-    }
-    return results;
-  }
-  
   // Process in batches of 10 to avoid token limits
   const batchSize = 10;
   for (let i = 0; i < issues.length; i += batchSize) {
@@ -735,18 +677,11 @@ async function batchDetectLabelsWithLLM(issues: Array<{
     ).join("\n\n---\n\n");
     
     try {
-      const response = await fetch("https://api.openai.com/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify({
-          model: "gpt-4o-mini",
-          messages: [
-            {
-              role: "system",
-              content: `You are a technical issue classifier. Analyze each issue and return applicable labels.
+      const result = (await llmChat(
+        [
+          {
+            role: "system",
+            content: `You are a technical issue classifier. Analyze each issue and return applicable labels.
 
 Available labels:
 - security: Security vulnerabilities, auth issues, data leaks, XSS, CSRF, injection
@@ -766,31 +701,15 @@ Example output:
 [2] security
 [3] regression, bug
 [4] enhancement
-[5] none`
-            },
-            {
-              role: "user",
-              content: `Classify these ${batch.length} issues:\n\n${batchContent}`
-            }
-          ],
-          temperature: 0.1,
-          max_tokens: 200,
-        }),
-      });
-      
-      if (!response.ok) {
-        // Fallback for this batch
-        for (const issue of batch) {
-          results.set(issue.index, getAutoLabelsFromPatterns({ 
-            labels: issue.existingLabels, 
-            title: issue.title 
-          }));
-        }
-        continue;
-      }
-      
-      const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
-      const result = data.choices?.[0]?.message?.content?.trim() || "";
+[5] none`,
+          },
+          {
+            role: "user",
+            content: `Classify these ${batch.length} issues:\n\n${batchContent}`,
+          },
+        ],
+        { temperature: 0.1, maxTokens: 200 },
+      )).trim() || "";
       
       // Parse results
       const validLabels = ["security", "bug", "regression", "urgent", "enhancement"];
@@ -2506,12 +2425,6 @@ async function isThreadResolvedWithLLM(messages: Array<{ content: string; author
     return false;
   }
   
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) {
-    log("OpenAI API key not available, skipping LLM-based resolution detection");
-    return null;
-  }
-  
   // Read ALL messages to understand full context
   const maintainers = getMaintainerUsernames();
   const conversationText = messages
@@ -2541,18 +2454,11 @@ async function isThreadResolvedWithLLM(messages: Array<{ content: string; author
   }
   
   try {
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        messages: [
-          {
-            role: "system",
-            content: `You are analyzing a COMPLETE Discord thread conversation to determine if the issue or question discussed has been resolved.
+    const result = (await llmChat(
+      [
+        {
+          role: "system",
+          content: `You are analyzing a COMPLETE Discord thread conversation to determine if the issue or question discussed has been resolved.
 
 Read the ENTIRE conversation to understand:
 - Did a maintainer/expert (marked with [MAINTAINER]) answer the question?
@@ -2578,26 +2484,15 @@ A thread is NOT resolved if:
 
 IMPORTANT: If a maintainer (marked [MAINTAINER]) provided an answer and the conversation seems to conclude, it's likely RESOLVED. Maintainers are experts who typically provide correct solutions.
 
-Respond with ONLY "RESOLVED" or "NOT_RESOLVED" (no other text).`
-          },
-          {
-            role: "user",
-            content: `Analyze this COMPLETE Discord thread conversation (${messages.length} messages${maintainerParticipated ? ', maintainer participated' : ''}) and determine if the issue is resolved. Read all messages to understand the full context:\n\n${conversationPreview}`
-          }
-        ],
-        temperature: 0.3,
-        max_tokens: 10,
-      }),
-    });
-    
-    if (!response.ok) {
-      const errorText = await response.text();
-      logError(`OpenAI API error for resolution detection: ${response.status} ${errorText}`);
-      return null;
-    }
-    
-    const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
-    const result = data.choices?.[0]?.message?.content?.trim().toUpperCase();
+Respond with ONLY "RESOLVED" or "NOT_RESOLVED" (no other text).`,
+        },
+        {
+          role: "user",
+          content: `Analyze this COMPLETE Discord thread conversation (${messages.length} messages${maintainerParticipated ? ', maintainer participated' : ''}) and determine if the issue is resolved. Read all messages to understand the full context:\n\n${conversationPreview}`,
+        },
+      ],
+      { temperature: 0.3, maxTokens: 10 },
+    )).trim().toUpperCase();
     
     return result === "RESOLVED";
   } catch (error) {
@@ -2623,12 +2518,6 @@ async function isThreadAnIssue(messages: Array<{ content: string; author: { user
     return true; // Default to exporting if no messages
   }
   
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) {
-    log("OpenAI API key not available, defaulting to export (conservative approach)");
-    return true; // Default to exporting if no API key
-  }
-  
   // Read ALL messages to understand the full context of the conversation
   // This helps identify ongoing bugs, problems that persist, or actual issues vs simple questions
   const conversationText = messages
@@ -2648,18 +2537,11 @@ async function isThreadAnIssue(messages: Array<{ content: string; author: { user
   }
   
   try {
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        messages: [
-          {
-            role: "system",
-            content: `You are analyzing a complete Discord thread conversation to determine if it's an actual ISSUE that needs tracking vs just a QUESTION or casual discussion.
+    const result = (await llmChat(
+      [
+        {
+          role: "system",
+          content: `You are analyzing a complete Discord thread conversation to determine if it's an actual ISSUE that needs tracking vs just a QUESTION or casual discussion.
 
 Read the ENTIRE conversation to understand:
 - Is there an ongoing bug or problem that persists?
@@ -2698,26 +2580,15 @@ Analyze the FULL conversation context, not just the first message. Look for:
 - Unresolved bugs or errors
 - Active discussions about problems
 
-Respond with ONLY "ISSUE" or "QUESTION" (no other text).`
-          },
-          {
-            role: "user",
-            content: `Analyze this COMPLETE Discord thread conversation (${messages.length} messages) and determine if it's an ISSUE that needs tracking or just a QUESTION. Read all messages to understand the full context:\n\n${conversationPreview}`
-          }
-        ],
-        temperature: 0.3,
-        max_tokens: 10,
-      }),
-    });
-    
-    if (!response.ok) {
-      const errorText = await response.text();
-      logError(`OpenAI API error for issue classification: ${response.status} ${errorText}`);
-      return null; // Default to exporting if API fails
-    }
-    
-    const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
-    const result = data.choices?.[0]?.message?.content?.trim().toUpperCase();
+Respond with ONLY "ISSUE" or "QUESTION" (no other text).`,
+        },
+        {
+          role: "user",
+          content: `Analyze this COMPLETE Discord thread conversation (${messages.length} messages) and determine if it's an ISSUE that needs tracking or just a QUESTION. Read all messages to understand the full context:\n\n${conversationPreview}`,
+        },
+      ],
+      { temperature: 0.3, maxTokens: 10 },
+    )).trim().toUpperCase();
     
     // Return true if it's an ISSUE, false if it's a QUESTION
     return result === "ISSUE";
@@ -2950,59 +2821,30 @@ async function classifyGitHubIssue(issue: {
   severity?: "critical" | "high" | "medium" | "low";
   requiresAction: boolean;
 }> {
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) {
-    // Fallback classification based on labels
-    const labels = issue.issueLabels || [];
-    const isBug = labels.some(l => l.toLowerCase().includes("bug"));
-    const isFeature = labels.some(l => l.toLowerCase().includes("feature") || l.toLowerCase().includes("enhancement"));
-    const isQuestion = labels.some(l => l.toLowerCase().includes("question"));
-    
-    return {
-      category: isBug ? "bug" : isFeature ? "feature" : isQuestion ? "question" : "other",
-      type: isBug ? "bug" : isFeature ? "feature" : isQuestion ? "question" : "other",
-      severity: labels.some(l => l.toLowerCase().includes("critical")) ? "critical" : 
-                labels.some(l => l.toLowerCase().includes("high")) ? "high" : 
-                labels.some(l => l.toLowerCase().includes("low")) ? "low" : "medium",
-      requiresAction: isBug || isFeature,
-    };
-  }
-
   const content = `${issue.issueTitle}\n\n${issue.issueBody || ""}`.substring(0, 3000);
   
   try {
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        messages: [
-          {
-            role: "system",
-            content: `Classify this GitHub issue. Respond with JSON only:
+    const raw = await llmChat(
+      [
+        {
+          role: "system",
+          content: `Classify this GitHub issue. Respond with JSON only:
 {
   "category": "bug" | "feature" | "question" | "documentation" | "enhancement" | "other",
   "type": "bug" | "feature" | "question" | "documentation" | "enhancement" | "other",
   "severity": "critical" | "high" | "medium" | "low" (only for bugs),
   "requiresAction": boolean
-}`
-          },
-          {
-            role: "user",
-            content: `Classify this GitHub issue:\n\n${content}`
-          }
-        ],
-        temperature: 0.3,
-        max_tokens: 200,
-      }),
-    });
+}`,
+        },
+        {
+          role: "user",
+          content: `Classify this GitHub issue:\n\n${content}`,
+        },
+      ],
+      { jsonMode: true, temperature: 0.3, maxTokens: 200 },
+    );
 
-    if (!response.ok) {
-      throw new Error(`OpenAI API error: ${response.status}`);
-    }
-
-    const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
-    const result = JSON.parse(data.choices?.[0]?.message?.content || "{}");
+    const result = JSON.parse(raw || "{}");
     return result;
   } catch (error) {
     logError("Error classifying issue with LLM:", error);

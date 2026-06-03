@@ -6,6 +6,7 @@
  */
 import type { Signal, GroupCandidate, IssueRef } from "../../types/signal.js";
 import { createEmbedding, createEmbeddings, isLLMClassificationAvailable } from "../classify/semantic.js";
+import { getLLMApiKey } from "../../llm/chat.js";
 import { 
   getCachedEmbedding, 
   setCachedEmbedding, 
@@ -176,7 +177,7 @@ export async function groupSignalsSemantic(
 ): Promise<GroupingResult> {
   const { minSimilarity = 0.6, maxGroups } = options;
   
-  const apiKey = process.env.OPENAI_API_KEY;
+  const apiKey = getLLMApiKey();
   if (!apiKey) {
     throw new Error("OPENAI_API_KEY required for semantic grouping");
   }

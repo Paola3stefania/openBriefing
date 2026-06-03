@@ -1,5 +1,6 @@
 import { existsSync } from "fs";
 import { join } from "path";
+import { getLLMApiKey } from "../llm/chat.js";
 import { getConfig } from "../config/index.js";
 
 export interface ValidationResult {
@@ -57,7 +58,7 @@ export function validatePMSetup(): ValidationResult {
   }
 
   // Check OpenAI API Key (for semantic classification)
-  if (!process.env.OPENAI_API_KEY) {
+  if (!getLLMApiKey()) {
     result.warnings.push("OPENAI_API_KEY not set - semantic classification will not work");
   } else {
     result.info.push("OpenAI API key configured (for semantic classification)");

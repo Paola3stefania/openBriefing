@@ -13,6 +13,7 @@ import type { PrismaClient } from "@prisma/client";
 import { prisma } from "./prisma.js";
 import { getMirrorPrisma } from "./mirror.js";
 import { createEmbedding } from "../../core/classify/semantic.js";
+import { getLLMApiKey } from "../../llm/chat.js";
 import { getConfig } from "../../config/index.js";
 import { detectProjectId } from "../../config/project.js";
 import { toSqlVector } from "./vector.js";
@@ -23,7 +24,10 @@ function getEmbeddingModel(): string {
 }
 
 function getOpenAIApiKey(): string | null {
-  return process.env.OPENAI_API_KEY ?? null;
+  // Returns a usable key for the active provider. Under Ollama (default) this
+  // is a non-empty sentinel so embedding generation runs without an OpenAI key;
+  // under OpenAI it's the real key (or "" → embed call throws a clear error).
+  return getLLMApiKey();
 }
 
 function hashContent(content: string): string {
