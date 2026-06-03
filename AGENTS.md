@@ -66,17 +66,28 @@ brew install --cask ollama-app
 open -a Ollama
 ollama pull mxbai-embed-large       # 1024-dim, ~670 MB
 
-# 2. App + DB
+# 2. Local Postgres + pgvector (only needed if you want a local mirror)
+brew install postgresql@17 pgvector
+brew services start postgresql@17
+
+# 3. App + Neon connection
 npm install
 npx prisma migrate deploy           # applies any pending migrations to Neon
 npx prisma generate
 
-# 3. (Optional) local Postgres mirror for offline reads
-DATABASE_URL=postgresql://<user>@localhost:5432/briefings npx prisma migrate deploy
+# 4. (Optional) local mirror with full data parity from Neon
+npm run db:setup-local              # creates `briefings` DB, applies schema
+npm run db:seed-local-from-neon     # parallel pg_dump from Neon → local
+# then add to .env:  MEMORY_MIRROR_DATABASE_URL=postgresql://<user>@localhost:5432/briefings
 
-# 4. (Optional) re-embed any rows missing vectors after a model swap
+# 5. (Optional) re-embed any rows missing vectors after a model swap
 npm run reembed:all -- --resume
 ```
+
+After step 4, the local DB is an exact mirror of Neon. Future writes from this
+machine flow to both via `src/storage/db/mirror.ts`. To refresh the local
+mirror later (other agents may have written to Neon in the meantime), re-run
+`npm run db:seed-local-from-neon` — it truncates and reloads everything.
 
 Data sync into **Postgres** (same as MCP `fetch_github_issues` + `fetch_discord_messages` when `DATABASE_URL` is set):
 

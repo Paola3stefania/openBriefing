@@ -59,8 +59,10 @@ async function filterAlreadyEmbedded(
   if (rows.length === 0) return rows;
   if (spec.target === "pr_learnings_inline") {
     const ids = rows.map((r) => String(r.pk));
+    // pr_learnings.id is a real `uuid` column — cast each side to text for
+    // the IN check; Postgres won't implicitly coerce uuid = text in ANY().
     const done = await prisma.$queryRawUnsafe<Array<{ id: string }>>(
-      `SELECT id FROM "pr_learnings" WHERE id = ANY($1::text[]) AND embedding IS NOT NULL`,
+      `SELECT id::text AS id FROM "pr_learnings" WHERE id::text = ANY($1::text[]) AND embedding IS NOT NULL`,
       ids,
     );
     const doneSet = new Set(done.map((r) => r.id));
@@ -302,7 +304,7 @@ async function upsertPrLearningEmbedding(opts: {
      SET "embedding" = $1::halfvec,
          "content_hash" = $2,
          "updated_at" = now()
-     WHERE "id" = $3`,
+     WHERE "id" = $3::uuid`,
     toSqlVector(opts.embedding),
     opts.contentHash,
     opts.id,
