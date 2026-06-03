@@ -140,8 +140,8 @@ This is the key step.
    whoami
    ```
 
-   For example, if it prints `paola3stefania`, the line becomes:
-   `"command": "/Users/paola3stefania/openBriefing/run-mcp.sh"`
+   For example, if it prints `<user>`, the line becomes:
+   `"command": "/Users/<user>/openBriefing/run-mcp.sh"`
 5. Save and close (`Cmd + S`, then `Cmd + W`).
 
 ---
