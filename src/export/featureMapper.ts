@@ -5,6 +5,7 @@
 
 import { log } from "../mcp/logger.js";
 import { createEmbedding, createEmbeddings } from "../core/classify/semantic.js";
+import { getLLMApiKey } from "../llm/chat.js";
 import { getFeatureEmbedding, saveFeatureEmbedding, getGroupEmbedding, saveGroupEmbedding } from "../storage/db/embeddings.js";
 import type { ProductFeature } from "./types.js";
 import { createHash } from "crypto";
@@ -214,7 +215,7 @@ export async function mapGroupsToFeatures(
   log(`Mapping ${groups.length} groups to ${features.length} features...`);
 
   // Get API key
-  const apiKey = process.env.OPENAI_API_KEY;
+  const apiKey = getLLMApiKey();
   if (!apiKey) {
     throw new Error("OPENAI_API_KEY environment variable is required for feature mapping");
   }
@@ -725,7 +726,7 @@ export async function mapUngroupedThreadsToFeatures(
   log(`Mapping ${ungroupedThreads.length} ungrouped threads to ${features.length} features...`);
 
   // Get API key
-  const apiKey = process.env.OPENAI_API_KEY;
+  const apiKey = getLLMApiKey();
   if (!apiKey) {
     log("OPENAI_API_KEY not set, assigning all ungrouped threads to General");
     return ungroupedThreads.map(thread => ({
@@ -1013,7 +1014,7 @@ export async function mapUngroupedIssuesToFeatures(
   log(`Mapping ${ungroupedIssues.length} ungrouped issues to ${features.length} features...`);
 
   // Get API key
-  const apiKey = process.env.OPENAI_API_KEY;
+  const apiKey = getLLMApiKey();
   if (!apiKey) {
     log("OPENAI_API_KEY not set, assigning all ungrouped issues to General");
     return ungroupedIssues.map(issue => ({
