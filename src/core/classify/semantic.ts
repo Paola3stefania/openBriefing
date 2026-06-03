@@ -15,6 +15,7 @@ import { getThreadEmbedding } from "../../storage/db/embeddings.js";
 import { upsertEmbedding, getEmbeddingsBatch } from "../../storage/db/vectorIO.js";
 import { embedText, embedTexts } from "../../embeddings/embed.js";
 import { getEmbeddingProvider } from "../../config/classification.js";
+import { getLLMApiKey } from "../../llm/chat.js";
 
 // Progress logging to stderr (doesn't interfere with MCP JSON-RPC on stdout)
 function logProgress(message: string) {
@@ -265,10 +266,12 @@ async function savePersistentCache(cache: PersistentEmbeddingCache): Promise<voi
 }
 
 /**
- * Get OpenAI API key from environment
+ * A usable embedding API key for the active provider. Under Ollama (default)
+ * this is a non-empty sentinel so semantic classification runs without an
+ * OpenAI key; under OpenAI it's the real key (or "" → embed call throws).
  */
 function getOpenAIApiKey(): string | null {
-  return process.env.OPENAI_API_KEY || null;
+  return getLLMApiKey();
 }
 
 /**

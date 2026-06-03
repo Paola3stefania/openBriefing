@@ -54,9 +54,17 @@ fail() { echo "[seed-local-from-neon] ERROR: $1" >&2; exit 1; }
 # --- 1. Prereqs ------------------------------------------------------------
 [ -f .env ] || fail ".env not found at repo root."
 
-# Pull DATABASE_URL out of .env (handles values with =, &, ?).
-NEON_URL="$(grep -E '^DATABASE_URL=' .env | head -1 | cut -d= -f2-)"
-[ -n "$NEON_URL" ] || fail "DATABASE_URL not set in .env."
+# Pull the Neon connection string out of .env (handles values with =, &, ?).
+#
+# Parallel pg_dump (--jobs) opens a leader + N worker connections and shares a
+# snapshot between them via pg_export_snapshot() / SET TRANSACTION SNAPSHOT.
+# Neon's POOLED endpoint (the `-pooler` host, pgbouncer in transaction-pooling
+# mode) can't hold that snapshot across connections, so a parallel dump there
+# fails. Prefer DATABASE_URL_UNPOOLED (the direct host); fall back to the
+# pooled DATABASE_URL only if the unpooled one isn't defined.
+NEON_URL="$(grep -E '^DATABASE_URL_UNPOOLED=' .env | head -1 | cut -d= -f2-)"
+[ -n "$NEON_URL" ] || NEON_URL="$(grep -E '^DATABASE_URL=' .env | head -1 | cut -d= -f2-)"
+[ -n "$NEON_URL" ] || fail "Neither DATABASE_URL_UNPOOLED nor DATABASE_URL set in .env."
 
 command -v "$PG_DUMP"     >/dev/null 2>&1 || fail "$PG_DUMP not found. Install: brew install postgresql@17"
 command -v "$PG_RESTORE"  >/dev/null 2>&1 || fail "$PG_RESTORE not found."

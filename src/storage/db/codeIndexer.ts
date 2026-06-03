@@ -6,6 +6,7 @@
 
 import { PrismaClient } from "@prisma/client";
 import { createHash } from "crypto";
+import { getLLMApiKey } from "../../llm/chat.js";
 import { log } from "../../mcp/logger.js";
 
 const prisma = new PrismaClient();
@@ -730,7 +731,7 @@ async function parseAndIndexCode(
     // PHASE 1.2: Batch process file embeddings for this chunk
     if (chunkFileTasks.length > 0) {
       log(`[CodeIndexer] Chunk ${chunkNum}: Batch processing ${chunkFileTasks.length} file embeddings...`);
-      const apiKey = process.env.OPENAI_API_KEY;
+      const apiKey = getLLMApiKey();
       if (apiKey) {
         try {
           const { createEmbeddings } = await import("../../core/classify/semantic.js");
@@ -761,7 +762,7 @@ async function parseAndIndexCode(
           // Fallback to individual processing
           for (const task of chunkFileTasks) {
             try {
-              const apiKey = process.env.OPENAI_API_KEY;
+              const apiKey = getLLMApiKey();
               if (apiKey) {
                 const { createEmbedding } = await import("../../core/classify/semantic.js");
                 const { saveCodeFileEmbedding } = await import("./embeddings.js");
@@ -780,7 +781,7 @@ async function parseAndIndexCode(
     // PHASE 1.3: Batch process section embeddings for this chunk
     if (chunkSectionTasks.length > 0) {
       log(`[CodeIndexer] Chunk ${chunkNum}: Batch processing ${chunkSectionTasks.length} section embeddings...`);
-      const apiKey = process.env.OPENAI_API_KEY;
+      const apiKey = getLLMApiKey();
       if (apiKey) {
         try {
           const { createEmbeddings } = await import("../../core/classify/semantic.js");
@@ -810,7 +811,7 @@ async function parseAndIndexCode(
           // Fallback to individual processing
           for (const task of chunkSectionTasks) {
             try {
-              const apiKey = process.env.OPENAI_API_KEY;
+              const apiKey = getLLMApiKey();
               if (apiKey) {
                 const { createEmbedding } = await import("../../core/classify/semantic.js");
                 const { saveCodeSectionEmbedding } = await import("./embeddings.js");

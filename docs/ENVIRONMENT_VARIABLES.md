@@ -66,8 +66,31 @@ This document lists all environment variables used by OpenBriefing MCP Server, o
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `OPENAI_API_KEY` | OpenAI API key for semantic classification | None (required for classification) |
-| `OPENAI_EMBEDDING_MODEL` | OpenAI embedding model | `text-embedding-3-small` |
+| `OPENAI_EMBEDDING_MODEL` | OpenAI embedding model (only when `EMBEDDING_PROVIDER=openai`) | `text-embedding-3-small` |
 | `USE_SEMANTIC_CLASSIFICATION` | Enable semantic classification | `true` (if OPENAI_API_KEY set) |
+| `EMBEDDING_PROVIDER` | Embedding backend: `ollama` (local, default) or `openai` | `ollama` |
+| `LLM_PROVIDER` | Chat-completion backend: `ollama` or `openai` (falls back to `EMBEDDING_PROVIDER`) | `ollama` |
+| `OLLAMA_BASE_URL` | Ollama server URL | `http://localhost:11434` |
+| `OLLAMA_EMBEDDING_MODEL` | Ollama embedding model — must emit 1024-dim vectors | `mxbai-embed-large` |
+| `OLLAMA_CHAT_MODEL` | Ollama chat model for classification/extraction | `llama3.1` |
+| `OPENAI_CHAT_MODEL` | OpenAI chat model (only when `LLM_PROVIDER=openai`) | `gpt-4o-mini` |
+
+> **Default stack is fully local (Ollama).** OpenBriefing needs an LLM for two
+> jobs — **embeddings** (1024-dim; every embedding column is `halfvec(1024)`) and
+> **chat completions** (feature extraction, issue/thread classification, label
+> detection, comment analysis). Both default to Ollama, so no OpenAI key is
+> required. Set it up once:
+>
+> ```bash
+> brew install --cask ollama-app   # the plain `ollama` formula ships without llama-server
+> open -a Ollama                    # starts the server on :11434
+> ollama pull mxbai-embed-large     # embeddings (1024-dim)
+> ollama pull llama3.1              # chat / classification
+> ```
+>
+> To use OpenAI instead, set `EMBEDDING_PROVIDER=openai` and/or `LLM_PROVIDER=openai`
+> (plus `OPENAI_API_KEY`). For embeddings, pick an `OPENAI_EMBEDDING_MODEL` that
+> emits 1024 dims (or write a new `halfvec(N)` migration + run `npm run reembed:all`).
 
 ### PM Tool Integration (Linear/Jira)
 
