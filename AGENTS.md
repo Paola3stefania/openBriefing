@@ -36,6 +36,7 @@ Deeper reference:
 | [docs/DATABASE_SETUP.md](docs/DATABASE_SETUP.md) | Postgres + Prisma |
 | [docs/GITHUB_INTEGRATION.md](docs/GITHUB_INTEGRATION.md) | GitHub App / token |
 | [docs/LINEAR_TEAM_SETUP.md](docs/LINEAR_TEAM_SETUP.md) | Linear export |
+| [docs/CLAUDE_DESKTOP_SETUP.md](docs/CLAUDE_DESKTOP_SETUP.md) | Plain-English Claude Desktop setup (for non-technical users) |
 | [README.md](README.md) | User-facing product overview |
 
 ## Non-negotiable: the `project` parameter
