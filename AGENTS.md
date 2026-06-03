@@ -12,6 +12,16 @@ OpenBriefing is a **Node.js (TypeScript) MCP server** that:
 
 The MCP entrypoint is `src/index.ts` → `src/mcp/server.ts` (dozens of tools).
 
+> **FUTURE (tracked): multi-transport, not just MCP.** Today the only transport is
+> MCP over stdio (`new StdioServerTransport()` in `src/mcp/server.ts main()`). The
+> tool handlers themselves are transport-agnostic — they take args and return JSON.
+> The plan is to expose the same tool layer over a **direct CLI transport** (and
+> potentially HTTP) so the brain is usable without an MCP client: e.g.
+> `openbriefing briefing --project owner/repo`, `openbriefing tool <name> --json`.
+> To do this cleanly, factor the tool registry/dispatch out of the stdio wiring
+> into a shared module that both `StdioServerTransport` and a CLI/argv parser call,
+> rather than duplicating handler logic per transport.
+
 ## Read order (shortest path to competence)
 
 1. **This file** (you are here).
@@ -143,7 +153,7 @@ Going offline (e.g., flight)
 
 Reconnecting
 ────────────────────────────────────
-  1. npm run db:sync-local-to-neon    # push offline work to Neon
+  1. npm run db:sync -- up             # MERGE offline work up to Neon (no data loss)
   2. edit .env → OFFLINE_DB=false
   3. restart
   → back to cloud-primary, mirror re-enabled.
@@ -151,6 +161,30 @@ Reconnecting
 
 Or with the cloud-primary cron set up, you don't need to do anything
 end-of-day — the 3am job pulls Neon → local automatically.
+
+#### `db:sync` — the everyday, non-destructive path (preferred)
+
+`npm run db:sync -- <down|up>` (`scripts/db-merge.sh`) does a **row-level merge**,
+not a full rebuild. This is the safe default for keeping local and Neon aligned:
+
+- `down` = Neon → local, `up` = local → Neon.
+- Per table: **insert rows that don't exist**, **update existing rows only when
+  the source is newer** (`updated_at`, newest-wins), **leave everything else**.
+- **Nothing is ever deleted** — a row on the destination missing from the source
+  survives. So it's lossless and safe to run in either direction.
+- Mechanism (handles every type — `halfvec`, `jsonb`, arrays, enums — natively):
+  `CREATE TABLE staging.<t> (LIKE public.<t>)` → binary `\copy` source→staging →
+  `INSERT … SELECT … ON CONFLICT (<pk|unique-index>) DO UPDATE … WHERE
+  tgt.updated_at < EXCLUDED.updated_at` (or `DO NOTHING` when there's no
+  `updated_at`). FKs are dropped/re-added around the load (Neon's free tier has
+  no superuser, so we can't defer them); autoincrement sequences are bumped after.
+- Flags: `--dry-run` (per-table plan + row counts, writes nothing — start here),
+  `--table=<name>` (one table), `--force` (skip the destination backup + confirm).
+  Every run backs up the destination to `/tmp/openbriefing-db-backups/` first.
+- Limitation: a one-directional merge **can't propagate deletes** and can't
+  auto-resolve a row edited on *both* sides since the last sync. For single-writer
+  use (you, on one machine at a time) newest-wins is correct. To propagate deletes
+  or do a clean rebuild, use the full-clobber scripts below.
 
 #### Cloud-primary day (`OFFLINE_DB=false`)
 
@@ -168,10 +202,11 @@ end-of-day — the 3am job pulls Neon → local automatically.
 
 - Toggle the flag, restart the MCP server. Now every read/write goes to
   local. Neon is untouched while you work.
-- When you reconnect, push local → Neon: `npm run db:sync-local-to-neon`
-  (interactive confirm, `--force` for cron). It's destructive — drops Neon's
-  FKs, truncates Neon's public tables, replays local, re-adds FKs.
-  ~3-5 min for ~45k rows.
+- When you reconnect, push local → Neon with the **merge** (preferred):
+  `npm run db:sync -- up` — lossless insert-missing + update-if-newer.
+  Use the destructive `npm run db:sync-local-to-neon` only for a clean rebuild
+  or to propagate deletions (it drops Neon's FKs, truncates Neon's public
+  tables, replays local, re-adds FKs; ~3-5 min for ~45k rows).
 - Toggle back to `OFFLINE_DB=false`, restart, and you're cloud-primary again.
 - ⚠️ Trade-off: if another machine writes to Neon while you're offline, those
   writes are overwritten on the next sync. Solo / single-Mac use only.
@@ -352,6 +387,7 @@ After data is stored, the existing **classification, grouping, and embedding** t
   - **Storage backend is now mandatory.** There is no local-JSON fallback: if `DATABASE_URL`/`DB_*` is unset the server throws on startup (`src/storage/factory.ts`). `STORAGE_BACKEND=json` is honored only under `NODE_ENV=test`. Use a local Postgres for dev or a cloud Postgres (Neon/Supabase/Vercel) to share the brain.
   - **All embedding columns are `pgvector` `halfvec(1024)`** (migration `20260603100000_embeddings_ollama_1024`) with an HNSW cosine index. Prisma maps `halfvec` as `Unsupported`, so the embedding column is read/written via raw SQL only — see `src/storage/db/vector.ts` (`EMBEDDING_DIM = 1024`, `toSqlVector`), the generic helpers in `src/storage/db/vectorIO.ts` (`upsertEmbedding`, `getEmbedding`, `getEmbeddingsBatch`), the raw upsert in `src/storage/db/memory.ts`, and the indexed `<=>` searches in `searchMemory` + `distillRelatedInsights`. Apply schema changes with `npm run db:migrate` (deploy); do **not** `migrate dev` against pgvector indexes.
   - **Embedding provider is pluggable** (`src/embeddings/embed.ts`). Defaults to a **local Ollama** daemon running `mxbai-embed-large` (1024-dim, retrieval-tuned, no per-token cost, no rate limits). Set `EMBEDDING_PROVIDER=openai` to fall back to the OpenAI API (requires `OPENAI_API_KEY`). Switching providers/models means re-embedding everything because vectors from different models live in different vector spaces — see `npm run reembed:all`. Required env for Ollama: `EMBEDDING_PROVIDER=ollama`, `OLLAMA_BASE_URL=http://localhost:11434`, `OLLAMA_EMBEDDING_MODEL=mxbai-embed-large`. If Ollama isn't running, `embedTexts` throws with a clear error rather than silently degrading; start Ollama via the menu bar app (or `open -a Ollama`).
+    - **FUTURE upgrade (tracked):** `mxbai-embed-large` (1024-dim) is the current default because it's a no-migration swap. For a real retrieval-quality jump, move to **Qwen3-Embedding** (e.g. `Qwen3-Embedding-4B`, 2560-dim) — top of current retrieval benchmarks, clearly above both `mxbai-embed-large` and `bge-m3`. Not a drop-in: needs a new `halfvec(2560)` migration on every embedding column (update `EMBEDDING_DIM` in `src/storage/db/vector.ts`), a full `npm run reembed:all`, and a local re-seed. `bge-m3` (also 1024-dim, no migration) only wins for long-context/multilingual corpora, so it isn't worth the re-embed for this English code/issues/docs corpus.
   - **Database scope (single source of truth).** The Neon DB holds **briefings + repo context only**: agent_sessions, memory_entries, export_results, github_issues / pull_requests / pr_learnings, code_files / sections / searches / ownership, features and feature mappings, documentation, groups, channels. Discord/X/thread tables (`discord_messages`, `x_posts`, `classified_threads`, `thread_embeddings`, `group_threads`) are intentionally empty on Neon — they will be owned by a separate database belonging to the future `unmute` repo.
   - **Optional local mirror (dual-write).** Set `MEMORY_MIRROR_DATABASE_URL` and every `saveMemory` writes the row + embedding to that second DB too (`src/storage/db/mirror.ts`). It's best-effort (mirror failure never fails the primary), embeds once for both, and nulls the `sessionId` FK in the mirror when the session isn't present there. The mirror DB needs the same schema incl. pgvector + `halfvec(1024)`. For point-in-time snapshots instead of live mirroring, use `npm run db:backup` (`scripts/backup-db.sh`).
 
