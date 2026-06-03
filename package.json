@@ -8,6 +8,8 @@
     "openbriefing": "./dist/index.js"
   },
   "scripts": {
+    "postinstall": "node scripts/ensure-launcher.mjs",
+    "setup:launcher": "node scripts/ensure-launcher.mjs",
     "build": "prisma generate && prisma migrate deploy && tsc",
     "dev": "tsx src/index.ts",
     "dev:api": "tsx scripts/local-server.ts",

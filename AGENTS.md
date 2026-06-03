@@ -32,6 +32,7 @@ Deeper reference:
 
 | Doc | Use when |
 |-----|----------|
+| [docs/INSTALL.md](docs/INSTALL.md) | From-scratch install (local default; cloud + both) |
 | [docs/ENVIRONMENT_VARIABLES.md](docs/ENVIRONMENT_VARIABLES.md) | Full env reference |
 | [docs/DATABASE_SETUP.md](docs/DATABASE_SETUP.md) | Postgres + Prisma |
 | [docs/GITHUB_INTEGRATION.md](docs/GITHUB_INTEGRATION.md) | GitHub App / token |
