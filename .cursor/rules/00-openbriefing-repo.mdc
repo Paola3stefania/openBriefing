@@ -1,0 +1,12 @@
+---
+description: You are in the openbriefing source repository—read AGENTS.md for layout, build, and where distributable files live
+alwaysApply: true
+---
+
+# OpenBriefing (this repository)
+
+This workspace is the **openbriefing** open-source project (the MCP server and tooling), not only a consumer of the skill.
+
+1. **Read [AGENTS.md](mdc:AGENTS.md) at the repo root** for: directory map, `project` parameter rules, `npm` commands, links to `docs/`, and how `skills/openbriefing/SKILL.md` is distributed via `scripts/setup.ts`.
+2. The **distributable** agent artifacts copied into other projects are: `skills/openbriefing/SKILL.md`, `rules/openbriefing.mdc`, and `hooks/hooks.json` — not this file. After editing the skill, run **`npm run sync:skill`** so `.cursor/skills/openbriefing/SKILL.md` matches (source of truth: `skills/`).
+3. For end-user product behavior, see [README.md](mdc:README.md).

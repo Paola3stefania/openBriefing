@@ -1,5 +1,5 @@
 /**
- * Setup: Install OpenRundown into any project.
+ * Setup: Install OpenBriefing into any project.
  *
  * Copies the skill, rule, hooks, and MCP config into a target project
  * so agents in that project automatically get briefed.
@@ -12,7 +12,7 @@
 import { existsSync, mkdirSync, writeFileSync, readFileSync, copyFileSync } from "fs";
 import { join, resolve, basename } from "path";
 
-const OPENRUNDOWN_ROOT = resolve(import.meta.dirname, "..");
+const OPENBRIEFING_ROOT = resolve(import.meta.dirname, "..");
 
 function main() {
   const targetArg = process.argv[2];
@@ -27,15 +27,15 @@ function main() {
     process.exit(1);
   }
 
-  console.log(`Setting up OpenRundown in: ${target}`);
-  console.log(`OpenRundown source: ${OPENRUNDOWN_ROOT}\n`);
+  console.log(`Setting up OpenBriefing in: ${target}`);
+  console.log(`OpenBriefing source: ${OPENBRIEFING_ROOT}\n`);
 
   installSkill(target);
   installRule(target);
   installHooks(target);
   writeMcpConfig(target);
 
-  console.log("\n[DONE] OpenRundown installed.");
+  console.log("\n[DONE] OpenBriefing installed.");
   console.log("\nNext steps:");
   console.log("  1. Add the MCP server to your Cursor settings (see .cursor/mcp.json)");
   console.log("  2. Set required env vars: GITHUB_TOKEN, DISCORD_TOKEN, DATABASE_URL");
@@ -43,8 +43,8 @@ function main() {
 }
 
 function installSkill(target: string) {
-  const skillDir = join(target, ".cursor", "skills", "openrundown");
-  const src = join(OPENRUNDOWN_ROOT, "skills", "openrundown", "SKILL.md");
+  const skillDir = join(target, ".cursor", "skills", "openbriefing");
+  const src = join(OPENBRIEFING_ROOT, "skills", "openbriefing", "SKILL.md");
 
   if (!existsSync(src)) {
     console.log("[SKIP] Skill file not found at source");
@@ -53,12 +53,12 @@ function installSkill(target: string) {
 
   mkdirSync(skillDir, { recursive: true });
   copyFileSync(src, join(skillDir, "SKILL.md"));
-  console.log("[OK] Installed skill -> .cursor/skills/openrundown/SKILL.md");
+  console.log("[OK] Installed skill -> .cursor/skills/openbriefing/SKILL.md");
 }
 
 function installRule(target: string) {
   const rulesDir = join(target, ".cursor", "rules");
-  const src = join(OPENRUNDOWN_ROOT, "rules", "openrundown.mdc");
+  const src = join(OPENBRIEFING_ROOT, "rules", "openbriefing.mdc");
 
   if (!existsSync(src)) {
     console.log("[SKIP] Rule file not found at source");
@@ -66,13 +66,13 @@ function installRule(target: string) {
   }
 
   mkdirSync(rulesDir, { recursive: true });
-  copyFileSync(src, join(rulesDir, "openrundown.mdc"));
-  console.log("[OK] Installed rule  -> .cursor/rules/openrundown.mdc");
+  copyFileSync(src, join(rulesDir, "openbriefing.mdc"));
+  console.log("[OK] Installed rule  -> .cursor/rules/openbriefing.mdc");
 }
 
 function installHooks(target: string) {
   const hooksDir = join(target, ".cursor");
-  const src = join(OPENRUNDOWN_ROOT, "hooks", "hooks.json");
+  const src = join(OPENBRIEFING_ROOT, "hooks", "hooks.json");
 
   if (!existsSync(src)) {
     console.log("[SKIP] Hooks file not found at source");
@@ -96,8 +96,8 @@ function writeMcpConfig(target: string) {
 
   const config = {
     mcpServers: {
-      openrundown: {
-        command: join(OPENRUNDOWN_ROOT, "run-mcp.sh"),
+      openbriefing: {
+        command: join(OPENBRIEFING_ROOT, "run-mcp.sh"),
         env: {
           DATABASE_URL: "${DATABASE_URL}",
         },
@@ -108,15 +108,15 @@ function writeMcpConfig(target: string) {
   if (existsSync(dest)) {
     try {
       const existing = JSON.parse(readFileSync(dest, "utf-8"));
-      if (existing.mcpServers?.openrundown) {
-        console.log("[SKIP] mcp.json already has openrundown configured");
+      if (existing.mcpServers?.openbriefing) {
+        console.log("[SKIP] mcp.json already has openbriefing configured");
         return;
       }
       existing.mcpServers = existing.mcpServers || {};
-      existing.mcpServers.openrundown = config.mcpServers.openrundown;
+      existing.mcpServers.openbriefing = config.mcpServers.openbriefing;
       mkdirSync(mcpDir, { recursive: true });
       writeFileSync(dest, JSON.stringify(existing, null, 2) + "\n");
-      console.log("[OK] Added openrundown to existing .cursor/mcp.json");
+      console.log("[OK] Added openbriefing to existing .cursor/mcp.json");
       return;
     } catch {
       console.log("[WARN] Could not parse existing mcp.json, writing new one");
@@ -125,7 +125,7 @@ function writeMcpConfig(target: string) {
 
   mkdirSync(mcpDir, { recursive: true });
   writeFileSync(dest, JSON.stringify(config, null, 2) + "\n");
-  console.log("[OK] Created .cursor/mcp.json with openrundown server");
+  console.log("[OK] Created .cursor/mcp.json with openbriefing server");
 }
 
 main();

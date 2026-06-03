@@ -1,11 +1,10 @@
 /**
- * Storage factory - creates the appropriate storage backend
- * 
- * Default behavior: Auto-detect
- * - If DATABASE_URL is set → use PostgreSQL
- * - Otherwise → use JSON files
- * 
- * Override: Set STORAGE_BACKEND=json for testing
+ * Storage factory - creates the storage backend.
+ *
+ * A PostgreSQL database is REQUIRED. There is no local-JSON fallback: if no
+ * database is configured the factory throws an actionable error instead of
+ * silently writing files. The JSON backend survives only as a test fixture
+ * (NODE_ENV=test + STORAGE_BACKEND=json).
  */
 
 import type { IStorage } from "./interface.js";
@@ -15,7 +14,7 @@ import { JsonStorage } from "./json/index.js";
 import { DatabaseStorage } from "./db/index.js";
 
 /**
- * Check if database is configured
+ * Check if a PostgreSQL database is configured.
  */
 export function hasDatabaseConfig(): boolean {
   return !!(
@@ -24,41 +23,38 @@ export function hasDatabaseConfig(): boolean {
   );
 }
 
+const MISSING_DB_MESSAGE = [
+  "OpenBriefing requires a PostgreSQL database — there is no local-JSON mode.",
+  "Set DATABASE_URL to a Postgres connection string:",
+  "  • Local dev:  postgresql://<user>@localhost:5432/openbriefing",
+  "  • Cloud:      a Neon / Supabase / Vercel Postgres URL (shared across machines)",
+  "Then run `npm run build` to apply migrations. See env.example / AGENTS.md.",
+].join("\n");
+
 /**
- * Create storage instance based on configuration
- * 
- * - "json": Always use JSON files (useful for testing)
- * - "database": Always use PostgreSQL (will fail if not configured)
- * - "auto": Use database if DATABASE_URL is set, otherwise JSON (default)
- * 
- * Default behavior: Auto-detect - use PostgreSQL if configured, otherwise JSON
+ * Create storage instance based on configuration.
+ *
+ * - "database" (default): PostgreSQL. Throws if no DATABASE_URL/DB_* is set.
+ * - "json": test-only fixture; rejected unless NODE_ENV=test.
  */
 export function createStorage(backend?: StorageBackend): IStorage {
-  // Use config if backend not specified
   const config = getConfig();
   const storageBackend = backend || config.storage.backend;
-  
+
   if (storageBackend === "json") {
-    console.error("[Storage] Using JSON file backend (override)");
+    if (process.env.NODE_ENV !== "test") {
+      throw new Error(MISSING_DB_MESSAGE);
+    }
+    console.error("[Storage] Using JSON file backend (NODE_ENV=test fixture)");
     return new JsonStorage();
   }
-  
-  if (storageBackend === "database") {
-    if (!hasDatabaseConfig()) {
-      throw new Error("STORAGE_BACKEND=database but no DATABASE_URL or DB_* variables set");
-    }
-    console.error("[Storage] Using PostgreSQL backend");
-    return new DatabaseStorage();
+
+  if (!hasDatabaseConfig()) {
+    throw new Error(MISSING_DB_MESSAGE);
   }
-  
-  // Auto: Check for database, fallback to JSON
-  if (hasDatabaseConfig()) {
-    console.error("[Storage] Using PostgreSQL backend (auto-detected)");
-    return new DatabaseStorage();
-  }
-  
-  console.error("[Storage] Using JSON file backend (no database configured)");
-  return new JsonStorage();
+
+  console.error("[Storage] Using PostgreSQL backend");
+  return new DatabaseStorage();
 }
 
 /**

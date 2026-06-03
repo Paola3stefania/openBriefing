@@ -2,7 +2,7 @@
  * Storage configuration
  */
 
-export type StorageBackend = "json" | "database" | "auto";
+export type StorageBackend = "json" | "database";
 
 export interface StorageConfig {
   backend: StorageBackend;
@@ -13,24 +13,37 @@ export interface StorageConfig {
 }
 
 /**
- * Get storage configuration from environment variables
- * 
- * STORAGE_BACKEND: "json" | "database" | "auto" (default: "auto")
- * - "json": Always use JSON files (useful for testing)
- * - "database": Always use PostgreSQL (will fail if not configured)
- * - "auto": Use database if DATABASE_URL is set, otherwise JSON (default)
- * 
- * Default behavior: Auto-detect - use PostgreSQL if configured, otherwise JSON
- * For testing, set: STORAGE_BACKEND=json
+ * Get storage configuration from environment variables.
+ *
+ * A PostgreSQL database is REQUIRED. OpenBriefing no longer ships a local-JSON
+ * "try-it-out" mode — data and agent memory must live in a database (a local
+ * Postgres for development, or a cloud Postgres such as Neon/Supabase/Vercel
+ * for a shared brain).
+ *
+ * STORAGE_BACKEND:
+ * - unset / "database": use PostgreSQL (the only supported mode).
+ * - "json": legacy file backend, allowed ONLY when NODE_ENV=test so unit tests
+ *   can run without a database. The factory refuses it outside tests.
  */
 export function getStorageConfig(): StorageConfig {
-  const backend = (process.env.STORAGE_BACKEND as StorageBackend) || "auto";
-  
-  // Validate
-  if (backend !== "json" && backend !== "database" && backend !== "auto") {
-    console.warn(`[Config] Invalid STORAGE_BACKEND="${backend}", using "auto"`);
-    return { backend: "auto" };
+  const raw = process.env.STORAGE_BACKEND;
+  const isTest = process.env.NODE_ENV === "test";
+
+  // The only sanctioned use of the JSON backend is the test suite.
+  if (raw === "json") {
+    if (!isTest) {
+      console.warn(
+        '[Config] STORAGE_BACKEND="json" is only supported under NODE_ENV=test; ' +
+          "ignoring and using the database backend.",
+      );
+    } else {
+      return { backend: "json" };
+    }
+  } else if (raw && raw !== "database") {
+    console.warn(`[Config] Invalid STORAGE_BACKEND="${raw}", using "database"`);
   }
+
+  const backend: StorageBackend = "database";
   
   // Parse default limits from environment (for try-it-out mode when DB is not configured)
   const defaultLimit: StorageConfig["defaultLimit"] = {};

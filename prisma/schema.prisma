@@ -1,4 +1,4 @@
-// Prisma schema for OpenRundown Database
+// Prisma schema for OpenBriefing Database
 // Generated from existing migrations
 
 generator client {
@@ -914,7 +914,13 @@ model MemoryEntry {
 
 model MemoryEntryEmbedding {
   memoryId    String   @id @map("memory_id")
-  embedding   Json     @db.JsonB
+  // pgvector column. Prisma maps `vector` as Unsupported, so this field is NOT
+  // selectable/writable via the generated client — all access goes through raw
+  // SQL in src/storage/db/vector.ts + memory.ts (write) and the `<=>` indexed
+  // search in memory.ts / briefing distill.ts (read). An HNSW index on this
+  // column (see migration 20260602000000_memory_pgvector) powers fast ANN
+  // cosine search instead of pulling rows into JS.
+  embedding   Unsupported("vector(1536)")
   contentHash String   @map("content_hash")
   model       String
   createdAt   DateTime @default(now()) @map("created_at")

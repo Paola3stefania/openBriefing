@@ -3,17 +3,18 @@
  *
  * Stores memory entries (conversation snippets, decisions, learnings) as text
  * with OpenAI embeddings in JSONB. Cosine similarity search is done in JS,
- * consistent with how the rest of OpenRundown handles embeddings.
+ * consistent with how the rest of OpenBriefing handles embeddings.
  */
 
 import { createHash } from "crypto";
-import type { Prisma } from "@prisma/client";
+import { Prisma } from "@prisma/client";
+import type { PrismaClient } from "@prisma/client";
 import { prisma } from "./prisma.js";
+import { getMirrorPrisma } from "./mirror.js";
 import { createEmbedding } from "../../core/classify/semantic.js";
 import { getConfig } from "../../config/index.js";
 import { detectProjectId } from "../../config/project.js";
-
-type Embedding = number[];
+import { toSqlVector } from "./vector.js";
 
 function getEmbeddingModel(): string {
   return getConfig().classification.embeddingModel;
@@ -37,32 +38,59 @@ function hashContent(content: string): string {
  * skipped (no API key, OpenAI unavailable, etc.). Idempotent against
  * pre-existing rows for the same `memoryId`.
  */
+/**
+ * Raw upsert of a single embedding row into the given client's
+ * `memory_entry_embeddings`. The embedding column is a pgvector `vector`
+ * (Unsupported in Prisma), so the literal is bound as a parameter and cast to
+ * `vector` in-query (no injection, no client-side type support needed). The
+ * memory row it references must already exist in that client's DB.
+ */
+async function upsertEmbeddingRow(
+  client: PrismaClient,
+  memoryId: string,
+  embedding: number[],
+  content: string,
+): Promise<void> {
+  await client.$executeRaw`
+    INSERT INTO "memory_entry_embeddings"
+      ("memory_id", "embedding", "content_hash", "model", "created_at", "updated_at")
+    VALUES (
+      ${memoryId},
+      ${toSqlVector(embedding)}::vector,
+      ${hashContent(content)},
+      ${getEmbeddingModel()},
+      now(),
+      now()
+    )
+    ON CONFLICT ("memory_id") DO UPDATE SET
+      "embedding" = EXCLUDED."embedding",
+      "content_hash" = EXCLUDED."content_hash",
+      "model" = EXCLUDED."model",
+      "updated_at" = now()
+  `;
+}
+
 export async function embedAndStoreMemoryEmbedding(options: {
   memoryId: string;
   content: string;
   /** Pass an explicit API key to override the env-based default (tests). */
   apiKey?: string | null;
+  /**
+   * Databases to write the embedding into. Defaults to `[prisma]` (primary
+   * only). `saveMemory` passes `[prisma, mirror]` when a local mirror is
+   * configured so the embedding lands in both. Each write is independent and
+   * best-effort; the return value reflects the PRIMARY write only.
+   */
+  clients?: PrismaClient[];
 }): Promise<boolean> {
   const apiKey = options.apiKey ?? getOpenAIApiKey();
   if (!apiKey) return false;
 
+  // Embed once, write to every target (avoids paying for the embedding twice
+  // when mirroring).
+  let embedding: number[];
   try {
-    const embedding = await createEmbedding(options.content, apiKey);
-    await prisma.memoryEntryEmbedding.upsert({
-      where: { memoryId: options.memoryId },
-      create: {
-        memoryId: options.memoryId,
-        embedding: embedding as Prisma.InputJsonValue,
-        contentHash: hashContent(options.content),
-        model: getEmbeddingModel(),
-      },
-      update: {
-        embedding: embedding as Prisma.InputJsonValue,
-        contentHash: hashContent(options.content),
-        model: getEmbeddingModel(),
-      },
-    });
-    return true;
+    embedding = await createEmbedding(options.content, apiKey);
   } catch (err) {
     console.error(
       `[Memory] Failed to embed memory ${options.memoryId}:`,
@@ -70,19 +98,84 @@ export async function embedAndStoreMemoryEmbedding(options: {
     );
     return false;
   }
+
+  const targets =
+    options.clients && options.clients.length > 0 ? options.clients : [prisma];
+  let primaryOk = false;
+  for (const client of targets) {
+    const isPrimary = client === prisma;
+    try {
+      await upsertEmbeddingRow(client, options.memoryId, embedding, options.content);
+      if (isPrimary) primaryOk = true;
+    } catch (err) {
+      console.error(
+        `[Memory] Failed to store embedding for ${options.memoryId} (${isPrimary ? "primary" : "mirror"}):`,
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
+  return primaryOk;
 }
 
-function cosineSimilarity(a: Embedding, b: Embedding): number {
-  let dot = 0;
-  let normA = 0;
-  let normB = 0;
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i];
-    normA += a[i] * a[i];
-    normB += b[i] * b[i];
+/**
+ * Best-effort replicate a memory row into the mirror DB so the mirror has the
+ * row before its embedding (FK: memory_entry_embeddings.memory_id →
+ * memory_entries.id). Keeps the same primary key so the mirror is a true copy.
+ * A mirror failure is logged and swallowed — it must never fail the primary
+ * write.
+ */
+async function mirrorMemoryRow(
+  client: PrismaClient,
+  entry: {
+    id: string;
+    projectId: string;
+    content: string;
+    summary: string;
+    tags: string[];
+    source: string;
+    sessionId: string | null;
+    createdAt: Date;
+  },
+): Promise<void> {
+  try {
+    // The mirror may not contain the originating session (we only mirror
+    // memory, not sessions), so null the FK rather than violate it.
+    let sessionId = entry.sessionId;
+    if (sessionId) {
+      const exists = await client.agentSession.findUnique({
+        where: { id: sessionId },
+        select: { id: true },
+      });
+      if (!exists) sessionId = null;
+    }
+
+    await client.memoryEntry.upsert({
+      where: { id: entry.id },
+      create: {
+        id: entry.id,
+        projectId: entry.projectId,
+        content: entry.content,
+        summary: entry.summary,
+        tags: entry.tags,
+        source: entry.source,
+        sessionId,
+        createdAt: entry.createdAt,
+      },
+      update: {
+        projectId: entry.projectId,
+        content: entry.content,
+        summary: entry.summary,
+        tags: entry.tags,
+        source: entry.source,
+        sessionId,
+      },
+    });
+  } catch (err) {
+    console.error(
+      `[Memory] mirror row write failed for ${entry.id} (primary unaffected):`,
+      err instanceof Error ? err.message : err,
+    );
   }
-  if (normA === 0 || normB === 0) return 0;
-  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
 export interface MemoryEntryResult {
@@ -133,11 +226,20 @@ export async function saveMemory(options: {
     },
   });
 
+  // Dual-write: if a local mirror DB is configured, replicate the row there
+  // (before its embedding, for the FK). Best-effort — never fails the primary.
+  const mirror = getMirrorPrisma();
+  if (mirror) {
+    await mirrorMemoryRow(mirror, entry);
+  }
+
   // Best-effort: don't fail the save if OpenAI is unavailable. The row will
-  // be picked up later by `npm run backfill:memory-embeddings`.
+  // be picked up later by `npm run backfill:memory-embeddings`. When a mirror
+  // is configured the embedding is written to both DBs from a single API call.
   await embedAndStoreMemoryEmbedding({
     memoryId: entry.id,
     content: options.content,
+    clients: mirror ? [prisma, mirror] : undefined,
   });
 
   return mapEntry(entry);
@@ -161,32 +263,62 @@ export async function searchMemory(options: {
     ? { tags: { hasSome: options.tags } }
     : {};
 
-  // Try semantic search first
+  // Try semantic search first, via an indexed pgvector ANN query. `<=>` is
+  // cosine distance, so similarity = 1 - distance. Ordering happens in the DB
+  // (HNSW index) and only the top `limit` rows are returned — no JS cosine
+  // loop, and no 200-row recency cap.
   if (apiKey) {
     try {
       const queryEmbedding = await createEmbedding(options.query, apiKey);
+      const queryVec = toSqlVector(queryEmbedding);
+      const tagCond =
+        options.tags && options.tags.length > 0
+          ? Prisma.sql`AND m."tags" && ${options.tags}::text[]`
+          : Prisma.empty;
 
-      const entries = await prisma.memoryEntry.findMany({
-        where: { projectId, ...tagFilter },
-        include: { embedding: true },
-        orderBy: { createdAt: "desc" },
-        take: 200, // fetch more, re-rank by similarity
-      });
+      const rows = await prisma.$queryRaw<
+        Array<{
+          id: string;
+          projectId: string;
+          content: string;
+          summary: string;
+          tags: string[];
+          source: string;
+          sessionId: string | null;
+          createdAt: Date;
+          similarity: number;
+        }>
+      >(Prisma.sql`
+        SELECT
+          m."id",
+          m."project_id"  AS "projectId",
+          m."content",
+          m."summary",
+          m."tags",
+          m."source",
+          m."session_id"  AS "sessionId",
+          m."created_at"  AS "createdAt",
+          1 - (e."embedding" <=> ${queryVec}::vector) AS "similarity"
+        FROM "memory_entries" m
+        JOIN "memory_entry_embeddings" e ON e."memory_id" = m."id"
+        WHERE m."project_id" = ${projectId}
+        ${tagCond}
+        ORDER BY e."embedding" <=> ${queryVec}::vector
+        LIMIT ${limit}
+      `);
 
-      const withSimilarity = entries
-        .map((entry) => {
-          if (!entry.embedding) return { entry, similarity: 0 };
-          const vec = entry.embedding.embedding as number[];
-          return { entry, similarity: cosineSimilarity(queryEmbedding, vec) };
-        })
-        .filter((e) => e.similarity > 0.3)
-        .sort((a, b) => b.similarity - a.similarity)
-        .slice(0, limit);
-
-      if (withSimilarity.length > 0) {
-        return withSimilarity.map(({ entry, similarity }) => ({
-          ...mapEntry(entry),
-          similarity,
+      const relevant = rows.filter((r) => Number(r.similarity) > 0.3);
+      if (relevant.length > 0) {
+        return relevant.map((r) => ({
+          id: r.id,
+          projectId: r.projectId,
+          content: r.content,
+          summary: r.summary,
+          tags: r.tags,
+          source: r.source,
+          sessionId: r.sessionId ?? null,
+          createdAt: r.createdAt.toISOString(),
+          similarity: Number(Number(r.similarity).toFixed(3)),
         }));
       }
     } catch (err) {

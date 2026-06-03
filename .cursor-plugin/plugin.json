@@ -1,13 +1,13 @@
 {
-  "name": "openrundown",
+  "name": "openbriefing",
   "version": "0.1.0",
   "description": "Make your agents always up to date out of the box and save up to 80% of token usage. Agents get briefed on active issues, past decisions, and open items instead of re-exploring from scratch. Connects to GitHub, Discord, Slack, and Linear today, with more integrations coming.",
   "author": {
     "name": "Paola Estefania",
-    "email": "paola@openrundown.dev"
+    "email": "paola@openbriefing.dev"
   },
-  "homepage": "https://github.com/Paola3stefania/openrundown",
-  "repository": "https://github.com/Paola3stefania/openrundown",
+  "homepage": "https://github.com/Paola3stefania/openbriefing",
+  "repository": "https://github.com/Paola3stefania/openbriefing",
   "license": "MIT",
   "keywords": [
     "mcp",

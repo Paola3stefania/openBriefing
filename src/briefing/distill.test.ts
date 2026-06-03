@@ -226,29 +226,29 @@ describe("buildCodeSearchRepoFilter", () => {
   it("returns undefined when projectRepo is missing or not in owner/repo shape", () => {
     expect(buildCodeSearchRepoFilter(undefined)).toBeUndefined();
     expect(buildCodeSearchRepoFilter("")).toBeUndefined();
-    expect(buildCodeSearchRepoFilter("openrundown")).toBeUndefined();
+    expect(buildCodeSearchRepoFilter("openbriefing")).toBeUndefined();
     expect(buildCodeSearchRepoFilter("owner/repo/extra")).toBeUndefined();
     expect(buildCodeSearchRepoFilter("owner repo")).toBeUndefined();
   });
 
   it("matches every common GitHub repo URL form for the project", () => {
-    const filter = buildCodeSearchRepoFilter("Paola3stefania/openRundown");
+    const filter = buildCodeSearchRepoFilter("Paola3stefania/openBriefing");
     expect(filter).toBeDefined();
     const endsWithValues = (filter?.OR ?? [])
       .map((c) => c.repositoryUrl)
       .filter((p): p is { endsWith: string; mode: "insensitive" } => "endsWith" in p)
       .map((p) => p.endsWith);
     expect(endsWithValues).toEqual([
-      "/Paola3stefania/openRundown",
-      "/Paola3stefania/openRundown.git",
-      ":Paola3stefania/openRundown",
-      ":Paola3stefania/openRundown.git",
+      "/Paola3stefania/openBriefing",
+      "/Paola3stefania/openBriefing.git",
+      ":Paola3stefania/openBriefing",
+      ":Paola3stefania/openBriefing.git",
     ]);
     const equalsValues = (filter?.OR ?? [])
       .map((c) => c.repositoryUrl)
       .filter((p): p is { equals: string; mode: "insensitive" } => "equals" in p)
       .map((p) => p.equals);
-    expect(equalsValues).toEqual(["Paola3stefania/openRundown"]);
+    expect(equalsValues).toEqual(["Paola3stefania/openBriefing"]);
     for (const clause of filter?.OR ?? []) {
       expect(clause.repositoryUrl.mode).toBe("insensitive");
     }
@@ -257,8 +257,8 @@ describe("buildCodeSearchRepoFilter", () => {
   it("does not produce a substring that would match a different repo with the same suffix", () => {
     // Regression guard for the original cross-project leak: a Feature indexed
     // against `better-auth/better-auth` must not match a project filter for
-    // `Paola3stefania/openRundown`.
-    const filter = buildCodeSearchRepoFilter("Paola3stefania/openRundown");
+    // `Paola3stefania/openBriefing`.
+    const filter = buildCodeSearchRepoFilter("Paola3stefania/openBriefing");
     const samples = [
       "https://github.com/better-auth/better-auth",
       "https://github.com/better-auth/better-auth.git",

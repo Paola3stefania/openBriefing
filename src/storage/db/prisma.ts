@@ -1,5 +1,5 @@
 /**
- * Prisma client singleton for OpenRundown
+ * Prisma client singleton for OpenBriefing
  * Provides type-safe database access
  */
 

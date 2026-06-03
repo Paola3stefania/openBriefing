@@ -1,7 +1,7 @@
 /**
  * Per-project scoping for shared databases.
  *
- * OpenRundown is often run with a single Postgres database serving multiple
+ * OpenBriefing is often run with a single Postgres database serving multiple
  * projects (different repos, same DB). Chat-derived data (`Group`,
  * `ClassifiedThread`, `UngroupedThread`, raw `DiscordMessage` rows used as a
  * generic chat-message store) and X/Twitter posts are not keyed by `projectId`

@@ -1,5 +1,5 @@
 /**
- * Configuration for OpenRundown MCP Server
+ * Configuration for OpenBriefing MCP Server
  * 
  * Set these via environment variables or update the defaults below.
  */

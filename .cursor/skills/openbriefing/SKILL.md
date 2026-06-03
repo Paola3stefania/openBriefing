@@ -1,11 +1,11 @@
 ---
-name: openrundown
-description: Provides project context and session memory for AI agents via the OpenRundown MCP server. Use at the start of every conversation to get a briefing on active issues, recent decisions, and open items. Use during work sessions to record decisions and progress for the next agent. Includes a catalog of MCP tools (grouped) and local npm commands for the openrundown source repo. Triggers when working on any project with OpenRundown configured.
+name: openbriefing
+description: Provides project context and session memory for AI agents via the OpenBriefing MCP server. Use at the start of every conversation to get a briefing on active issues, recent decisions, and open items. Use during work sessions to record decisions and progress for the next agent. Includes a catalog of MCP tools (grouped) and local npm commands for the openbriefing source repo. Triggers when working on any project with OpenBriefing configured.
 ---
 
-# OpenRundown
+# OpenBriefing
 
-OpenRundown gives you persistent memory across sessions. It distills signals from Discord, GitHub, X/Twitter, and past agent sessions into structured briefings so you never start blind.
+OpenBriefing gives you persistent memory across sessions. It distills signals from Discord, GitHub, X/Twitter, and past agent sessions into structured briefings so you never start blind.
 
 ## Detecting the Project
 
@@ -20,7 +20,7 @@ Every call to `get_agent_briefing`, `get_session_history`, and `start_agent_sess
 Always do this before responding to the user:
 
 1. Detect the project identifier (see above)
-2. Call `get_agent_briefing` from the `user-openrundown` MCP server (or whatever your Cursor MCP entry is named) with `project`
+2. Call `get_agent_briefing` from the `user-openbriefing` MCP server (or whatever your Cursor MCP entry is named) with `project`
    - Optionally pass `scope` if you know what area the user is working on
    - Optionally pass `since` with the last session timestamp
 3. Call `get_session_history` with `limit: 3` and `project` to see recent sessions
@@ -91,10 +91,10 @@ Sessions can be lost at any time (chat disconnects, crashes, timeouts). Since yo
 
 ## How to use this catalog
 
-- **MCP** tools run through your OpenRundown MCP server. Full JSON schemas and descriptions live in the tool picker; the tables below are a **map** of names and purpose.
-- **`npm` scripts** apply when you are working in the **openrundown source repository** and need to build, test, or sync data to Postgres without the MCP.
+- **MCP** tools run through your OpenBriefing MCP server. Full JSON schemas and descriptions live in the tool picker; the tables below are a **map** of names and purpose.
+- **`npm` scripts** apply when you are working in the **openbriefing source repository** and need to build, test, or sync data to Postgres without the MCP.
 
-## Local CLI (openrundown source repo only)
+## Local CLI (openbriefing source repo only)
 
 | Command | Purpose |
 |---------|---------|
@@ -107,7 +107,7 @@ Sessions can be lost at any time (chat disconnects, crashes, timeouts). Since yo
 | `npm run fetch-discord` | JSON cache of messages (not the primary path when the DB is configured) |
 | `npm run briefing` | Local preview of `get_agent_briefing` output in the terminal |
 | `npm run dev` | Start dev entry; MCP server is usually started by Cursor, not this |
-| `npm run sync:skill` | After editing **this** skill in `skills/openrundown/`, copy it to `.cursor/skills/openrundown/SKILL.md` so both stay in sync |
+| `npm run sync:skill` | After editing **this** skill in `skills/openbriefing/`, copy it to `.cursor/skills/openbriefing/SKILL.md` so both stay in sync |
 
 ## Agent memory & project context (MCP)
 
@@ -117,7 +117,7 @@ Sessions can be lost at any time (chat disconnects, crashes, timeouts). Since yo
 | `get_session_history` | Recent sessions; default is compact. Use `verbose: true` only if you need full detail. |
 | `get_session_delta` | Compact diff since a reference point (a session ID or ISO timestamp). Use when resuming after a break — returns only what's new (decisions, completed steps, external refs) at ~200-400 tokens vs `get_session_history`'s ~1k. Pass `project` and `since`. Optional `scope` filter. |
 | `start_agent_session` | When beginning substantive work. |
-| `update_agent_session` | After each turn / meaningful step (per skill rules). **Soft-end**: also works on already-ended sessions for 24h after `endedAt` (configurable via `OPENRUNDOWN_SESSION_AMEND_WINDOW_MS`), so a forgotten debrief can land on the right session instead of in `save_memory`. |
+| `update_agent_session` | After each turn / meaningful step (per skill rules). **Soft-end**: also works on already-ended sessions for 24h after `endedAt` (configurable via `OPENBRIEFING_SESSION_AMEND_WINDOW_MS`), so a forgotten debrief can land on the right session instead of in `save_memory`. |
 | `end_agent_session` | When the work block is done. Pass `related_insights: string[]` for free-form debrief content — each entry becomes a session-linked memory (tagged `session:<id>`, embedded for semantic retrieval) and surfaces in future briefings' `relatedInsights[]` with `sessionId` set so the next agent can navigate back. Use this instead of calling `save_memory` after `end_agent_session`. |
 | `link_external_event` | Bind a typed pointer to an artifact on another surface (Slack thread, Notion page, GitHub PR, Linear issue, file, Discord thread) to the active session — instead of stuffing `"Dan ratified X in Slack <url>"` into open_items as a string. The reference is structured (channel/ts/repo/number/...) and the next agent can navigate it. Resolves the active session as the most-recent amendable session for `project`, or pass `session_id` explicitly. |
 | `import_claude_plans` | Import plans from `~/.claude/plans/`. |
@@ -185,7 +185,7 @@ Sessions can be lost at any time (chat disconnects, crashes, timeouts). Since yo
 
 | Tool | When to use |
 |------|-------------|
-| `ingest_chat_messages` | Persist normalized chat messages from **any** external MCP into OpenRundown's generic chat store. The agent maps the source's payload into `{source, workspace_id, channel_id, messages[]}` and OpenRundown handles ID prefixing (`<source>:<workspace_id>:...`) so multiple sources share one DB. The returned `workspaceKey` is what to add to **`PROJECT_CHAT_WORKSPACES`** for per-project briefing scope. After ingest, the same classification / grouping / embedding pipelines work unchanged. Requires `DATABASE_URL`. |
+| `ingest_chat_messages` | Persist normalized chat messages from **any** external MCP into OpenBriefing's generic chat store. The agent maps the source's payload into `{source, workspace_id, channel_id, messages[]}` and OpenBriefing handles ID prefixing (`<source>:<workspace_id>:...`) so multiple sources share one DB. The returned `workspaceKey` is what to add to **`PROJECT_CHAT_WORKSPACES`** for per-project briefing scope. After ingest, the same classification / grouping / embedding pipelines work unchanged. Requires `DATABASE_URL`. |
 
 Project scoping for shared databases is controlled by two merged env vars:
 - `PROJECT_CHAT_WORKSPACES` (preferred, source-agnostic) — values are prefixed workspace IDs (e.g. `slack:T01ABC`, `teams:tenant-x`).

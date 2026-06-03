@@ -1,6 +1,6 @@
 # Environment Variables Reference
 
-This document lists all environment variables used by OpenRundown MCP Server, organized by category.
+This document lists all environment variables used by OpenBriefing MCP Server, organized by category.
 
 ## Required Variables
 
@@ -18,20 +18,20 @@ This document lists all environment variables used by OpenRundown MCP Server, or
 
 > **Note**: You can use either `GITHUB_TOKEN` OR GitHub App credentials. Using both enables automatic token rotation.
 
-### Database (Recommended for Production)
+### Database (Required)
 
 | Variable | Description | Example |
 |----------|-------------|---------|
 | `DATABASE_URL` | PostgreSQL connection string | `postgresql://user:pass@host:5432/dbname` |
 
-> **Note**: If not set, the system uses JSON file storage (try-it-out mode) with default limits.
+> **Required**: OpenBriefing stores all data and agent memory in PostgreSQL. There is no JSON fallback — if `DATABASE_URL` is unset the server throws on startup. Use a local Postgres for development or a cloud Postgres (Neon / Supabase / Vercel) to share the brain across machines.
 
 ### Vercel Deployment
 
 | Variable | Description | How to Generate |
 |----------|-------------|-----------------|
 | `CRON_SECRET` | Secret for Vercel cron authentication | `openssl rand -base64 32` |
-| `OPENRUNDOWN_API_KEY` | API key for HTTP endpoints | `openssl rand -base64 32` |
+| `OPENBRIEFING_API_KEY` | API key for HTTP endpoints | `openssl rand -base64 32` |
 
 ## Optional Variables
 
@@ -124,7 +124,7 @@ DATABASE_URL=postgresql://...
 
 # Vercel
 CRON_SECRET=generated_secret
-OPENRUNDOWN_API_KEY=generated_secret
+OPENBRIEFING_API_KEY=generated_secret
 
 # Optional but recommended
 OPENAI_API_KEY=your_key
@@ -167,7 +167,7 @@ FEATURE_AUTO_UPDATE=false
 
 # Vercel
 CRON_SECRET=generated_secret
-OPENRUNDOWN_API_KEY=generated_secret
+OPENBRIEFING_API_KEY=generated_secret
 
 # Paths
 RESULTS_DIR=results
@@ -181,7 +181,7 @@ CACHE_DIR=cache
 # Generate CRON_SECRET
 openssl rand -base64 32
 
-# Generate OPENRUNDOWN_API_KEY
+# Generate OPENBRIEFING_API_KEY
 openssl rand -base64 32
 ```
 
@@ -204,7 +204,7 @@ The system validates required variables at startup. Missing required variables w
 ## Security Notes
 
 - **Never commit `.env` files** to version control
-- **Rotate secrets periodically** (especially CRON_SECRET and OPENRUNDOWN_API_KEY)
+- **Rotate secrets periodically** (especially CRON_SECRET and OPENBRIEFING_API_KEY)
 - **Use Vercel Environment Variables** for production deployments
 - **Limit API key permissions** (GitHub tokens should have minimal required scopes)
 

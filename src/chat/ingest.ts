@@ -1,13 +1,13 @@
 /**
  * Generic chat ingest pipeline.
  *
- * OpenRundown's `Channel` + `DiscordMessage` tables were originally built for
+ * OpenBriefing's `Channel` + `DiscordMessage` tables were originally built for
  * Discord, but their schema is generic enough to store any chat-like data:
  * channel + author + content + timestamps + (optional) thread + attachments.
  *
  * This module lets **any** MCP that extracts chat data (Slack, Microsoft
  * Teams, Telegram, Matrix, Mattermost, Zulip, custom forums, ...) hand off
- * normalized messages to OpenRundown for storage. The data then flows through
+ * normalized messages to OpenBriefing for storage. The data then flows through
  * the same downstream classification, grouping, embedding, and briefing
  * pipelines as native Discord ingest — agents can `get_agent_briefing` and
  * see signals from every chat source for the project.
