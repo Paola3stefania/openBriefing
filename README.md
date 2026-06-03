@@ -250,6 +250,7 @@ No manual context passing. No copy-pasting. The memory just flows.
 - [Database Setup](docs/DATABASE_SETUP.md)
 - [GitHub Integration](docs/GITHUB_INTEGRATION.md)
 - [Linear Team Setup](docs/LINEAR_TEAM_SETUP.md)
+- [Claude Desktop Setup (non-technical, step-by-step)](docs/CLAUDE_DESKTOP_SETUP.md)
 - [Vercel Deployment](docs/VERCEL_DEPLOYMENT.md)
 - [PR Fix Tool](docs/OPEN_PR_WITH_FIX_TOOL.md)
 
