@@ -163,6 +163,42 @@ That's it — you're done. 🎉
 
 ---
 
+## Make Claude always brief itself first (recommended)
+
+By default you have to *ask* Claude to use OpenBriefing. If you want Claude to
+**automatically** pull the project briefing at the start of every chat — and to
+record what it did at the end — set that up once with a Claude **Project**.
+
+> Why this is needed: in Cursor a rule does this automatically. Claude Desktop has
+> no equivalent auto-rule, so a Project instruction is the reliable way to make it
+> happen every time.
+
+1. In Claude Desktop, click **Projects** (left side) → **Create project** (name it
+   e.g. "OpenBriefing" or your repo's name). If you already have a project for this
+   work, just open it.
+2. Open the project's **Instructions** box (sometimes called "custom instructions"
+   or "Set instructions").
+3. Paste this in exactly, then save:
+
+   ```
+   At the START of every conversation, before answering, use the OpenBriefing tool
+   get_agent_briefing (set project to the repo's owner/repo, or the folder name),
+   then get_session_history. Use that context in your reply — don't repeat past
+   work or re-decide things already settled.
+
+   For any real task (not a quick question): call start_agent_session at the start,
+   update_agent_session as you make progress, and end_agent_session when done
+   (with decisions_made, files_edited, open_items, related_insights, and a summary).
+   ```
+4. From now on, **do your OpenBriefing chats inside that Project**. The instruction
+   applies to every conversation there — Claude will brief itself first without you
+   asking.
+
+> Tip: if Claude asks permission to run the tool, click **Allow** (and "Allow for
+> this project" if offered) so it stops asking.
+
+---
+
 ## If something goes wrong
 
 **I don't see OpenBriefing in Claude.**
