@@ -1,6 +1,6 @@
 # GitHub Integration
 
-OpenRundown requires GitHub authentication to fetch issues and comments. Choose one method:
+OpenBriefing requires GitHub authentication to fetch issues and comments. Choose one method:
 
 ## Option 1: Personal Access Token (Simple)
 

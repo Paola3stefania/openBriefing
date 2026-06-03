@@ -6,7 +6,7 @@
  * Note: Migrations also run automatically during build (see package.json build script).
  * Use this endpoint if you need to run migrations manually.
  */
-import type { VercelRequest, VercelResponse } from "@vercel/node";
+import type { VercelRequest, VercelResponse } from "../lib/http-types.js";
 import { verifyApiKey, sendUnauthorized, sendError, sendSuccess } from "../lib/middleware.js";
 import { execSync } from "child_process";
 

@@ -12,7 +12,7 @@
  * Usage:
  *   npm run backfill:memory-embeddings
  *   npm run backfill:memory-embeddings -- --limit=20
- *   npm run backfill:memory-embeddings -- --project=Paola3stefania/openRundown
+ *   npm run backfill:memory-embeddings -- --project=Paola3stefania/openBriefing
  *   npm run backfill:memory-embeddings -- --dry-run
  *
  * Behavior:

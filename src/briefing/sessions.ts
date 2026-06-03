@@ -22,13 +22,13 @@ import type { AgentSession, ExternalRef, PlanStep } from "./types.js";
  * important wasn't recorded, they can still append for a configurable window
  * instead of falling back to `save_memory` (which fragments retrieval).
  *
- * Configurable via `OPENRUNDOWN_SESSION_AMEND_WINDOW_MS`. Default 24 hours.
+ * Configurable via `OPENBRIEFING_SESSION_AMEND_WINDOW_MS`. Default 24 hours.
  * Set to `0` to disable soft-end (sessions become immutable on `endedAt`).
  */
 const DEFAULT_AMEND_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 function readAmendWindowMs(): number {
-  const raw = process.env.OPENRUNDOWN_SESSION_AMEND_WINDOW_MS;
+  const raw = process.env.OPENBRIEFING_SESSION_AMEND_WINDOW_MS;
   if (raw === undefined || raw === "") return DEFAULT_AMEND_WINDOW_MS;
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_AMEND_WINDOW_MS;

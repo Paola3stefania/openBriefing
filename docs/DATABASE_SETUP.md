@@ -1,8 +1,8 @@
 # Database Setup
 
-PostgreSQL is optional - JSON files are used by default.
+PostgreSQL is **required**. OpenBriefing stores all data and agent memory in a database — there is no local-JSON mode. If `DATABASE_URL` (or `DB_*`) is not set, the server throws on startup.
 
-**Important:** When `DATABASE_URL` is set, database saves are **required**. Operations will fail if the database is unavailable (no silent fallback to JSON). To use JSON storage, ensure `DATABASE_URL` is not set.
+Use a **local Postgres** for development, or a **cloud Postgres** (Neon / Supabase / Vercel) when you want the brain shared across machines and agents.
 
 ## Quick Setup
 
@@ -22,29 +22,29 @@ sudo systemctl start postgresql
 
 **Docker:**
 ```bash
-docker run --name openrundown-postgres -e POSTGRES_PASSWORD=password -e POSTGRES_DB=openrundown -p 5432:5432 -d postgres:14
+docker run --name openbriefing-postgres -e POSTGRES_PASSWORD=password -e POSTGRES_DB=openbriefing -p 5432:5432 -d postgres:14
 ```
 
 ### 2. Create Database
 
 **macOS:**
 ```bash
-createdb openrundown
+createdb openbriefing
 ```
 
 **Linux:**
 ```bash
-psql -U postgres -c "CREATE DATABASE openrundown;"
+psql -U postgres -c "CREATE DATABASE openbriefing;"
 ```
 
 ### 3. Set Environment Variable
 
 Add to `.env`:
 ```env
-DATABASE_URL=postgresql://user@localhost:5432/openrundown
+DATABASE_URL=postgresql://user@localhost:5432/openbriefing
 ```
 
-**Note:** On macOS, no password needed. On Linux, use: `postgresql://postgres:password@localhost:5432/openrundown`
+**Note:** On macOS, no password needed. On Linux, use: `postgresql://postgres:password@localhost:5432/openbriefing`
 
 ### 4. Run Migrations
 
@@ -56,21 +56,15 @@ npx prisma migrate deploy
 npx prisma migrate dev
 ```
 
-## Switch Back to JSON
+## JSON backend (tests only)
 
-To switch back to JSON file storage, you can either:
+The legacy JSON file backend is no longer a supported runtime mode. It survives only as a unit-test fixture and is rejected unless `NODE_ENV=test`:
 
-**Option 1: Remove DATABASE_URL** (Recommended)
-```bash
-# Remove DATABASE_URL from .env file, or unset it
-unset DATABASE_URL
-```
-
-**Option 2: Force JSON mode**
 ```env
+NODE_ENV=test
 STORAGE_BACKEND=json
 ```
 
-This forces JSON storage even if `DATABASE_URL` is set (useful for testing).
+Outside of tests the server always requires a PostgreSQL `DATABASE_URL`.
 
 **Important:** When `DATABASE_URL` is set and `STORAGE_BACKEND` is not explicitly set to `json`, database saves are **required**. Operations will fail if the database is unavailable (no silent fallback to JSON). To use JSON storage, either unset `DATABASE_URL` or set `STORAGE_BACKEND=json`.

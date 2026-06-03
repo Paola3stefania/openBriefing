@@ -140,7 +140,7 @@ function buildExternalRef(input: {
  * Resolve the project identifier from a tool args bag.
  *
  * Memory tools (and a few others) historically shipped with `project_id`,
- * while the rest of the OpenRundown surface area uses `project`. The skill
+ * while the rest of the OpenBriefing surface area uses `project`. The skill
  * tells callers to "always pass `project`", so we accept both spellings and
  * prefer `project` to match the rest of the API. Returns `undefined` when
  * neither is provided so the storage layer can fall back to its own
@@ -203,12 +203,12 @@ async function findDiscordCacheFile(channelId: string): Promise<string | null> {
 // Create MCP server
 const mcpServer = new McpServer(
   {
-  name: "openrundown",
+  name: "openbriefing",
   version: "1.0.0",
   },
   {
     instructions: [
-      "OpenRundown provides project context and session memory for AI agents.",
+      "OpenBriefing provides project context and session memory for AI agents.",
       "",
       "At the START of every conversation:",
       "1. Call get_agent_briefing to understand the current project state (active issues, recent decisions, open items, user signals from Discord/GitHub)",
@@ -987,8 +987,8 @@ const tools: Tool[] = [
       properties: {
         team_name: {
           type: "string",
-          description: "Linear team name to fetch issues from (default: 'OpenRundown')",
-          default: "OpenRundown",
+          description: "Linear team name to fetch issues from (default: 'OpenBriefing')",
+          default: "OpenBriefing",
         },
         limit: {
           type: "number",
@@ -1012,8 +1012,8 @@ const tools: Tool[] = [
       properties: {
         team_name: {
           type: "string",
-          description: "Linear team name to fetch issues from (default: 'OpenRundown')",
-          default: "OpenRundown",
+          description: "Linear team name to fetch issues from (default: 'OpenBriefing')",
+          default: "OpenBriefing",
         },
         limit: {
           type: "number",
@@ -1640,7 +1640,7 @@ const tools: Tool[] = [
   },
   {
     name: "link_external_event",
-    description: "Bind a typed pointer to an artifact on another surface (Slack thread, Notion page, GitHub PR/issue, Linear issue, file, Discord thread, ...) to the active session. Use this instead of stuffing 'Dan ratified X in Slack <url>' into open_items as a string — produces a navigable, structured reference the next agent can follow. Resolves the active session as the most-recent amendable session for the project (running, OR ended within OPENRUNDOWN_SESSION_AMEND_WINDOW_MS — default 24h). Pass session_id to override.",
+    description: "Bind a typed pointer to an artifact on another surface (Slack thread, Notion page, GitHub PR/issue, Linear issue, file, Discord thread, ...) to the active session. Use this instead of stuffing 'Dan ratified X in Slack <url>' into open_items as a string — produces a navigable, structured reference the next agent can follow. Resolves the active session as the most-recent amendable session for the project (running, OR ended within OPENBRIEFING_SESSION_AMEND_WINDOW_MS — default 24h). Pass session_id to override.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1837,7 +1837,7 @@ const tools: Tool[] = [
   {
     name: "ingest_chat_messages",
     description:
-      "Persist normalized chat messages from any external MCP (Slack, Microsoft Teams, Telegram, Matrix, custom forums, ...) into OpenRundown's generic chat store. The messages flow through the same classification, grouping, and briefing pipelines as Discord ingest. IDs are prefixed with `<source>:<workspaceId>:...` so multiple chat sources can share the database without collisions; the resulting `Channel.guildId` value (`<source>:<workspaceId>`) is what should be added to `PROJECT_CHAT_WORKSPACES` for per-project scoping. Requires `DATABASE_URL`.",
+      "Persist normalized chat messages from any external MCP (Slack, Microsoft Teams, Telegram, Matrix, custom forums, ...) into OpenBriefing's generic chat store. The messages flow through the same classification, grouping, and briefing pipelines as Discord ingest. IDs are prefixed with `<source>:<workspaceId>:...` so multiple chat sources can share the database without collisions; the resulting `Channel.guildId` value (`<source>:<workspaceId>`) is what should be added to `PROJECT_CHAT_WORKSPACES` for per-project scoping. Requires `DATABASE_URL`.",
     inputSchema: {
       type: "object",
       properties: {
@@ -3734,16 +3734,16 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       // Stage timeouts (override via env so operators can tune without code changes).
       const STAGE_TIMEOUTS = {
-        dbPing: readTimeoutEnv("OPENRUNDOWN_DB_PING_TIMEOUT_MS", 10_000),
-        dbIssuesLoad: readTimeoutEnv("OPENRUNDOWN_DB_ISSUES_LOAD_TIMEOUT_MS", 30_000),
-        githubSync: readTimeoutEnv("OPENRUNDOWN_GITHUB_SYNC_TIMEOUT_MS", 60_000),
-        issueEmbeddings: readTimeoutEnv("OPENRUNDOWN_ISSUE_EMBEDDINGS_TIMEOUT_MS", 90_000),
-        discordChannelFetch: readTimeoutEnv("OPENRUNDOWN_DISCORD_CHANNEL_FETCH_TIMEOUT_MS", 15_000),
-        discordMessages: readTimeoutEnv("OPENRUNDOWN_DISCORD_MESSAGES_TIMEOUT_MS", 60_000),
-        threadEmbeddings: readTimeoutEnv("OPENRUNDOWN_THREAD_EMBEDDINGS_TIMEOUT_MS", 90_000),
-        dbClassifiedThreads: readTimeoutEnv("OPENRUNDOWN_DB_CLASSIFIED_THREADS_TIMEOUT_MS", 30_000),
+        dbPing: readTimeoutEnv("OPENBRIEFING_DB_PING_TIMEOUT_MS", 10_000),
+        dbIssuesLoad: readTimeoutEnv("OPENBRIEFING_DB_ISSUES_LOAD_TIMEOUT_MS", 30_000),
+        githubSync: readTimeoutEnv("OPENBRIEFING_GITHUB_SYNC_TIMEOUT_MS", 60_000),
+        issueEmbeddings: readTimeoutEnv("OPENBRIEFING_ISSUE_EMBEDDINGS_TIMEOUT_MS", 90_000),
+        discordChannelFetch: readTimeoutEnv("OPENBRIEFING_DISCORD_CHANNEL_FETCH_TIMEOUT_MS", 15_000),
+        discordMessages: readTimeoutEnv("OPENBRIEFING_DISCORD_MESSAGES_TIMEOUT_MS", 60_000),
+        threadEmbeddings: readTimeoutEnv("OPENBRIEFING_THREAD_EMBEDDINGS_TIMEOUT_MS", 90_000),
+        dbClassifiedThreads: readTimeoutEnv("OPENBRIEFING_DB_CLASSIFIED_THREADS_TIMEOUT_MS", 30_000),
       };
-      const OVERALL_TIMEOUT = readTimeoutEnv("OPENRUNDOWN_CLASSIFY_TIMEOUT_MS", 5 * 60_000);
+      const OVERALL_TIMEOUT = readTimeoutEnv("OPENBRIEFING_CLASSIFY_TIMEOUT_MS", 5 * 60_000);
 
       console.error(
         `[Classification] Starting classify_discord_messages: channel=${actualChannelId} limit=${limit} classify_all=${classify_all} skip_github_sync=${skip_github_sync} skip_embeddings=${skip_embeddings}`,
@@ -11058,7 +11058,7 @@ Example output:
     }
 
     case "classify_linear_issues": {
-      const { team_name = "OpenRundown", limit = 250, create_projects = true } = args as {
+      const { team_name = "OpenBriefing", limit = 250, create_projects = true } = args as {
         team_name?: string;
         limit?: number;
         create_projects?: boolean;
@@ -11543,7 +11543,7 @@ Example output:
     }
 
     case "label_linear_issues": {
-      const { team_name = "OpenRundown", limit = 100, dry_run = false } = args as {
+      const { team_name = "OpenBriefing", limit = 100, dry_run = false } = args as {
         team_name?: string;
         limit?: number;
         dry_run?: boolean;
@@ -12771,7 +12771,7 @@ Example output:
           // it (or to start a new session).
           if (err instanceof SessionAmendmentExpiredError) {
             throw new Error(
-              `${err.message} (Adjust OPENRUNDOWN_SESSION_AMEND_WINDOW_MS to change the window.)`,
+              `${err.message} (Adjust OPENBRIEFING_SESSION_AMEND_WINDOW_MS to change the window.)`,
             );
           }
           throw err;
@@ -13476,7 +13476,7 @@ function parseMarkdownPlanSteps(markdown: string): import("../briefing/types.js"
 // Start the server
 async function main() {
   const projectId = detectProjectId();
-  console.error(`[OpenRundown] Project: ${projectId}`);
+  console.error(`[OpenBriefing] Project: ${projectId}`);
 
   // Start MCP server FIRST so Cursor can communicate with it
   const transport = new StdioServerTransport();

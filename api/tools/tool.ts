@@ -8,7 +8,7 @@
  *   "args": { ... }
  * }
  */
-import type { VercelRequest, VercelResponse } from "@vercel/node";
+import type { VercelRequest, VercelResponse } from "../lib/http-types.js";
 import { verifyApiKey, sendUnauthorized, sendSuccess, sendError } from "../lib/middleware.js";
 import { executeToolHandler, getAvailableTools, cleanupToolExecutor } from "../lib/tool-executor.js";
 

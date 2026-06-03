@@ -1,10 +1,10 @@
 # AGENTS.md — for humans, coding agents, and any LLM using this repository
 
-This file is the **onboarding map** for the [OpenRundown](https://github.com/Paola3stefania/openRundown) codebase. Read it first when you have no prior context.
+This file is the **onboarding map** for the [OpenBriefing](https://github.com/Paola3stefania/openBriefing) codebase. Read it first when you have no prior context.
 
 ## What you are looking at
 
-OpenRundown is a **Node.js (TypeScript) MCP server** that:
+OpenBriefing is a **Node.js (TypeScript) MCP server** that:
 
 - Ingests signals (GitHub, Discord, X/Twitter, agent sessions, optional PM tools)
 - **Distills** them into a compact `get_agent_briefing` payload for other agents
@@ -15,7 +15,7 @@ The MCP entrypoint is `src/index.ts` → `src/mcp/server.ts` (dozens of tools).
 ## Read order (shortest path to competence)
 
 1. **This file** (you are here).
-2. **`.cursor/skills/openrundown/SKILL.md`** — *same content as* **`skills/openrundown/SKILL.md`** (the latter is what `scripts/setup.ts` copies into *consumer* projects). Session protocol, `project` parameter, tool catalog, local `npm` commands.
+2. **`.cursor/skills/openbriefing/SKILL.md`** — *same content as* **`skills/openbriefing/SKILL.md`** (the latter is what `scripts/setup.ts` copies into *consumer* projects). Session protocol, `project` parameter, tool catalog, local `npm` commands.
 3. **`env.example`** — required and optional environment variables (never commit a real `.env`).
 
 Deeper reference:
@@ -44,8 +44,8 @@ The MCP process **does not** know the user’s workspace. Every `get_agent_brief
 | `src/export/` | PM tool export (e.g. Linear) |
 | `prisma/` | Schema and migrations |
 | `scripts/` | CLI: `briefing.ts`, `setup.ts`, `sync-github-discord.ts`, etc. |
-| `skills/openrundown/SKILL.md` | **Distributable** agent skill (copied by `setup.ts`) |
-| `rules/openrundown.mdc` | **Distributable** Cursor rule (session protocol) |
+| `skills/openbriefing/SKILL.md` | **Distributable** agent skill (copied by `setup.ts`) |
+| `rules/openbriefing.mdc` | **Distributable** Cursor rule (session protocol) |
 | `hooks/hooks.json` | Optional Cursor hooks (copied by `setup`) |
 
 `*.test.ts` under `src/**` is excluded from the production `tsc` build; tests run with Vitest.
@@ -82,7 +82,7 @@ npm run backfill:memory-embeddings
 npm run backfill:memory-embeddings -- --project=owner/repo --limit=20
 ```
 
-**Install OpenRundown into another project** (copies skill, rule, hooks, writes `.cursor/mcp.json`):
+**Install OpenBriefing into another project** (copies skill, rule, hooks, writes `.cursor/mcp.json`):
 
 ```bash
 npx tsx scripts/setup.ts /path/to/target
@@ -90,7 +90,7 @@ npx tsx scripts/setup.ts /path/to/target
 
 ## MCP server name in Cursor
 
-Your Cursor config may name the server `user-openrundown`, `openrundown`, or another label. The **tool names** (`get_agent_briefing`, `fetch_github_issues`, …) are stable; the **server name** is whatever is in the user’s MCP config.
+Your Cursor config may name the server `user-openbriefing`, `openbriefing`, or another label. The **tool names** (`get_agent_briefing`, `fetch_github_issues`, …) are stable; the **server name** is whatever is in the user’s MCP config.
 
 ## Security and secrets
 
@@ -102,13 +102,13 @@ Your Cursor config may name the server `user-openrundown`, `openrundown`, or ano
 
 - Prefer **small, focused PRs**; keep tests passing (`npm test`).
 - After changing briefing or distillation logic, add or extend tests in `src/**/*.test.ts` when behavior is testable.
-- If you change **`skills/openrundown/SKILL.md`**, run **`npm run sync:skill`** so **`.cursor/skills/openrundown/SKILL.md`** stays identical (distributable source of truth is `skills/`; `setup.ts` copies from there).
+- If you change **`skills/openbriefing/SKILL.md`**, run **`npm run sync:skill`** so **`.cursor/skills/openbriefing/SKILL.md`** stays identical (distributable source of truth is `skills/`; `setup.ts` copies from there).
 
 ## Mental model (one picture)
 
 ```text
  GitHub / Discord / X  ─┐
- Past agent sessions  ──┼──►  OpenRundown MCP  ──►  get_agent_briefing, tools
+ Past agent sessions  ──┼──►  OpenBriefing MCP  ──►  get_agent_briefing, tools
  Postgres (optional)  ──┘         ▲
                                   │
                     start/update/end_agent_session
@@ -128,7 +128,7 @@ Use this to reason about **“do we re-fetch every time?”** and **“where do 
 
 ### Any external chat MCP via `ingest_chat_messages` (generic)
 
-`ingest_chat_messages` is an MCP tool that accepts a batch of normalized messages from **any** source. The agent (or a custom MCP) is responsible for mapping the source's payload into OpenRundown's normalized shape; OpenRundown handles persistence, ID prefixing, and briefing scoping.
+`ingest_chat_messages` is an MCP tool that accepts a batch of normalized messages from **any** source. The agent (or a custom MCP) is responsible for mapping the source's payload into OpenBriefing's normalized shape; OpenBriefing handles persistence, ID prefixing, and briefing scoping.
 
 **Input shape (per call):**
 
@@ -157,7 +157,7 @@ Use this to reason about **“do we re-fetch every time?”** and **“where do 
 }
 ```
 
-**ID prefixing (automatic).** OpenRundown writes:
+**ID prefixing (automatic).** OpenBriefing writes:
 
 | DB column | Stored value |
 |---|---|
@@ -203,7 +203,7 @@ After data is stored, the existing **classification, grouping, and embedding** t
 
 ### Soft-end on `update_agent_session`
 
-- `update_agent_session` accepts ended sessions for `OPENRUNDOWN_SESSION_AMEND_WINDOW_MS` (default 24h) after `endedAt`. This means a forgotten debrief can land on the right session record instead of fragmenting into `save_memory`. After the window expires, the tool returns a clear error pointing at the env var.
+- `update_agent_session` accepts ended sessions for `OPENBRIEFING_SESSION_AMEND_WINDOW_MS` (default 24h) after `endedAt`. This means a forgotten debrief can land on the right session record instead of fragmenting into `save_memory`. After the window expires, the tool returns a clear error pointing at the env var.
 
 ### `get_session_delta` and `link_external_event`
 
@@ -214,6 +214,9 @@ After data is stored, the existing **classification, grouping, and embedding** t
 
 - **Classification** (e.g. `classify_discord_messages`) is a **separate step** from “fetch.” It reads stored messages, runs the classification pipeline, and **writes** structured results back. Run it when you need new threads classified, or use a chained workflow like `sync_classify_and_export` where the pipeline does multiple steps in order.
 - **Embeddings** are **vector representations** (typically via **`OPENAI_API_KEY`**) used for **similarity** (grouping issues, matching threads, etc.). They live in **Postgres** (embedding tables / columns) via tools like `compute_*_embeddings` or inside larger workflows. This is not a second proprietary “LLM database” product — it is **your** database plus embedding fields used by those features.
+  - **Storage backend is now mandatory.** There is no local-JSON fallback: if `DATABASE_URL`/`DB_*` is unset the server throws on startup (`src/storage/factory.ts`). `STORAGE_BACKEND=json` is honored only under `NODE_ENV=test`. Use a local Postgres for dev or a cloud Postgres (Neon/Supabase/Vercel) to share the brain.
+  - **Agent memory uses `pgvector`.** `memory_entry_embeddings.embedding` is a real `vector(1536)` column with an HNSW cosine index (migration `20260602000000_memory_pgvector`). Prisma maps `vector` as `Unsupported`, so that column is read/written via raw SQL only — see `src/storage/db/vector.ts`, the raw upsert in `src/storage/db/memory.ts`, and the indexed `<=>` search in `searchMemory` + `distillRelatedInsights`. Apply with `npm run db:migrate` (deploy); do **not** `migrate dev` against it. The other embedding tables (issues/threads/groups/docs/code/features) are still JSONB + JS cosine — converting them is a tracked follow-up (50+ `include:{embedding:true}` call sites).
+  - **Optional local mirror (dual-write).** Set `MEMORY_MIRROR_DATABASE_URL` and every `saveMemory` writes the row + embedding to that second DB too (`src/storage/db/mirror.ts`). It's best-effort (mirror failure never fails the primary), embeds once for both, and nulls the `sessionId` FK in the mirror when the session isn't present there. The mirror DB needs the same schema incl. pgvector. For point-in-time snapshots instead of live mirroring, use `npm run db:backup` (`scripts/backup-db.sh`).
 
 ### One shared database, many `project` IDs (e.g. better-auth repos)
 
@@ -223,13 +226,13 @@ After data is stored, the existing **classification, grouping, and embedding** t
 
 - Every stage now emits `[stage] <name> → start ... ← ok in Nms` (or `✕ TIMEOUT after Nms`) on stderr. Read those logs to see which step is slow: typical culprits are `classify:github-sync` (rate limits / huge comment fetches), `classify:issue-embeddings` and `classify:thread-embeddings` (OpenAI), or `classify:discord-channel-fetch` (hangs forever if the Discord client never logged in).
 - Pass **`skip_github_sync: true, skip_embeddings: true`** to bypass the heavy prep work entirely and classify against whatever's already in the DB — this is what makes `limit: 1` actually fast.
-- Per-stage and overall timeouts are env-tunable (`OPENRUNDOWN_CLASSIFY_TIMEOUT_MS`, `OPENRUNDOWN_GITHUB_SYNC_TIMEOUT_MS`, ...). The full list is in `env.example`.
+- Per-stage and overall timeouts are env-tunable (`OPENBRIEFING_CLASSIFY_TIMEOUT_MS`, `OPENBRIEFING_GITHUB_SYNC_TIMEOUT_MS`, ...). The full list is in `env.example`.
 
 ## Lost?
 
 1. `project` set correctly?  
 2. `DATABASE_URL` and tokens set? See `env.example`.  
-3. Skill file: `skills/openrundown/SKILL.md` (full tool & CLI list).  
+3. Skill file: `skills/openbriefing/SKILL.md` (full tool & CLI list).  
 4. Server logs: run MCP with stderr visible if your client allows it.  
 
 For product behavior, see [README.md](README.md).

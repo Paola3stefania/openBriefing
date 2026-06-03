@@ -2,7 +2,7 @@
  * Simple authentication middleware for API routes
  * Uses environment variable secrets - no database required
  */
-import type { VercelRequest, VercelResponse } from "@vercel/node";
+import type { VercelRequest, VercelResponse } from "./http-types.js";
 
 export interface AuthResult {
   valid: boolean;
@@ -20,13 +20,13 @@ function getHeader(req: VercelRequest, name: string): string | null {
 
 /**
  * Verify API key from request headers
- * Checks against OPENRUNDOWN_API_KEY environment variable
+ * Checks against OPENBRIEFING_API_KEY environment variable
  */
 export function verifyApiKey(req: VercelRequest): AuthResult {
-  const apiKey = process.env.OPENRUNDOWN_API_KEY || process.env.UNMUTE_API_KEY;
+  const apiKey = process.env.OPENBRIEFING_API_KEY || process.env.UNMUTE_API_KEY;
   
   if (!apiKey) {
-    console.error("[Auth] OPENRUNDOWN_API_KEY not configured");
+    console.error("[Auth] OPENBRIEFING_API_KEY not configured");
     return {
       valid: false,
       error: "API key not configured on server",

@@ -3,9 +3,9 @@ import { saveMemory, searchMemory, getRecentMemories } from "../src/storage/db/m
 async function main() {
   console.log("Saving test memory...");
   const entry = await saveMemory({
-    content: "User wants to extend OpenRundown with semantic memory for Claude Code and Cursor. We added save_memory and search_memory MCP tools backed by PostgreSQL + OpenAI embeddings.",
-    summary: "Extended OpenRundown with persistent semantic memory MCP tools.",
-    tags: ["memory", "mcp", "openrundown"],
+    content: "User wants to extend OpenBriefing with semantic memory for Claude Code and Cursor. We added save_memory and search_memory MCP tools backed by PostgreSQL + OpenAI embeddings.",
+    summary: "Extended OpenBriefing with persistent semantic memory MCP tools.",
+    tags: ["memory", "mcp", "openbriefing"],
   });
   console.log("Saved:", JSON.stringify(entry, null, 2));
 

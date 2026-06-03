@@ -1,14 +1,16 @@
 /**
  * Distillation Layer
  *
- * Compresses OpenRundown's rich data (issues, groups, threads, signals, features)
+ * Compresses OpenBriefing's rich data (issues, groups, threads, signals, features)
  * into a compact `project.context` JSON payload (~300-500 tokens) that an
  * agent can consume at session start.
  *
  * The intelligence is in what we leave out, not what we put in.
  */
 
+import { Prisma } from "@prisma/client";
 import { prisma } from "../storage/db/prisma.js";
+import { toSqlVector } from "../storage/db/vector.js";
 import { detectProjectId } from "../config/project.js";
 import { getRecentSessions } from "./sessions.js";
 import { getProjectChatWorkspaceIds } from "./projectScope.js";
@@ -295,7 +297,7 @@ async function distillCodebaseNotes(scope?: string, projectRepo?: string): Promi
   // shared across every repo indexed against this database. Without filtering
   // on the indexed repo, briefings for project A leak feature/code notes
   // pointing at files in project B's repo (e.g. `packages/better-auth/...`
-  // surfacing in an `openRundown` briefing). We filter through the join chain
+  // surfacing in an `openBriefing` briefing). We filter through the join chain
   // `FeatureCodeMapping → CodeSection → CodeFile → CodeSearch.repositoryUrl`.
   const repoFilter = buildCodeSearchRepoFilter(projectRepo);
   const mappingFilter = repoFilter
@@ -409,9 +411,9 @@ async function distillRecentActivity(
 ): Promise<RecentActivity> {
   // Per-project scoping: GitHub issues/PRs share a single table across every
   // repo synced into this database. Without filtering on `issueRepo`/`prRepo`
-  // these counts return global aggregates (e.g. a Paola3stefania/openRundown
+  // these counts return global aggregates (e.g. a Paola3stefania/openBriefing
   // briefing that shares the DB with better-auth/better-auth would show
-  // better-auth's issue counts as if they were openRundown's). When `repo`
+  // better-auth's issue counts as if they were openBriefing's). When `repo`
   // is undefined (folder-name-only projects) we keep the legacy unfiltered
   // behavior so projects without an `owner/repo` identity still get counts.
   const issueRepoFilter = repo ? { issueRepo: repo } : {};
@@ -631,51 +633,50 @@ async function distillRelatedInsights(input: {
     return [];
   }
 
-  const entries = await prisma.memoryEntry.findMany({
-    where: { projectId: input.projectId },
-    include: { embedding: true },
-    orderBy: { createdAt: "desc" },
-    take: 200,
-  });
+  // Indexed pgvector ANN search (cosine). `<=>` is cosine distance, so
+  // similarity = 1 - distance. The HNSW index orders candidates in the DB; we
+  // take the closest MAX_RELATED_INSIGHTS, then drop any below the relevance
+  // threshold. Because results come back sorted by ascending distance
+  // (descending similarity), anything past the top-N is strictly less similar,
+  // so fetching N and filtering is equivalent to the old fetch-200-then-rank.
+  const queryVec = toSqlVector(queryEmbedding);
+  const rows = await prisma.$queryRaw<
+    Array<{
+      id: string;
+      summary: string;
+      tags: string[];
+      source: string;
+      sessionId: string | null;
+      createdAt: Date;
+      similarity: number;
+    }>
+  >(Prisma.sql`
+    SELECT
+      m."id",
+      m."summary",
+      m."tags",
+      m."source",
+      m."session_id" AS "sessionId",
+      m."created_at"  AS "createdAt",
+      1 - (e."embedding" <=> ${queryVec}::vector) AS "similarity"
+    FROM "memory_entries" m
+    JOIN "memory_entry_embeddings" e ON e."memory_id" = m."id"
+    WHERE m."project_id" = ${input.projectId}
+    ORDER BY e."embedding" <=> ${queryVec}::vector
+    LIMIT ${MAX_RELATED_INSIGHTS}
+  `);
 
-  const ranked: RelatedInsight[] = [];
-  for (const entry of entries) {
-    if (!entry.embedding) continue;
-    const vec = entry.embedding.embedding as number[];
-    if (!Array.isArray(vec) || vec.length !== queryEmbedding.length) continue;
-    const similarity = cosineSimilarity(queryEmbedding, vec);
-    if (similarity < RELATED_INSIGHT_MIN_SIMILARITY) continue;
-    ranked.push({
-      memoryId: entry.id,
-      summary: entry.summary,
-      tags: entry.tags,
-      createdAt: entry.createdAt.toISOString(),
-      similarity: Number(similarity.toFixed(3)),
-      source: entry.source,
-      // Read defensively: the field is a real column on `MemoryEntry`, but we
-      // want to tolerate IDE language servers running with a stale prisma
-      // client until they reload. tsc on the CLI proves the type is correct.
-      sessionId:
-        (entry as { sessionId?: string | null }).sessionId ?? undefined,
-    });
-  }
-
-  return ranked
-    .sort((a, b) => b.similarity - a.similarity)
-    .slice(0, MAX_RELATED_INSIGHTS);
-}
-
-function cosineSimilarity(a: number[], b: number[]): number {
-  let dot = 0;
-  let normA = 0;
-  let normB = 0;
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i];
-    normA += a[i] * a[i];
-    normB += b[i] * b[i];
-  }
-  if (normA === 0 || normB === 0) return 0;
-  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+  return rows
+    .filter((r) => Number(r.similarity) >= RELATED_INSIGHT_MIN_SIMILARITY)
+    .map((r) => ({
+      memoryId: r.id,
+      summary: r.summary,
+      tags: r.tags,
+      createdAt: r.createdAt.toISOString(),
+      similarity: Number(Number(r.similarity).toFixed(3)),
+      source: r.source,
+      sessionId: r.sessionId ?? undefined,
+    }));
 }
 
 /**
@@ -741,7 +742,7 @@ export function estimateTokenSavings(
  *
  * The classified-data path (`distillActiveIssues` / `distillDecisions` /
  * `distillCodebaseNotes`) only fires when GitHub issues, PRs, and feature
- * mappings have been ingested. Most projects using OpenRundown for session
+ * mappings have been ingested. Most projects using OpenBriefing for session
  * memory have neither. Without a session-history fallback the briefing's
  * structured arrays come back empty even when end_agent_session records
  * contain the very data the agent is asking for.

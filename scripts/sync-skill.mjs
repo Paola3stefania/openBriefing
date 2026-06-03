@@ -14,12 +14,12 @@ const root = fileURLToPath(new URL("..", import.meta.url));
 
 const pairs = [
   {
-    src: join(root, "skills/openrundown/SKILL.md"),
-    dest: join(root, ".cursor/skills/openrundown/SKILL.md"),
+    src: join(root, "skills/openbriefing/SKILL.md"),
+    dest: join(root, ".cursor/skills/openbriefing/SKILL.md"),
   },
   {
-    src: join(root, "rules/openrundown.mdc"),
-    dest: join(root, ".cursor/rules/openrundown.mdc"),
+    src: join(root, "rules/openbriefing.mdc"),
+    dest: join(root, ".cursor/rules/openbriefing.mdc"),
   },
 ];
 

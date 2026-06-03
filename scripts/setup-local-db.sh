@@ -1,51 +1,72 @@
-#!/bin/bash
+#!/usr/bin/env bash
+#
+# One-shot provisioning for the LOCAL mirror database (the "both local + Neon"
+# setup). Creates a local Postgres database, enables pgvector, and applies the
+# OpenBriefing migrations to it so it can serve as MEMORY_MIRROR_DATABASE_URL.
+#
+# Your PRIMARY database stays whatever DATABASE_URL points at (e.g. Neon). This
+# script only sets up the local copy.
+#
+# Prerequisites (install once on a fresh Mac):
+#   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+#   brew install postgresql@17 pgvector
+#   brew services start postgresql@17
+#   # and Node (for the migration step):
+#   brew install node    # or use nvm
+#
+# Usage:
+#   bash scripts/setup-local-db.sh [dbname]
+#   (default dbname: briefings)
+#
+set -euo pipefail
 
-# Setup script for local PostgreSQL database
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
 
-set -e
+DB_NAME="${1:-briefings}"
+PG_USER="${PGUSER:-$(whoami)}"
+LOCAL_URL="postgresql://${PG_USER}@localhost:5432/${DB_NAME}"
 
-echo "[SETUP] Setting up local PostgreSQL database for OpenRundown..."
+fail() { echo "[setup-local-db] ERROR: $1" >&2; exit 1; }
 
-# Check if PostgreSQL is installed
-if ! command -v psql &> /dev/null; then
-    echo "[ERROR] PostgreSQL not found. Installing..."
-    brew install postgresql@14
-    brew services start postgresql@14
-    sleep 2
+# --- 1. Prerequisite checks ------------------------------------------------
+command -v psql      >/dev/null 2>&1 || fail "psql not found. Install Postgres:  brew install postgresql@17 pgvector  &&  brew services start postgresql@17"
+command -v createdb  >/dev/null 2>&1 || fail "createdb not found (Postgres client tools missing)."
+
+if ! pg_isready -h localhost -p 5432 >/dev/null 2>&1; then
+  fail "No Postgres server responding on localhost:5432. Start it:  brew services start postgresql@17"
 fi
 
-# Check if PostgreSQL is running
-if ! pg_isready -q; then
-    echo "[WARNING] PostgreSQL not running. Starting..."
-    brew services start postgresql@14
-    sleep 2
-fi
-
-# Get current username
-USERNAME=$(whoami)
-
-# Create database
-echo "[SETUP] Creating database 'openrundown'..."
-createdb openrundown 2>/dev/null && echo "[SUCCESS] Database 'openrundown' created" || echo "[INFO] Database 'openrundown' already exists"
-
-# Check if .env exists
-if [ ! -f .env ]; then
-    echo "[SETUP] Creating .env file from env.example..."
-    cp env.example .env
-    echo ""
-    echo "[WARNING] Please edit .env and add your DATABASE_URL:"
-    echo "   DATABASE_URL=postgresql://${USERNAME}@localhost:5432/openrundown"
+# --- 2. Create the database (idempotent) -----------------------------------
+if psql -h localhost -U "$PG_USER" -lqt 2>/dev/null | cut -d \| -f 1 | grep -qw "$DB_NAME"; then
+  echo "[setup-local-db] Database '${DB_NAME}' already exists — leaving it in place."
 else
-    echo "[INFO] .env file already exists"
-    echo ""
-    echo "[WARNING] Make sure your .env has:"
-    echo "   DATABASE_URL=postgresql://${USERNAME}@localhost:5432/openrundown"
+  echo "[setup-local-db] Creating database '${DB_NAME}'..."
+  createdb -h localhost -U "$PG_USER" "$DB_NAME"
 fi
 
-echo ""
-echo "[NEXT STEPS]"
-echo "   1. Update .env with DATABASE_URL=postgresql://${USERNAME}@localhost:5432/openrundown"
-echo "   2. Run: npm run db:migrate"
-echo "   3. Test: npx prisma studio"
-echo ""
-echo "[SUCCESS] Local database setup complete!"
+# --- 3. Enable pgvector -----------------------------------------------------
+echo "[setup-local-db] Enabling pgvector extension..."
+if ! psql -h localhost -U "$PG_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 -c 'CREATE EXTENSION IF NOT EXISTS vector;' >/dev/null 2>&1; then
+  fail "Could not enable the 'vector' extension. Install it:  brew install pgvector  (then re-run this script)."
+fi
+
+# --- 4. Apply migrations ----------------------------------------------------
+if ! command -v npx >/dev/null 2>&1; then
+  fail "npx not found. Install Node (brew install node, or nvm) and run 'npm install', then re-run this script."
+fi
+
+echo "[setup-local-db] Applying migrations to ${DB_NAME}..."
+DATABASE_URL="$LOCAL_URL" npx prisma migrate deploy
+
+# --- 5. Done ---------------------------------------------------------------
+cat <<EOF
+
+[setup-local-db] ✅ Local mirror database ready.
+
+Add this to your .env to turn on live dual-write of agent memory:
+
+  MEMORY_MIRROR_DATABASE_URL=${LOCAL_URL}
+
+Take a point-in-time snapshot any time with:  npm run db:backup
+EOF

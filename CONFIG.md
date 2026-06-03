@@ -32,15 +32,14 @@ These help scripts find channels by name:
 - `DISCORD_CHANNEL_CHAT` - Chat channel name (default: "chat")
 
 ### Storage Backend
-- `STORAGE_BACKEND` - Storage backend to use (default: "auto")
-  - `"auto"` - Auto-detect: use PostgreSQL if `DATABASE_URL` is set, otherwise JSON (default)
-  - `"database"` - Always use PostgreSQL (will fail if not configured)
-  - `"json"` - Always use JSON files (useful for testing/development)
-  
-**Default behavior:** If `DATABASE_URL` is set → PostgreSQL, otherwise → JSON files
+- `STORAGE_BACKEND` - Storage backend to use (default: "database")
+  - `"database"` - PostgreSQL (the only supported mode). Throws if `DATABASE_URL`/`DB_*` is not set.
+  - `"json"` - Legacy file backend, allowed ONLY under `NODE_ENV=test` for unit tests. Rejected outside tests.
 
-### Database Configuration (for PostgreSQL backend)
-- `DATABASE_URL` - PostgreSQL connection string (e.g., `postgresql://user:password@localhost:5432/openrundown`)
+**Default behavior:** PostgreSQL is required. A `DATABASE_URL` (or `DB_*`) must be configured or the server throws on startup — there is no local-JSON fallback.
+
+### Database Configuration (required)
+- `DATABASE_URL` - PostgreSQL connection string (e.g., `postgresql://user:password@localhost:5432/openbriefing`)
 - OR use individual variables:
   - `DB_HOST` - Database host (default: "localhost")
   - `DB_PORT` - Database port (default: 5432)
@@ -80,19 +79,17 @@ GITHUB_REPO=your-repo
 OPENAI_API_KEY=your_openai_api_key_here
 # OPENAI_EMBEDDING_MODEL=text-embedding-3-small  # Optional: change embedding model
 
-# Storage Backend (Optional)
-# Default: Auto-detect (PostgreSQL if DATABASE_URL set, otherwise JSON)
-# For testing: STORAGE_BACKEND=json
-# STORAGE_BACKEND=auto
+# Storage Backend
+# Default: "database" (PostgreSQL is required; no JSON fallback)
+# STORAGE_BACKEND=json is only honored under NODE_ENV=test
 
-# Database Configuration (for PostgreSQL)
-# If DATABASE_URL is set, PostgreSQL will be used automatically
-# Otherwise, JSON files will be used
-DATABASE_URL=postgresql://user:password@localhost:5432/openrundown
+# Database Configuration (REQUIRED)
+# DATABASE_URL must point at a Postgres instance (local or cloud).
+DATABASE_URL=postgresql://user:password@localhost:5432/openbriefing
 # OR use individual variables:
 # DB_HOST=localhost
 # DB_PORT=5432
-# DB_NAME=openrundown
+# DB_NAME=openbriefing
 # DB_USER=your_user
 # DB_PASSWORD=your_password
 # USE_SEMANTIC_CLASSIFICATION=false  # Uncomment to disable semantic classification

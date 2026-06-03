@@ -16,6 +16,9 @@ members.csv
 cache/**/*.json
 results/**/*.json
 
+# Local database backups (pg_dump output) - never commit
+backups/
+
 # Keep cursor config example but ignore personal config
 cursor-mcp-config.json
 .vercel
