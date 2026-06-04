@@ -97,25 +97,19 @@ Optional integrations — add only what you use (full list in
 [ENVIRONMENT_VARIABLES.md](ENVIRONMENT_VARIABLES.md)):
 
 ```bash
-# GitHub
-GITHUB_TOKEN=...
-GITHUB_OWNER=your-org
-GITHUB_REPO=your-repo
-
-# Discord
-DISCORD_TOKEN=...
-DISCORD_SERVER_ID=...
-
-# Linear / Jira export
-PM_TOOL_TYPE=linear
-PM_TOOL_API_KEY=...
-PM_TOOL_TEAM_ID=...
+# Code understanding (index_codebase / investigate_issue / learn_from_pr)
+LOCAL_REPO_PATH=/path/to/your/repo   # preferred, faster
+GITHUB_REPO_URL=owner/repo           # fallback source + repo to read issues/PRs from
+GITHUB_TOKEN=...                     # higher rate limits for issue/PR reads
 
 # Use OpenAI instead of Ollama (must emit 1024-dim embeddings)
 # EMBEDDING_PROVIDER=openai
 # LLM_PROVIDER=openai
 # OPENAI_API_KEY=...
 ```
+
+> Need Discord / GitHub-issue sync / X / Linear signals? Those live in the
+> companion [unMute](https://github.com/Paola3stefania/unMute) MCP server, not here.
 
 ---
 
@@ -204,8 +198,8 @@ Use this when you want a shared "brain" across machines.
    ```
 3. `npm run build` applies migrations to the cloud DB. Skip `db:setup-local`.
 
-If many projects share one cloud DB, scope chat signals per project with
-`PROJECT_CHAT_WORKSPACES` (see `env.example`).
+If many projects share one cloud DB, the `project` (`owner/repo`) key keeps every
+session/memory/code query scoped — keep it consistent across calls.
 
 ---
 
