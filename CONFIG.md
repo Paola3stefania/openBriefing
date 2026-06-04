@@ -1,131 +1,63 @@
 # Configuration Guide
 
-This tool is configurable via environment variables. Create a `.env` file in the project root or set environment variables in your shell.
+OpenBriefing is configured via environment variables. Create a `.env` file in the project root (copy `env.example`) or set them in your shell. For the full reference see [docs/ENVIRONMENT_VARIABLES.md](docs/ENVIRONMENT_VARIABLES.md).
 
-## Required Configuration
+> OpenBriefing covers memory, sessions, briefings, and code. Channel config (Discord/GitHub-sync/X/Linear tokens) lives in the companion **unMute** project, not here.
 
-### Discord
-- `DISCORD_TOKEN` - Your Discord bot token (required)
-- `DISCORD_SERVER_ID` - Your Discord server/guild ID (optional, can be passed as argument)
-- `DISCORD_DEFAULT_CHANNEL_ID` - Default channel ID for scripts (optional)
+## Required
 
-### GitHub
-- `GITHUB_TOKEN` - GitHub personal access token (optional but recommended for higher rate limits)
-- `GITHUB_OWNER` - GitHub organization or username (required)
-- `GITHUB_REPO` - GitHub repository name (required)
+### Database (no JSON fallback)
+PostgreSQL is mandatory — the server throws on startup if it's unset.
+- `DATABASE_URL` — connection string, e.g. `postgresql://user:password@localhost:5432/briefings`
+- OR the individual vars: `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`
+- `STORAGE_BACKEND` — defaults to `database`. `json` is honored **only** under `NODE_ENV=test`.
 
-## Optional Configuration
+### Embeddings (for memory search + code index)
+- Default provider is **Ollama** (local): `OLLAMA_BASE_URL` (default `http://localhost:11434`), `OLLAMA_EMBEDDING_MODEL` (e.g. `mxbai-embed-large`).
+- To use OpenAI instead: `EMBEDDING_PROVIDER=openai` + `OPENAI_API_KEY` (+ optional `OPENAI_EMBEDDING_MODEL`).
+- `EMBEDDING_DIM` must match the model's output dimension.
 
-### Classification
-- `OPENAI_API_KEY` - OpenAI API key for semantic classification (enabled by default when set)
-- `USE_SEMANTIC_CLASSIFICATION` - Set to "false" to disable semantic classification even when API key is set (default: enabled if API key is set)
-- `OPENAI_EMBEDDING_MODEL` - OpenAI embedding model to use (default: "text-embedding-3-small")
-  - `text-embedding-3-small` - Fast, cost-effective, 1536 dimensions (default, recommended)
-  - `text-embedding-3-large` - Higher quality, more expensive, 3072 dimensions
-  - `text-embedding-ada-002` - Legacy model, 1536 dimensions
-  - **Note:** Changing the model will invalidate existing embedding caches (they'll be regenerated)
+## Optional
 
-### Discord Channel Names
-These help scripts find channels by name:
-- `DISCORD_CHANNEL_DEVELOPMENT` - Development channel name (default: "development")
-- `DISCORD_CHANNEL_GENERAL` - General channel name (default: "general")
-- `DISCORD_CHANNEL_CHAT` - Chat channel name (default: "chat")
+### Code understanding
+- `LOCAL_REPO_PATH` — absolute path to the repo to index (preferred, faster).
+- `GITHUB_REPO_URL` — fallback source for `index_codebase` when no local path.
+- `GITHUB_TOKEN` — lets `investigate_issue` / `learn_from_pr` read issues/PRs from your own repo (higher rate limits).
 
-### Storage Backend
-- `STORAGE_BACKEND` - Storage backend to use (default: "database")
-  - `"database"` - PostgreSQL (the only supported mode). Throws if `DATABASE_URL`/`DB_*` is not set.
-  - `"json"` - Legacy file backend, allowed ONLY under `NODE_ENV=test` for unit tests. Rejected outside tests.
+### Two-mode database (offline toggle)
+- `OFFLINE_DB` — `false` (default) routes Prisma at `DATABASE_URL` (cloud/Neon); `true` routes at `MEMORY_MIRROR_DATABASE_URL` (local Postgres).
+- `MEMORY_MIRROR_DATABASE_URL` — when set, every `save_memory` also dual-writes the row + embedding to this second DB (best-effort; failures never fail the primary). Auto-disabled when the active DB is the mirror.
 
-**Default behavior:** PostgreSQL is required. A `DATABASE_URL` (or `DB_*`) must be configured or the server throws on startup — there is no local-JSON fallback.
+### Sessions
+- `OPENBRIEFING_SESSION_AMEND_WINDOW_MS` — how long after `endedAt` an ended session can still be amended via `update_agent_session` (default 24h).
 
-### Database Configuration (required)
-- `DATABASE_URL` - PostgreSQL connection string (e.g., `postgresql://user:password@localhost:5432/openbriefing`)
-- OR use individual variables:
-  - `DB_HOST` - Database host (default: "localhost")
-  - `DB_PORT` - Database port (default: 5432)
-  - `DB_NAME` - Database name
-  - `DB_USER` - Database user
-  - `DB_PASSWORD` - Database password
-
-### File Paths (for JSON backend)
-- `CACHE_DIR` - Directory for all cache files (default: "cache")
-- `RESULTS_DIR` - Directory for output files (default: "results")
-- `ISSUES_CACHE_FILE` - Name of the issues cache file (default: "github-issues-cache.json")
-
-### Cache Files (stored in `CACHE_DIR`)
-- `github-issues-cache.json` - Cached GitHub issues
-- `issue-embeddings-cache.json` - Persistent LLM embeddings for issues
-- `discord-messages-{channelId}.json` - Cached Discord messages per channel
-
-### Results Files (stored in `RESULTS_DIR`)
-- `discord-classified-{channelId}.json` - Classification results
-- `classification-history.json` - Tracks which messages have been classified
-- `export-{pmTool}-{timestamp}.json` - PM tool export history
-
-## Example .env File
+## Example `.env`
 
 ```env
-# Discord Configuration
-DISCORD_TOKEN=your_discord_bot_token_here
-DISCORD_SERVER_ID=your_discord_server_id
-DISCORD_DEFAULT_CHANNEL_ID=your_default_channel_id
+# Database (REQUIRED — Postgres, no JSON fallback)
+DATABASE_URL=postgresql://user:password@localhost:5432/briefings
 
-# GitHub Configuration
-GITHUB_TOKEN=your_github_personal_access_token_here
-GITHUB_OWNER=your-org
-GITHUB_REPO=your-repo
+# Embeddings (Ollama by default)
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_EMBEDDING_MODEL=mxbai-embed-large
+EMBEDDING_DIM=1024
+# To use OpenAI instead:
+# EMBEDDING_PROVIDER=openai
+# OPENAI_API_KEY=sk-...
 
-# Classification (Optional)
-OPENAI_API_KEY=your_openai_api_key_here
-# OPENAI_EMBEDDING_MODEL=text-embedding-3-small  # Optional: change embedding model
+# Code understanding (optional)
+# LOCAL_REPO_PATH=/Users/you/projects/your-repo
+# GITHUB_REPO_URL=https://github.com/owner/repo
+# GITHUB_TOKEN=ghp_...
 
-# Storage Backend
-# Default: "database" (PostgreSQL is required; no JSON fallback)
-# STORAGE_BACKEND=json is only honored under NODE_ENV=test
-
-# Database Configuration (REQUIRED)
-# DATABASE_URL must point at a Postgres instance (local or cloud).
-DATABASE_URL=postgresql://user:password@localhost:5432/openbriefing
-# OR use individual variables:
-# DB_HOST=localhost
-# DB_PORT=5432
-# DB_NAME=openbriefing
-# DB_USER=your_user
-# DB_PASSWORD=your_password
-# USE_SEMANTIC_CLASSIFICATION=false  # Uncomment to disable semantic classification
+# Two-mode DB (optional)
+# OFFLINE_DB=false
+# MEMORY_MIRROR_DATABASE_URL=postgresql://you@localhost:5432/briefings
 ```
 
-## Using Different Repositories
+## Configuration priority
 
-To use this tool with a different GitHub repository:
-
-1. Set environment variables:
-   ```bash
-   export GITHUB_OWNER=your-organization
-   export GITHUB_REPO=your-repository
-   ```
-
-2. Or create a `.env` file:
-   ```env
-   GITHUB_OWNER=your-organization
-   GITHUB_REPO=your-repository
-   ```
-
-3. The `classify_discord_messages` MCP tool will automatically fetch issues and messages before classifying. You can also fetch manually:
-   ```bash
-   npm run fetch-issues
-   ```
-
-4. Classify Discord messages (automatically syncs issues and messages first):
-   - Use the `classify_discord_messages` MCP tool
-   - Or use `sync_and_classify` for the full workflow
-
-## Configuration Priority
-
-Configuration values are loaded in this order:
 1. Environment variables (highest priority)
 2. Default values (fallback)
 
-The config is loaded at runtime, so you can override defaults without modifying code.
-
-
+Config is loaded at runtime, so you can override defaults without modifying code.

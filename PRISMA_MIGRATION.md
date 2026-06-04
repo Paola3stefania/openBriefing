@@ -88,7 +88,23 @@ npx prisma migrate deploy
 
 ## Schema Overview
 
-The Prisma schema includes all 14 tables:
+> **Note (project split — current decision):** OpenBriefing now covers memory,
+> sessions, briefings, and code — its live tables are `agent_sessions`,
+> `memory_entries` (+ `*_embeddings`), and the code-index tables
+> (`CodeFile`/`CodeSection`/`Feature`/`FeatureCodeMapping`). The channel tables
+> listed below (Discord/issue/grouping/X) are **legacy** here and conceptually
+> belong to the companion [unMute](https://github.com/Paola3stefania/unMute) project.
+>
+> **openBriefing will keep pointing at this original database permanently** (it is
+> *not* getting its own dedicated DB). unMute runs on a separate local `unmute`
+> database. Because openBriefing stays here, the legacy channel tables are
+> **intentionally left in place** — they're dead/unread, harmless, and the
+> existing channel *data* still physically lives in this DB. A prune-in-place
+> (drop the channel tables from this schema + migrate this DB) is **optional and
+> deferred** — do it only if/when you want them gone; there is no functional
+> reason to.
+
+The original migration introduced these tables:
 
 1. **Channel** - Discord channels
 2. **ClassifiedThread** - Classified Discord threads

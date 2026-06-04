@@ -4,15 +4,17 @@
 
 This tool requires sensitive credentials that should **NEVER** be committed to version control:
 
-### Required Tokens
+### Sensitive Values
 
-1. **DISCORD_TOKEN** - Discord bot token
-   - Get from: https://discord.com/developers/applications
-   - Required for all Discord operations
+1. **DATABASE_URL** - Postgres connection string (may embed a password)
+   - Required; never commit it. Cloud providers (Neon/Supabase/Vercel) include credentials in the URL.
 
-2. **GITHUB_TOKEN** (optional but recommended)
+2. **GITHUB_TOKEN** (optional) - for `investigate_issue` / `learn_from_pr` reads
    - Get from: https://github.com/settings/tokens
    - Recommended for higher API rate limits (5000/hour vs 60/hour)
+
+3. **OPENAI_API_KEY** (optional) - only if `EMBEDDING_PROVIDER`/`LLM_PROVIDER=openai`
+   - The default Ollama stack is local and needs no key.
 
 ### Security Best Practices
 
@@ -27,12 +29,11 @@ This tool requires sensitive credentials that should **NEVER** be committed to v
    - Or set as environment variables in your shell/system
 
 3. **Rotate tokens if exposed**
-   - If a token is ever committed, immediately revoke and regenerate it
-   - Discord: Revoke in Discord Developer Portal
+   - If a credential is ever committed, immediately revoke and regenerate it
    - GitHub: Revoke in GitHub Settings → Developer settings → Personal access tokens
+   - Database: rotate the Postgres password / connection string
 
 4. **Use minimal permissions**
-   - Discord bot: Only grant necessary intents (Guilds, Messages, MessageContent)
    - GitHub token: Only grant `public_repo` scope (or specific repo access)
 
 5. **Don't share tokens**
