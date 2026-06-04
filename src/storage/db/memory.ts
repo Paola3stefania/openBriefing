@@ -12,7 +12,7 @@ import { Prisma } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
 import { prisma } from "./prisma.js";
 import { getMirrorPrisma } from "./mirror.js";
-import { createEmbedding } from "../../core/classify/semantic.js";
+import { createEmbedding } from "../../embeddings/semantic.js";
 import { getLLMApiKey } from "../../llm/chat.js";
 import { getConfig } from "../../config/index.js";
 import { detectProjectId } from "../../config/project.js";

@@ -12,7 +12,6 @@
     "setup:launcher": "node scripts/ensure-launcher.mjs",
     "build": "prisma generate && prisma migrate deploy && tsc",
     "dev": "tsx src/index.ts",
-    "dev:api": "tsx scripts/local-server.ts",
     "start": "node dist/index.js",
     "db:migrate": "bash scripts/db-cli.sh migrate deploy",
     "db:migrate:dev": "bash scripts/db-cli.sh migrate dev",

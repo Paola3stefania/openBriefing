@@ -3,8 +3,7 @@
  */
 
 import type { ClassifiedThread, Group, UngroupedThread, StorageStats } from "./types.js";
-import type { DocumentationContent } from "../export/documentationFetcher.js";
-import type { ProductFeature } from "../export/types.js";
+import type { DocumentationContent, ProductFeature } from "./featureTypes.js";
 
 /**
  * GitHub reactions object (from GitHub API)

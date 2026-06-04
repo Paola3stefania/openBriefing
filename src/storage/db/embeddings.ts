@@ -12,7 +12,7 @@
 
 import { prisma } from "./prisma.js";
 import { createHash } from "crypto";
-import { createEmbedding, createEmbeddings } from "../../core/classify/semantic.js";
+import { createEmbedding, createEmbeddings } from "../../embeddings/semantic.js";
 import { getConfig } from "../../config/index.js";
 import {
   upsertEmbedding,
