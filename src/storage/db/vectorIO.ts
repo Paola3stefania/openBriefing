@@ -32,14 +32,9 @@ import { toSqlVector } from "./vector.js";
  */
 export const EMBEDDING_TABLES = {
   memory_entry_embeddings: { pk: "memory_id" },
-  issue_embeddings: { pk: "issue_id" },
-  thread_embeddings: { pk: "thread_id" },
-  group_embeddings: { pk: "group_id" },
   feature_embeddings: { pk: "feature_id" },
   code_file_embeddings: { pk: "code_file_id" },
   code_section_embeddings: { pk: "code_section_id" },
-  documentation_embeddings: { pk: "documentation_url" },
-  documentation_section_embeddings: { pk: "section_id" },
 } as const;
 
 export type EmbeddingTable = keyof typeof EMBEDDING_TABLES;
@@ -49,10 +44,10 @@ export type EmbeddingTable = keyof typeof EMBEDDING_TABLES;
  * caller doesn't need to worry about type — Postgres binds match the column's
  * declared type (text or int) automatically.
  *
- * `extraColumns` covers the one outlier (`documentation_section_embeddings`
- * also stores `documentation_url`) without forcing the simple tables to know
- * about it. Keys must be valid column names — they're double-quoted but never
- * sanitised, so don't take them from user input.
+ * `extraColumns` lets a table persist additional columns alongside the
+ * embedding without forcing the simple tables to know about it. Keys must be
+ * valid column names — they're double-quoted but never sanitised, so don't
+ * take them from user input.
  */
 export async function upsertEmbedding(options: {
   table: EmbeddingTable;

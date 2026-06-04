@@ -100,31 +100,6 @@ interface SourceSpec {
 
 const SOURCES: SourceSpec[] = [
   {
-    name: "github_issues",
-    target: "issue_embeddings",
-    loadRows: async (limit) => {
-      const rows = await prisma.gitHubIssue.findMany({
-        select: {
-          id: true,
-          issueNumber: true,
-          issueRepo: true,
-          issueTitle: true,
-          issueBody: true,
-          issueLabels: true,
-        },
-        orderBy: { issueUpdatedAt: "desc" },
-        ...(limit ? { take: limit } : {}),
-      });
-      return rows.map((r) => ({
-        pk: r.id,
-        text:
-          `${r.issueRepo}#${r.issueNumber} ${r.issueTitle}\n` +
-          `${r.issueBody ?? ""}\n` +
-          `labels: ${(r.issueLabels ?? []).join(", ")}`,
-      }));
-    },
-  },
-  {
     name: "code_files",
     target: "code_file_embeddings",
     loadRows: async (limit) => {
@@ -181,65 +156,6 @@ const SOURCES: SourceSpec[] = [
           (r.category ? ` [${r.category}]` : "") +
           `\n${r.description ?? ""}\n` +
           `keywords: ${(r.relatedKeywords ?? []).join(", ")}`,
-      }));
-    },
-  },
-  {
-    name: "documentation",
-    target: "documentation_embeddings",
-    loadRows: async (limit) => {
-      const rows = await prisma.documentationCache.findMany({
-        select: { url: true, title: true, content: true },
-        orderBy: { fetchedAt: "desc" },
-        ...(limit ? { take: limit } : {}),
-      });
-      return rows.map((r) => ({
-        pk: r.url,
-        text: `${r.title ?? ""}\n${r.content}`,
-      }));
-    },
-  },
-  {
-    name: "documentation_sections",
-    target: "documentation_section_embeddings",
-    loadRows: async (limit) => {
-      const rows = await prisma.documentationSection.findMany({
-        select: {
-          id: true,
-          documentationUrl: true,
-          title: true,
-          content: true,
-        },
-        orderBy: { createdAt: "desc" },
-        ...(limit ? { take: limit } : {}),
-      });
-      return rows.map((r) => ({
-        pk: r.id,
-        text: `${r.title}\n${r.content}`,
-        extra: { documentation_url: r.documentationUrl },
-      }));
-    },
-  },
-  {
-    name: "groups",
-    target: "group_embeddings",
-    loadRows: async (limit) => {
-      const rows = await prisma.group.findMany({
-        select: {
-          id: true,
-          suggestedTitle: true,
-          channelId: true,
-          githubIssueNumber: true,
-        },
-        orderBy: { updatedAt: "desc" },
-        ...(limit ? { take: limit } : {}),
-      });
-      return rows.map((r) => ({
-        pk: r.id,
-        text:
-          `${r.suggestedTitle}` +
-          (r.githubIssueNumber ? ` (issue #${r.githubIssueNumber})` : "") +
-          ` channel:${r.channelId}`,
       }));
     },
   },
