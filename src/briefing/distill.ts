@@ -14,14 +14,11 @@ import { getLLMApiKey } from "../llm/chat.js";
 import { toSqlVector } from "../storage/db/vector.js";
 import { detectProjectId } from "../config/project.js";
 import { getRecentSessions } from "./sessions.js";
-import { getProjectChatWorkspaceIds } from "./projectScope.js";
 import type {
   ProjectContext,
   ActionableItem,
   ActiveIssue,
   AgentSession,
-  UserSignal,
-  TechSignal,
   CodebaseNote,
   Decision,
   RecentActivity,
@@ -32,10 +29,8 @@ import type {
 
 const DEFAULT_LOOKBACK_DAYS = 14;
 const MAX_ACTIVE_ISSUES = 10;
-const MAX_USER_SIGNALS = 5;
 const MAX_CODEBASE_NOTES = 5;
 const MAX_DECISIONS = 5;
-const MAX_TECH_SIGNALS = 5;
 const MAX_ACTIONABLE = 5;
 const MAX_RELATED_INSIGHTS = 5;
 const RELATED_INSIGHT_MIN_SIMILARITY = 0.3;
@@ -61,33 +56,16 @@ export async function distillBriefingWithSessions(
   const scope = options.scope?.toLowerCase();
   const projectId = options.project ?? detectProjectId();
   // Auto-derive `repo` from `projectId` when it looks like `owner/repo`. This
-  // keeps GitHub-derived sections (issues, PRs) project-scoped instead of
-  // leaking results from other repos sharing the database.
+  // keeps code-index notes project-scoped instead of leaking results from
+  // other repos sharing the database.
   const repo = options.repo ?? deriveRepoFromProjectId(projectId);
 
-  // Resolve which chat workspaces belong to this project. `undefined` means
-  // no mapping is configured anywhere (preserve legacy unfiltered behavior).
-  // An empty array means "this project owns no chat data" — suppress all
-  // chat-derived signals (Discord, Slack, Teams, ...) so they don't leak
-  // from other projects sharing the database.
-  const chatWorkspaceIds = getProjectChatWorkspaceIds(projectId);
-
-  const [
-    activeIssues,
-    userSignals,
-    techSignals,
-    codebaseNotes,
-    decisions,
-    recentActivity,
-    preferences,
-    sessions,
-  ] = await Promise.all([
-    distillActiveIssues(since, scope, repo),
-    distillUserSignals(since, scope, chatWorkspaceIds),
-    distillTechSignals(since, scope),
+  // openBriefing distills three sources only: code (code-index features),
+  // sessions (decisions / open items / files edited / plan steps), and memory
+  // (semantic related insights). Outside-world channel signals — GitHub
+  // issues/PRs, Discord, X — belong to the unMute project and its own DB.
+  const [codebaseNotes, preferences, sessions] = await Promise.all([
     distillCodebaseNotes(scope, repo),
-    distillDecisions(since, scope, repo),
-    distillRecentActivity(since, chatWorkspaceIds, repo),
     loadPreferences(projectId),
     getRecentSessions(SESSION_HISTORY_LIMIT, projectId),
   ]);
@@ -105,12 +83,12 @@ export async function distillBriefingWithSessions(
     project: projectId,
     focus: scope,
     lastUpdated: new Date().toISOString(),
-    decisions: mergeDecisions(decisions, sessionDerived.decisions),
-    activeIssues: mergeActiveIssues(activeIssues, sessionDerived.activeIssues),
-    userSignals,
-    techSignals,
+    decisions: mergeDecisions([], sessionDerived.decisions),
+    activeIssues: mergeActiveIssues([], sessionDerived.activeIssues),
+    userSignals: [],
+    techSignals: [],
     codebaseNotes: mergeCodebaseNotes(codebaseNotes, sessionDerived.codebaseNotes),
-    recentActivity,
+    recentActivity: emptyRecentActivity(since),
     preferences,
     actionable,
     relatedInsights,
@@ -119,126 +97,27 @@ export async function distillBriefingWithSessions(
   return { briefing, sessions };
 }
 
+/**
+ * openBriefing no longer ingests channel activity (issues/PRs/Discord), so the
+ * recent-activity counters are always zero. The field is retained for shape
+ * compatibility with `ProjectContext`; the period reflects the lookback window.
+ */
+function emptyRecentActivity(since: Date): RecentActivity {
+  const days = Math.ceil((Date.now() - since.getTime()) / (24 * 60 * 60 * 1000));
+  return {
+    issuesOpened: 0,
+    issuesClosed: 0,
+    prsOpened: 0,
+    prsMerged: 0,
+    discordThreads: 0,
+    period: `last ${days} days`,
+  };
+}
+
 function deriveRepoFromProjectId(projectId: string): string | undefined {
   const trimmed = projectId.trim();
   if (!/^[^/\s]+\/[^/\s]+$/.test(trimmed)) return undefined;
   return trimmed;
-}
-
-async function distillActiveIssues(since: Date, scope?: string, repo?: string): Promise<ActiveIssue[]> {
-  const issues = await prisma.gitHubIssue.findMany({
-    where: {
-      issueState: "open",
-      issueCreatedAt: { gte: since },
-      ...(repo ? { issueRepo: repo } : {}),
-      ...(scope
-        ? {
-            OR: [
-              { issueTitle: { contains: scope, mode: "insensitive" } },
-              { issueBody: { contains: scope, mode: "insensitive" } },
-              { issueLabels: { has: scope } },
-            ],
-          }
-        : {}),
-    },
-    include: {
-      threadMatches: true,
-    },
-    orderBy: [{ issueCreatedAt: "desc" }],
-    take: MAX_ACTIVE_ISSUES * 2,
-  });
-
-  const scored = issues.map((issue) => {
-    const threadReports = issue.threadMatches.length;
-    const hasLabels = issue.detectedLabels.length > 0;
-    const isBug = issue.detectedLabels.includes("bug") || issue.issueLabels.includes("bug");
-    const isSecurity = issue.detectedLabels.includes("security");
-    const isRegression = issue.detectedLabels.includes("regression");
-    const hasAssignees = issue.issueAssignees.length > 0;
-    const reactionCount = getReactionCount(issue.issueReactions);
-
-    let priority: ActiveIssue["priority"] = "medium";
-    if (isSecurity || isRegression) priority = "critical";
-    else if (isBug && (threadReports >= 3 || reactionCount >= 5)) priority = "high";
-    else if (isBug || threadReports >= 2) priority = "high";
-    else if (hasAssignees || hasLabels) priority = "medium";
-    else priority = "low";
-
-    const priorityWeight =
-      priority === "critical" ? 4 : priority === "high" ? 3 : priority === "medium" ? 2 : 1;
-    const score = priorityWeight * 10 + threadReports * 3 + reactionCount;
-
-    return { issue, threadReports, priority, score, allLabels: [...issue.issueLabels, ...issue.detectedLabels] };
-  });
-
-  scored.sort((a, b) => b.score - a.score);
-
-  return scored.slice(0, MAX_ACTIVE_ISSUES).map(({ issue, threadReports, priority, allLabels }) => ({
-    id: `#${issue.issueNumber}`,
-    summary: issue.issueTitle,
-    reports: threadReports + 1,
-    source: threadReports > 0 ? "github + discord" : "github",
-    priority,
-    labels: [...new Set(allLabels)].slice(0, 5),
-    assignees: issue.issueAssignees,
-  }));
-}
-
-async function distillUserSignals(
-  since: Date,
-  scope?: string,
-  chatWorkspaceIds?: string[],
-): Promise<UserSignal[]> {
-  // If the operator configured per-project chat scoping for this project
-  // and this project owns no workspaces, suppress chat-derived signals
-  // entirely instead of leaking other projects' groups.
-  if (chatWorkspaceIds && chatWorkspaceIds.length === 0) return [];
-
-  const groups = await prisma.group.findMany({
-    where: {
-      createdAt: { gte: since },
-      ...(chatWorkspaceIds && chatWorkspaceIds.length > 0
-        ? { channel: { guildId: { in: chatWorkspaceIds } } }
-        : {}),
-      ...(scope
-        ? {
-            OR: [
-              { suggestedTitle: { contains: scope, mode: "insensitive" } },
-              { affectsFeatures: { path: [], not: "[]" } },
-            ],
-          }
-        : {}),
-    },
-    include: {
-      groupThreads: true,
-    },
-    orderBy: [{ threadCount: "desc" }],
-    take: MAX_USER_SIGNALS * 3,
-  });
-
-  const signals: UserSignal[] = groups
-    .filter((g) => g.threadCount >= 2)
-    .slice(0, MAX_USER_SIGNALS)
-    .map((group) => {
-      const features = Array.isArray(group.affectsFeatures) ? group.affectsFeatures : [];
-      const featureNames = features
-        .filter((f): f is { id: string; name: string } => typeof f === "object" && f !== null && "name" in f)
-        .map((f) => f.name);
-
-      return {
-        theme: group.suggestedTitle,
-        count: group.threadCount,
-        period: `since ${since.toISOString().split("T")[0]}`,
-        summary: featureNames.length > 0
-          ? `Affects: ${featureNames.join(", ")}`
-          : `${group.threadCount} related threads grouped`,
-        sources: group.githubIssueNumber
-          ? ["discord", "github"]
-          : ["discord"],
-      };
-    });
-
-  return signals;
 }
 
 /**
@@ -361,104 +240,6 @@ async function distillCodebaseNotes(scope?: string, projectRepo?: string): Promi
   return notes.slice(0, MAX_CODEBASE_NOTES);
 }
 
-async function distillDecisions(since: Date, scope?: string, repo?: string): Promise<Decision[]> {
-  const decisions: Decision[] = [];
-
-  const mergedPRs = await prisma.gitHubPullRequest.findMany({
-    where: {
-      prMerged: true,
-      prCreatedAt: { gte: since },
-      ...(repo ? { prRepo: repo } : {}),
-      ...(scope
-        ? {
-            OR: [
-              { prTitle: { contains: scope, mode: "insensitive" } },
-              { prBody: { contains: scope, mode: "insensitive" } },
-            ],
-          }
-        : {}),
-    },
-    include: {
-      linkedIssues: true,
-    },
-    orderBy: { prCreatedAt: "desc" },
-    take: MAX_DECISIONS * 2,
-  });
-
-  for (const pr of mergedPRs) {
-    const linkedIssueNumbers = pr.linkedIssues.map((i) => `#${i.issueNumber}`);
-    const openItems = pr.linkedIssues
-      .filter((i) => i.issueState === "open")
-      .map((i) => `#${i.issueNumber} still open`);
-
-    decisions.push({
-      what: pr.prTitle,
-      why: linkedIssueNumbers.length > 0
-        ? `Addresses ${linkedIssueNumbers.join(", ")}`
-        : "Direct improvement",
-      when: pr.prCreatedAt.toISOString().split("T")[0],
-      status: "implemented",
-      openItems,
-    });
-  }
-
-  return decisions.slice(0, MAX_DECISIONS);
-}
-
-async function distillRecentActivity(
-  since: Date,
-  chatWorkspaceIds?: string[],
-  repo?: string,
-): Promise<RecentActivity> {
-  // Per-project scoping: GitHub issues/PRs share a single table across every
-  // repo synced into this database. Without filtering on `issueRepo`/`prRepo`
-  // these counts return global aggregates (e.g. a Paola3stefania/openBriefing
-  // briefing that shares the DB with better-auth/better-auth would show
-  // better-auth's issue counts as if they were openBriefing's). When `repo`
-  // is undefined (folder-name-only projects) we keep the legacy unfiltered
-  // behavior so projects without an `owner/repo` identity still get counts.
-  const issueRepoFilter = repo ? { issueRepo: repo } : {};
-  const prRepoFilter = repo ? { prRepo: repo } : {};
-
-  const discordCount =
-    chatWorkspaceIds && chatWorkspaceIds.length === 0
-      ? Promise.resolve(0)
-      : prisma.classifiedThread.count({
-          where: {
-            classifiedAt: { gte: since },
-            ...(chatWorkspaceIds && chatWorkspaceIds.length > 0
-              ? { channel: { guildId: { in: chatWorkspaceIds } } }
-              : {}),
-          },
-        });
-
-  const [issuesOpened, issuesClosed, prsOpened, prsMerged, discordThreads] = await Promise.all([
-    prisma.gitHubIssue.count({
-      where: { issueCreatedAt: { gte: since }, issueState: "open", ...issueRepoFilter },
-    }),
-    prisma.gitHubIssue.count({
-      where: { issueUpdatedAt: { gte: since }, issueState: "closed", ...issueRepoFilter },
-    }),
-    prisma.gitHubPullRequest.count({
-      where: { prCreatedAt: { gte: since }, ...prRepoFilter },
-    }),
-    prisma.gitHubPullRequest.count({
-      where: { prCreatedAt: { gte: since }, prMerged: true, ...prRepoFilter },
-    }),
-    discordCount,
-  ]);
-
-  const days = Math.ceil((Date.now() - since.getTime()) / (24 * 60 * 60 * 1000));
-  return {
-    issuesOpened,
-    issuesClosed,
-    prsOpened,
-    prsMerged,
-    discordThreads,
-    period: `last ${days} days`,
-  };
-}
-
 async function loadPreferences(projectId: string): Promise<Record<string, string>> {
   const lastSession = await prisma.agentSession.findFirst({
     where: { projectId },
@@ -469,96 +250,6 @@ async function loadPreferences(projectId: string): Promise<Record<string, string
   return {
     lastScope: lastSession?.scope?.join(", ") ?? "none",
   };
-}
-
-async function distillTechSignals(since: Date, scope?: string): Promise<TechSignal[]> {
-  try {
-    const posts = await prisma.xPost.findMany({
-      where: {
-        postedAt: { gte: since },
-        ...(scope
-          ? { content: { contains: scope, mode: "insensitive" } }
-          : {}),
-      },
-      orderBy: { postedAt: "desc" },
-      take: 500,
-    });
-
-    if (posts.length === 0) return [];
-
-    const themeMap = new Map<string, {
-      tweets: typeof posts;
-      engagement: number;
-      authors: Set<string>;
-    }>();
-
-    for (const post of posts) {
-      const tags = post.hashtags.length > 0 ? post.hashtags : ["general"];
-      const engagement = post.likeCount + post.retweetCount + post.quoteCount;
-
-      for (const tag of tags) {
-        const key = tag.toLowerCase();
-        const existing = themeMap.get(key);
-        if (existing) {
-          existing.tweets.push(post);
-          existing.engagement += engagement;
-          existing.authors.add(post.authorUsername);
-        } else {
-          themeMap.set(key, {
-            tweets: [post],
-            engagement,
-            authors: new Set([post.authorUsername]),
-          });
-        }
-      }
-    }
-
-    const themes = [...themeMap.entries()]
-      .filter(([, data]) => data.tweets.length >= 2)
-      .sort((a, b) => b[1].engagement - a[1].engagement)
-      .slice(0, MAX_TECH_SIGNALS);
-
-    return themes.map(([theme, data]) => {
-      const topAuthors = [...data.authors]
-        .map((username) => {
-          const authorPosts = data.tweets.filter((t) => t.authorUsername === username);
-          const totalFollowers = Math.max(...authorPosts.map((t) => t.authorFollowers));
-          return { username, followers: totalFollowers };
-        })
-        .sort((a, b) => b.followers - a.followers)
-        .slice(0, 3)
-        .map((a) => a.username);
-
-      const topPost = data.tweets
-        .sort((a, b) =>
-          (b.likeCount + b.retweetCount + b.quoteCount) -
-          (a.likeCount + a.retweetCount + a.quoteCount),
-        )[0];
-
-      return {
-        theme: `#${theme}`,
-        tweetCount: data.tweets.length,
-        topAuthors,
-        engagement: data.engagement,
-        summary: topPost
-          ? `Top post by @${topPost.authorUsername}: "${topPost.content.slice(0, 120)}..."`
-          : `${data.tweets.length} posts from ${data.authors.size} authors`,
-      };
-    });
-  } catch {
-    return [];
-  }
-}
-
-function getReactionCount(reactions: unknown): number {
-  if (!reactions || typeof reactions !== "object") return 0;
-  const r = reactions as Record<string, unknown>;
-  let total = 0;
-  for (const key of Object.keys(r)) {
-    const val = r[key];
-    if (typeof val === "number") total += val;
-  }
-  return total;
 }
 
 /**

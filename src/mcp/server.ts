@@ -8,29 +8,8 @@ import {
   Tool,
 } from "@modelcontextprotocol/sdk/types.js";
 
-import {
-  searchGitHubIssues,
-  loadIssuesFromCache,
-  fetchAllGitHubIssues,
-  mergeIssues,
-  getMostRecentUpdateDate as getMostRecentIssueDate,
-  type GitHubIssue,
-  type GitHubComment,
-  type IssuesCache,
-} from "../connectors/github/client.js";
-import { loadDiscordCache, getAllMessagesFromCache, getMostRecentMessageDate, mergeMessagesByThread, organizeMessagesByThread, getThreadContextForMessage, type DiscordCache, type DiscordMessage as CachedDiscordMessage } from "../storage/cache/discordCache.js";
-import { loadClassificationHistory, saveClassificationHistory, filterUnclassifiedMessages, addMessageClassification, updateThreadStatus, getThreadStatus, migrateStandaloneToThread, filterUngroupedSignals, addGroup, getGroupingStats, type ClassificationHistory } from "../storage/cache/classificationHistory.js";
-import { getConfig } from "../config/index.js";
-import { llmChat, getLLMApiKey } from "../llm/chat.js";
-import { join } from "path";
-import { existsSync, writeFileSync, mkdirSync } from "fs";
-import { writeFile, mkdir, readdir, readFile } from "fs/promises";
 import { logError } from "./logger.js";
-import type { Signal } from "../types/signal.js";
-import type { ClassifiedThread, Group, UngroupedThread } from "../storage/types.js";
 import { detectProjectId } from "../config/project.js";
-import { runStage, readTimeoutEnv, withOverallTimeout } from "../util/stages.js";
-import { getEmbeddingsBatch } from "../storage/db/vectorIO.js";
 
 
 /**
@@ -125,37 +104,6 @@ function safeJsonParse<T = unknown>(content: string, filePath?: string): T {
     const preview = content.substring(0, 100).replace(/\n/g, " ");
     throw new Error(`Failed to parse JSON${fileContext}: ${errorMessage}. Content preview: ${preview}...`);
   }
-}
-
-/**
- * Find Discord cache file for a channel, handling files with timestamp suffixes
- */
-async function findDiscordCacheFile(channelId: string): Promise<string | null> {
-  const config = getConfig();
-  const cacheDir = join(process.cwd(), config.paths.cacheDir);
-  const baseFileName = `discord-messages-${channelId}.json`;
-  const exactPath = join(cacheDir, baseFileName);
-
-  // First try exact match
-  if (existsSync(exactPath)) {
-    return exactPath;
-  }
-
-  // If not found, try to find files that start with the base name
-  try {
-    const files = await readdir(cacheDir);
-    const matchingFiles = files.filter(f => f.startsWith(baseFileName));
-    
-    if (matchingFiles.length > 0) {
-      // Return the most recently modified file (if multiple exist)
-      // For now, just return the first match (we could enhance this to check mtime)
-      return join(cacheDir, matchingFiles[0]);
-    }
-  } catch (error) {
-    // Directory doesn't exist or can't be read
-  }
-
-  return null;
 }
 
 // Create MCP server
