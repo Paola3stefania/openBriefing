@@ -5,8 +5,7 @@
 import type { IStorage, GitHubReactions } from "../interface.js";
 import type { ClassifiedThread, Group, UngroupedThread, StorageStats } from "../types.js";
 import { getLLMApiKey } from "../../llm/chat.js";
-import type { DocumentationContent } from "../../export/documentationFetcher.js";
-import type { ProductFeature } from "../../export/types.js";
+import type { DocumentationContent, ProductFeature } from "../featureTypes.js";
 import { prisma } from "./prisma.js";
 import { Decimal } from "@prisma/client/runtime/client";
 import { Prisma } from "@prisma/client";

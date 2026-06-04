@@ -60,7 +60,7 @@ export async function fetchLocalCodeContext(
     const apiKey = getLLMApiKey();
 
     // Compute embedding for search query
-    const { createEmbedding } = await import("../../core/classify/semantic.js");
+    const { createEmbedding } = await import("../../embeddings/semantic.js");
     log(`[LocalCodeFetcher] Computing embedding for search query...`);
     const queryEmbedding = await createEmbedding(searchQuery, apiKey);
     

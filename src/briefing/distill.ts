@@ -627,7 +627,7 @@ async function distillRelatedInsights(input: {
 
   let queryEmbedding: number[];
   try {
-    const { createEmbedding } = await import("../core/classify/semantic.js");
+    const { createEmbedding } = await import("../embeddings/semantic.js");
     queryEmbedding = await createEmbedding(focusQuery, apiKey);
   } catch (err) {
     console.error("[Briefing] relatedInsights: failed to embed focus query", err);

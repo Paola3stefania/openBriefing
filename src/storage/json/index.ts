@@ -5,8 +5,7 @@
 
 import type { IStorage, GitHubReactions } from "../interface.js";
 import type { ClassifiedThread, Group, UngroupedThread, StorageStats } from "../types.js";
-import type { DocumentationContent } from "../../export/documentationFetcher.js";
-import type { ProductFeature } from "../../export/types.js";
+import type { DocumentationContent, ProductFeature } from "../featureTypes.js";
 import type { GitHubIssue, IssuesCache } from "../../connectors/github/client.js";
 import { readFile, writeFile, mkdir, readdir } from "fs/promises";
 import { existsSync } from "fs";

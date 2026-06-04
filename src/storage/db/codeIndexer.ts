@@ -734,7 +734,7 @@ async function parseAndIndexCode(
       const apiKey = getLLMApiKey();
       if (apiKey) {
         try {
-          const { createEmbeddings } = await import("../../core/classify/semantic.js");
+          const { createEmbeddings } = await import("../../embeddings/semantic.js");
           const { saveCodeFileEmbedding } = await import("./embeddings.js");
           
           // Batch create embeddings (OpenAI supports up to 2048 inputs per request)
@@ -764,7 +764,7 @@ async function parseAndIndexCode(
             try {
               const apiKey = getLLMApiKey();
               if (apiKey) {
-                const { createEmbedding } = await import("../../core/classify/semantic.js");
+                const { createEmbedding } = await import("../../embeddings/semantic.js");
                 const { saveCodeFileEmbedding } = await import("./embeddings.js");
                 const embedding = await createEmbedding(task.fileText, apiKey);
                 await saveCodeFileEmbedding(task.fileId, embedding, task.contentHash);
@@ -784,7 +784,7 @@ async function parseAndIndexCode(
       const apiKey = getLLMApiKey();
       if (apiKey) {
         try {
-          const { createEmbeddings } = await import("../../core/classify/semantic.js");
+          const { createEmbeddings } = await import("../../embeddings/semantic.js");
           const { saveCodeSectionEmbedding } = await import("./embeddings.js");
           
           // Batch create embeddings
@@ -813,7 +813,7 @@ async function parseAndIndexCode(
             try {
               const apiKey = getLLMApiKey();
               if (apiKey) {
-                const { createEmbedding } = await import("../../core/classify/semantic.js");
+                const { createEmbedding } = await import("../../embeddings/semantic.js");
                 const { saveCodeSectionEmbedding } = await import("./embeddings.js");
                 const embedding = await createEmbedding(task.sectionText, apiKey);
                 await saveCodeSectionEmbedding(task.sectionId, embedding, task.contentHash);
