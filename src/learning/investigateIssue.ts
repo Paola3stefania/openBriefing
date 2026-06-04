@@ -707,27 +707,6 @@ export async function investigateIssue(options: InvestigateOptions): Promise<Inv
     log(`[Investigate] Fetching issue context...`);
     const issueContext = await fetchIssueContext(tokenManager, owner, repoName, issueNumber);
     
-    // Include Discord threads if requested
-    if (includeDiscord) {
-      try {
-        const threadMatches = await prisma.issueThreadMatch.findMany({
-          where: { issueNumber },
-          orderBy: { similarityScore: "desc" },
-          take: 5,
-        });
-        
-        issueContext.discordThreads = threadMatches.map(t => ({
-          threadId: t.threadId,
-          threadName: t.threadName || "",
-          url: t.threadUrl || undefined,
-          messageCount: t.messageCount,
-          similarity: Number(t.similarityScore),
-        }));
-      } catch {
-        // Discord data not available, continue
-      }
-    }
-    
     // Triage the issue
     log(`[Investigate] Triaging issue...`);
     const triage = triageIssue(issueContext);

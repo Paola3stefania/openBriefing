@@ -10,7 +10,7 @@ Successfully migrated the database layer from raw SQL queries to Prisma ORM. Thi
 
 ## Files Created
 
-1. **`prisma/schema.prisma`** - Complete Prisma schema with all 14 tables
+1. **`prisma/schema.prisma`** - Prisma schema (15 models — see Schema Overview below)
 2. **`src/storage/db/prisma.ts`** - Prisma client singleton
 
 ## Files Modified
@@ -54,9 +54,8 @@ npx prisma db pull --force
 ### 3. Test the Migration
 
 ```bash
-# Run your existing tests or scripts
-npm run classify-issues
-npm run fetch-issues
+# Run the test suite
+npm test
 ```
 
 ### 4. Mark Existing Migrations as Applied (One-time)
@@ -88,38 +87,47 @@ npx prisma migrate deploy
 
 ## Schema Overview
 
-> **Note (project split — current decision):** OpenBriefing now covers memory,
-> sessions, briefings, and code — its live tables are `agent_sessions`,
-> `memory_entries` (+ `*_embeddings`), and the code-index tables
-> (`CodeFile`/`CodeSection`/`Feature`/`FeatureCodeMapping`). The channel tables
-> listed below (Discord/issue/grouping/X) are **legacy** here and conceptually
-> belong to the companion [unMute](https://github.com/Paola3stefania/unMute) project.
->
-> **openBriefing will keep pointing at this original database permanently** (it is
-> *not* getting its own dedicated DB). unMute runs on a separate local `unmute`
-> database. Because openBriefing stays here, the legacy channel tables are
-> **intentionally left in place** — they're dead/unread, harmless, and the
-> existing channel *data* still physically lives in this DB. A prune-in-place
-> (drop the channel tables from this schema + migrate this DB) is **optional and
-> deferred** — do it only if/when you want them gone; there is no functional
-> reason to.
+> **Project split (current).** OpenBriefing covers memory, sessions, briefings,
+> and code understanding. The old community/channel domain (Discord/chat, GitHub
+> issue/PR tracking, thread classification, grouping, documentation cache,
+> X/Twitter, PM export) moved to the companion
+> [unMute](https://github.com/Paola3stefania/unMute) project and was **removed**
+> from here — models *and* tables. Migration
+> `20260603000000_drop_unmute_domain_tables` drops the 23 retired tables
+> (`channels`, `discord_messages`, `github_issues`, `github_pull_requests`,
+> `classified_threads`, `groups`, `documentation_*`, `x_posts`, `export_results`,
+> their embeddings/joins, …). OpenBriefing runs on the original database (Neon +
+> a local `briefings` memory mirror, routed by `OFFLINE_DB`); unMute runs on its
+> own separate database.
 
-The original migration introduced these tables:
+The schema's **15 models**:
 
-1. **Channel** - Discord channels
-2. **ClassifiedThread** - Classified Discord threads
-3. **ThreadIssueMatch** - Thread-to-issue matches
-4. **Group** - Issue-based groupings
-5. **GroupThread** - Group-thread relationships
-6. **UngroupedThread** - Threads that couldn't be grouped
-7. **ClassificationHistory** - Classification tracking
-8. **IssueEmbedding** - GitHub issue embeddings
-9. **DocumentationCache** - Cached documentation
-10. **DocumentationSection** - Documentation sections
-11. **DocumentationSectionEmbedding** - Section embeddings
-12. **DocumentationEmbedding** - Full doc embeddings
-13. **Feature** - Product features
-14. **FeatureEmbedding** - Feature embeddings
+**Sessions & memory**
+
+1. **AgentSession** — `agent_sessions`
+2. **MemoryEntry** — `memory_entries`
+3. **MemoryEntryEmbedding** — `memory_entry_embeddings` (pgvector)
+
+**Code understanding**
+
+4. **CodeSearch** — `code_searches`
+5. **CodeFile** — `code_files`
+6. **CodeSection** — `code_sections`
+7. **CodeFileEmbedding** — `code_file_embeddings`
+8. **CodeSectionEmbedding** — `code_section_embeddings`
+9. **CodeOwnership** — `code_ownership`
+
+**Features (code ↔ feature mapping)**
+
+10. **Feature** — `features`
+11. **FeatureEmbedding** — `feature_embeddings`
+12. **FeatureCodeMapping** — `feature_code_mappings`
+13. **FeatureOwnership** — `feature_ownership`
+
+**PR learning**
+
+14. **PRLearning** — `pr_learnings`
+15. **FixAttempt** — `fix_attempts`
 
 ## Benefits Achieved
 
@@ -132,7 +140,9 @@ The original migration introduced these tables:
 
 ## Breaking Changes
 
-None! The `IStorage` interface remains unchanged, so all existing code continues to work.
+The data layer is now Prisma-only: code calls `prisma` directly (the old
+`IStorage` abstraction and JSON storage backend have since been removed). A
+database (`DATABASE_URL`) is required — there is no JSON fallback.
 
 ## Troubleshooting
 
@@ -158,8 +168,6 @@ npx prisma generate
 
 ## Notes
 
-- The old `client.ts` file can be safely deleted after verifying everything works
-- All migrations are now managed by Prisma in `prisma/migrations/`
-- Prisma will manage future migrations going forward
-- The JSON file fallback in embedding cache still works as before
+- All migrations are managed by Prisma in `prisma/migrations/`
+- Prisma manages future migrations going forward
 
