@@ -10,7 +10,7 @@
 
 Agents get briefed on past decisions, open items, actionable plan steps, and codebase notes from previous sessions instead of re-exploring from scratch every time. Memory is stored in a local or shared database within your team or org.
 
-> **Scope:** OpenBriefing is the *memory + code-context* half of a two-server setup. It covers **project memory, agent sessions, briefings, and code understanding**. For outside-world signals — Discord, GitHub issues/PRs, X/Twitter, and Linear/PM export — run the companion **[unMute](https://github.com/Paola3stefania/unMute)** MCP server alongside it. An agent can use both; they share the same `project` (`owner/repo`) key.
+> **Scope:** OpenBriefing covers **project memory, agent sessions, briefings, and code understanding**.
 
 ## The Problem
 
@@ -195,7 +195,7 @@ OpenBriefing distills its briefing from three sources you (or your agents) fill 
 2. **Memory** — `save_memory` and `end_agent_session({ related_insights })` → `memory_entries` + `memory_entry_embeddings` (pgvector `halfvec`, HNSW cosine)
 3. **Code** — `index_codebase` / `index_code_for_features` read `LOCAL_REPO_PATH` or `GITHUB_REPO_URL`; `investigate_issue` / `learn_from_pr` do on-demand reads of a specific issue/PR in your own repo
 
-Everything is keyed by `project` (`owner/repo` from your git remote), so one shared database can serve many projects without leaking context between them. Channel signals (Discord/GitHub-issue sync/X/Linear) are **not** ingested here — that's [unMute](https://github.com/Paola3stefania/unMute).
+Everything is keyed by `project` (`owner/repo` from your git remote), so one shared database can serve many projects without leaking context between them.
 
 ## Architecture
 
@@ -241,7 +241,6 @@ No manual context passing. No copy-pasting. The memory just flows.
 - [Database Setup](docs/DATABASE_SETUP.md)
 - [GitHub token (for investigate/learn + code)](docs/GITHUB_INTEGRATION.md)
 - [Claude Desktop Setup (non-technical, step-by-step)](docs/CLAUDE_DESKTOP_SETUP.md)
-- **Companion project:** [unMute](https://github.com/Paola3stefania/unMute) — Discord/GitHub/X/Linear signals
 
 ## License
 
