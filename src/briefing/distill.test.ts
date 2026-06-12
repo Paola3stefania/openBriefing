@@ -463,6 +463,6 @@ describe("estimateTokenSavings", () => {
     expect(result.estimatedSourceTokens).toBeGreaterThan(result.briefingTokens);
     expect(result.estimatedSavedTokens).toBe(result.estimatedSourceTokens - result.briefingTokens);
     expect(result.compressionRatio).toMatch(/^\d+:1$/);
-    expect(result.method).toBe("approx-chars-per-token");
+    expect(result.method).toBe("gpt-tokenizer-o200k_base");
   });
 });

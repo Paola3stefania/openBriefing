@@ -9,7 +9,7 @@
  * 5. Tracks the attempt in the database
  */
 
-import { PrismaClient } from "@prisma/client";
+import { prisma } from "../storage/db/prisma.js";
 import { getConfig } from "../config/index.js";
 import { GitHubTokenManager } from "../connectors/github/tokenManager.js";
 import { log, logError } from "../mcp/logger.js";
@@ -644,7 +644,6 @@ export async function openPRWithFix(options: OpenPROptions): Promise<OpenPRResul
   } = options;
   
   const config = getConfig();
-  const prisma = new PrismaClient();
   
   // Determine repo
   let owner: string;
@@ -939,7 +938,7 @@ export async function openPRWithFix(options: OpenPROptions): Promise<OpenPRResul
     return { success: false, error: errorMsg };
     
   } finally {
-    await prisma.$disconnect();
+    // Shared prisma singleton stays connected for the process lifetime.
   }
 }
 
@@ -956,8 +955,6 @@ export async function recordNoFix(
   reason: string,
   linearIssueId?: string
 ): Promise<void> {
-  const prisma = new PrismaClient();
-  
   try {
     await prisma.fixAttempt.upsert({
       where: {
@@ -990,6 +987,6 @@ export async function recordNoFix(
     }
     
   } finally {
-    await prisma.$disconnect();
+    // Shared prisma singleton stays connected for the process lifetime.
   }
 }

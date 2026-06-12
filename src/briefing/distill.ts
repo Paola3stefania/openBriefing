@@ -9,6 +9,7 @@
  */
 
 import { Prisma } from "@prisma/client";
+import { countTokens } from "gpt-tokenizer/encoding/o200k_base";
 import { prisma } from "../storage/db/prisma.js";
 import { getLLMApiKey } from "../llm/chat.js";
 import { toSqlVector } from "../storage/db/vector.js";
@@ -372,48 +373,50 @@ async function distillRelatedInsights(input: {
 }
 
 /**
- * Approximate token savings between raw session payloads and the produced
- * briefing. Uses the rough `chars / 4` heuristic — not a tokenizer-accurate
- * count, but good enough for an order-of-magnitude indicator and avoids
- * pulling in a tokenizer dependency just for telemetry.
+ * Token savings between raw session payloads and the produced briefing.
+ * Counted with a real BPE tokenizer (`gpt-tokenizer`, o200k_base — the
+ * GPT-4o/o-series encoding) rather than a chars/4 heuristic, so the numbers
+ * are exact for OpenAI-style tokenization. Other model families (Claude,
+ * Gemini) tokenize slightly differently, so treat cross-model values as
+ * close approximations.
  */
 export interface TokenSavings {
   estimatedSourceTokens: number;
   briefingTokens: number;
   estimatedSavedTokens: number;
   compressionRatio: string;
-  method: "approx-chars-per-token";
+  method: "gpt-tokenizer-o200k_base";
 }
 
-const APPROX_CHARS_PER_TOKEN = 4;
-
-function approxTokens(text: string): number {
-  return Math.ceil(text.length / APPROX_CHARS_PER_TOKEN);
+function countTextTokens(text: string): number {
+  if (text.length === 0) return 0;
+  return countTokens(text);
 }
 
-function approxSessionTokens(sessions: AgentSession[]): number {
-  let chars = 0;
+function countSessionTokens(sessions: AgentSession[]): number {
+  let total = 0;
   for (const s of sessions) {
-    chars += s.summary?.length ?? 0;
+    const parts: string[] = [];
+    if (s.summary) parts.push(s.summary);
     for (const arr of [s.scope, s.decisionsMade, s.openItems, s.filesEdited, s.issuesReferenced, s.toolsUsed]) {
-      for (const entry of arr) chars += entry.length + 1;
+      parts.push(...arr);
     }
     if (s.planSteps) {
       for (const step of s.planSteps) {
-        chars += step.description.length + step.id.length + step.status.length;
-        if (step.notes) chars += step.notes.length;
+        parts.push(`${step.id} ${step.description} ${step.status}${step.notes ? ` ${step.notes}` : ""}`);
       }
     }
+    if (parts.length > 0) total += countTextTokens(parts.join("\n"));
   }
-  return Math.ceil(chars / APPROX_CHARS_PER_TOKEN);
+  return total;
 }
 
 export function estimateTokenSavings(
   briefing: ProjectContext,
   sessions: AgentSession[],
 ): TokenSavings {
-  const sourceTokens = approxSessionTokens(sessions);
-  const briefingTokens = approxTokens(JSON.stringify(briefing));
+  const sourceTokens = countSessionTokens(sessions);
+  const briefingTokens = countTextTokens(JSON.stringify(briefing));
   const saved = Math.max(0, sourceTokens - briefingTokens);
   const ratio = briefingTokens > 0 && sourceTokens > briefingTokens
     ? `${Math.round(sourceTokens / briefingTokens)}:1`
@@ -424,7 +427,7 @@ export function estimateTokenSavings(
     briefingTokens,
     estimatedSavedTokens: saved,
     compressionRatio: ratio,
-    method: "approx-chars-per-token",
+    method: "gpt-tokenizer-o200k_base",
   };
 }
 

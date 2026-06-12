@@ -52,17 +52,40 @@ if (!globalForPrisma.prisma && process.env.NODE_ENV !== "test") {
   );
 }
 
-export const prisma =
-  globalForPrisma.prisma ??
-  new PrismaClient({
-    datasourceUrl: active.url || undefined,
-    log: process.env.NODE_ENV === "development" ? ["error", "warn"] : ["error"],
+// Prisma's string-shorthand log config (e.g. `log: ["error"]`) — and its
+// default config — print to STDOUT, which corrupts the MCP JSON-RPC channel
+// and kills the client connection. Every PrismaClient in this process MUST
+// be created through this factory: it emits log events and forwards them to
+// stderr instead.
+export function createSafePrismaClient(options?: { datasourceUrl?: string }): PrismaClient {
+  const logLevels =
+    process.env.NODE_ENV === "development"
+      ? (["error", "warn"] as const)
+      : (["error"] as const);
+
+  const client = new PrismaClient({
+    datasourceUrl: options?.datasourceUrl,
+    log: logLevels.map((level) => ({ emit: "event" as const, level })),
   });
+
+  for (const level of logLevels) {
+    client.$on(level, (e: { message: string }) => {
+      console.error(`[prisma:${level}]`, e.message);
+    });
+  }
+  return client;
+}
+
+const prismaClient =
+  globalForPrisma.prisma ??
+  createSafePrismaClient({ datasourceUrl: active.url || undefined });
+
+export const prisma = prismaClient;
 
 // Always cache the prisma instance to prevent connection leaks
 // This is safe in all environments - the singleton pattern ensures
 // we reuse the same connection pool across the application
-globalForPrisma.prisma = prisma;
+globalForPrisma.prisma = prismaClient;
 
 // Ensure cleanup on process exit
 process.on("beforeExit", async () => {

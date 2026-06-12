@@ -11,7 +11,7 @@
  * - Full fix: Takes generated fix and opens PR
  */
 
-import { PrismaClient } from "@prisma/client";
+import { prisma } from "../storage/db/prisma.js";
 import { getConfig } from "../config/index.js";
 import { log, logError } from "../mcp/logger.js";
 import { investigateIssue, InvestigationResult, IssueContext, TriageOutput, SimilarFix } from "./investigateIssue.js";
@@ -146,7 +146,6 @@ export async function fixIssueWorkflow(options: WorkflowOptions): Promise<Workfl
   const { issueNumber, repo, linearIssueId, fix, skipInvestigation, forceAttempt } = options;
   
   const config = getConfig();
-  const prisma = new PrismaClient();
   
   // Determine repo
   let owner: string;
@@ -351,6 +350,6 @@ export async function fixIssueWorkflow(options: WorkflowOptions): Promise<Workfl
     };
     
   } finally {
-    await prisma.$disconnect();
+    // Shared prisma singleton stays connected for the process lifetime.
   }
 }

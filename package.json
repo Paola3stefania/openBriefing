@@ -50,6 +50,7 @@
     "@octokit/auth-app": "^8.0.1",
     "@prisma/client": "^6.19.1",
     "dotenv": "^17.2.3",
+    "gpt-tokenizer": "^3.4.0",
     "prisma": "^6.19.1",
     "zod": "^3.23.8"
   },

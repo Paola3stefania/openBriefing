@@ -4,7 +4,7 @@
  * Uses git blame for accurate line-by-line ownership - NO API calls needed
  */
 
-import { PrismaClient } from "@prisma/client";
+import { prisma } from "../storage/db/prisma.js";
 import { log } from "../mcp/logger.js";
 import { exec } from "child_process";
 import { promisify } from "util";
@@ -12,7 +12,6 @@ import { readdir, stat } from "fs/promises";
 import { join } from "path";
 
 const execAsync = promisify(exec);
-const prisma = new PrismaClient();
 
 // Directories to skip during analysis
 const SKIP_DIRS = new Set([

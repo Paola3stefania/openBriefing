@@ -18,8 +18,8 @@
  *   MEMORY_MIRROR_DATABASE_URL="postgresql://localhost:5432/openbriefing_local"
  */
 
-import { PrismaClient } from "@prisma/client";
-import { getActiveDatabase } from "./prisma.js";
+import type { PrismaClient } from "@prisma/client";
+import { getActiveDatabase, createSafePrismaClient } from "./prisma.js";
 
 // `undefined` = not yet resolved, `null` = resolved to "no mirror configured".
 let mirrorClient: PrismaClient | null | undefined;
@@ -47,10 +47,7 @@ export function getMirrorPrisma(): PrismaClient | null {
     return null;
   }
 
-  mirrorClient = new PrismaClient({
-    datasourceUrl: url,
-    log: ["error"],
-  });
+  mirrorClient = createSafePrismaClient({ datasourceUrl: url });
   return mirrorClient;
 }
 

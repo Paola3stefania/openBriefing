@@ -153,6 +153,18 @@ async function embedWithOpenAI(
 }
 
 /**
+ * Human-readable description of the active provider, for warnings that get
+ * surfaced to agents/users (e.g. "Ollama (http://localhost:11434, model
+ * mxbai-embed-large)").
+ */
+export function describeEmbeddingProvider(): string {
+  const cfg = getProviderConfig();
+  return cfg.provider === "ollama"
+    ? `Ollama (${cfg.ollamaBaseUrl}, model ${cfg.ollamaModel})`
+    : `OpenAI (model ${cfg.openaiModel})`;
+}
+
+/**
  * Cheap reachability probe. Used by code paths that gracefully degrade
  * when no provider is reachable; not used in the write hot path because
  * `embedTexts` already throws a clear error if the provider is down.
