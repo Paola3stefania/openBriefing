@@ -46,6 +46,7 @@ When doing meaningful work (not just answering questions):
    - `plan_steps`: structured plan with step statuses (see below)
    - `summary`: 1-2 sentence description of what was accomplished
    - **`related_insights`**: free-form debrief content that doesn't fit decisions/openItems but should be retrievable later by meaning (e.g., "spec is the source of truth", "gotcha: X is null when Y is true", principles that emerged). Each entry becomes a session-linked memory and surfaces in future briefings via `relatedInsights[]` automatically — use this instead of calling `save_memory` separately.
+4. The `end_agent_session` response includes `tokenSavings` + `tokenSavingsNote` — **relay it to the user** (e.g. "Session saved — future agents get ~12k tokens of context compressed into a ~1.9k-token briefing (6:1), saving ~10k tokens every session start").
 
 ## Saving memories (ad-hoc)
 
@@ -83,6 +84,14 @@ Sessions can be lost at any time (chat disconnects, crashes, timeouts). Since yo
 2. This is the **only** required save point – do not call `update_agent_session` after every individual action.
 3. `end_agent_session` is still preferred when you know the work is done, but the per-turn save ensures nothing is lost if the chat drops unexpectedly.
 4. **First turn rule**: Even if your first response is just a greeting or briefing summary, call `update_agent_session` with at least a `summary` (e.g., "Session started, briefing reviewed. Waiting for user direction."). An empty session that gets auto-closed is useless to the next agent.
+
+## If a tool response contains `embeddingProviderWarning` (mandatory)
+
+`get_agent_briefing`, `save_memory`, `search_memory`, and `end_agent_session` include an `embeddingProviderWarning` field when the embedding provider (Ollama by default) is unreachable. When you see it:
+
+1. **Tell the user immediately**: ask them to start Ollama (open the Ollama app or run `ollama serve`). Until then, semantic memory search degrades to keyword matching, `relatedInsights[]` comes back empty, and new memories are saved **without** embeddings.
+2. **Keep working** — nothing is lost. Memory/session text is always persisted; only the vectors are missing.
+3. **No manual recovery needed**: once Ollama is back, the server automatically backfills the missing embeddings on the next briefing/memory call (`npm run backfill:memory-embeddings` still exists for manual/bulk runs).
 
 ## What Makes a Good Session Record
 

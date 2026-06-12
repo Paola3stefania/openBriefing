@@ -4,12 +4,10 @@
  * Also supports proactive indexing for all features (similar to documentation workflow)
  */
 
-import { PrismaClient } from "@prisma/client";
+import { prisma } from "./prisma.js";
 import { createHash } from "crypto";
 import { getLLMApiKey } from "../../llm/chat.js";
 import { log } from "../../mcp/logger.js";
-
-const prisma = new PrismaClient();
 
 /**
  * Represents a code section (function, class, interface, etc.)

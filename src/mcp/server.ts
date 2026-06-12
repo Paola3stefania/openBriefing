@@ -1149,9 +1149,15 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         console.error(`[Briefing] Generating agent briefing for project "${projectId}"${scope ? ` (scope: ${scope})` : ""}...`);
 
+        // Self-heal: if the embedding provider is back up, embed any memories
+        // that were saved while it was down (background, debounced).
+        const { scheduleMemoryEmbeddingBackfill } = await import("../storage/db/memory.js");
+        scheduleMemoryEmbeddingBackfill();
+
         const { briefing, sessions } = await distillBriefingWithSessions({ scope, since, project: projectId });
         const lastSession = await getLastSession(projectId);
         const tokenSavings = estimateTokenSavings(briefing, sessions);
+        const embeddingProviderWarning = await getEmbeddingProviderWarning();
 
         const result = {
           briefing,
@@ -1167,6 +1173,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             : null,
           tokenSavings,
           ...(staleClosed > 0 && { staleSessionsClosed: staleClosed }),
+          ...(embeddingProviderWarning && { embeddingProviderWarning }),
         };
 
         console.error(
@@ -1249,6 +1256,48 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         });
         console.error(`[Session] Ended session: ${sessionId}`);
 
+        // Insights are embedded best-effort; if the provider is down they
+        // land as text-only rows, so tell the agent to surface that.
+        const embeddingProviderWarning =
+          relatedInsights && relatedInsights.length > 0
+            ? await getEmbeddingProviderWarning()
+            : undefined;
+
+        // Quantify the payoff of saving this session: distill the briefing
+        // the *next* agent will receive (now including this record) and
+        // estimate the compression. Best-effort — never fails the save.
+        let tokenSavings: import("../briefing/distill.js").TokenSavings | undefined;
+        let tokenSavingsNote: string | undefined;
+        try {
+          const { distillBriefingWithSessions, estimateTokenSavings } = await import(
+            "../briefing/distill.js"
+          );
+          const { briefing, sessions } = await distillBriefingWithSessions({
+            project: session.projectId,
+          });
+          tokenSavings = estimateTokenSavings(briefing, sessions);
+          // A young project can have less recorded history than the briefing's
+          // fixed overhead (structure, memories, activity scaffolding) — that's
+          // not a failure, savings just haven't compounded yet. Say so instead
+          // of reporting a discouraging "~0 tokens saved".
+          tokenSavingsNote =
+            tokenSavings.estimatedSavedTokens > 0
+              ? `Session saved. Future agents get ~${tokenSavings.estimatedSourceTokens} tokens of accumulated ` +
+                `session context distilled into a ~${tokenSavings.briefingTokens}-token briefing ` +
+                `(${tokenSavings.compressionRatio}) — ~${tokenSavings.estimatedSavedTokens} tokens saved at every ` +
+                `session start. Relay this to the user.`
+              : `Session saved. This project has ~${tokenSavings.estimatedSourceTokens} tokens of recorded session ` +
+                `history so far — still less than the ~${tokenSavings.briefingTokens}-token briefing (which carries ` +
+                `fixed structure, memories, and activity context). No net savings yet: the briefing's size stays ` +
+                `roughly flat while history grows, so savings compound after a few more recorded sessions. ` +
+                `Relay this to the user.`;
+        } catch (err) {
+          console.error(
+            "[Session] token-savings estimate failed (save unaffected):",
+            err instanceof Error ? err.message : err,
+          );
+        }
+
         return {
           content: [
             {
@@ -1257,6 +1306,9 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 {
                   ...session,
                   relatedInsightsSaved: relatedInsights?.length ?? 0,
+                  ...(tokenSavings && { tokenSavings }),
+                  ...(tokenSavingsNote && { tokenSavingsNote }),
+                  ...(embeddingProviderWarning && { embeddingProviderWarning }),
                 },
                 null,
                 2,
@@ -1593,7 +1645,8 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // ==================================================================
 
     case "save_memory": {
-      const { saveMemory } = await import("../storage/db/memory.js");
+      const { saveMemory, scheduleMemoryEmbeddingBackfill } = await import("../storage/db/memory.js");
+      scheduleMemoryEmbeddingBackfill();
       const entry = await saveMemory({
         content: String(args?.content ?? ""),
         summary: String(args?.summary ?? ""),
@@ -1601,26 +1654,42 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         source: "conversation",
         projectId: resolveProjectArg(args),
       });
+      // Only probe (and warn) when the embedding actually failed to land.
+      const embeddingProviderWarning =
+        entry.embedded === false ? await getEmbeddingProviderWarning() : undefined;
       return {
         content: [{
           type: "text",
-          text: JSON.stringify({ success: true, memory: entry }, null, 2),
+          text: JSON.stringify({
+            success: true,
+            memory: entry,
+            ...(embeddingProviderWarning && { embeddingProviderWarning }),
+          }, null, 2),
         }],
       };
     }
 
     case "search_memory": {
-      const { searchMemory } = await import("../storage/db/memory.js");
+      const { searchMemory, scheduleMemoryEmbeddingBackfill } = await import("../storage/db/memory.js");
+      scheduleMemoryEmbeddingBackfill();
       const results = await searchMemory({
         query: String(args?.query ?? ""),
         limit: typeof args?.limit === "number" ? args.limit : 5,
         tags: Array.isArray(args?.tags) ? args.tags as string[] : undefined,
         projectId: resolveProjectArg(args),
       });
+      const embeddingProviderWarning = await getEmbeddingProviderWarning();
       return {
         content: [{
           type: "text",
-          text: JSON.stringify({ results, count: results.length }, null, 2),
+          text: JSON.stringify({
+            results,
+            count: results.length,
+            ...(embeddingProviderWarning && {
+              embeddingProviderWarning,
+              searchMode: "keyword-fallback",
+            }),
+          }, null, 2),
         }],
       };
     }
@@ -1671,6 +1740,26 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
     throw new Error(`Command failed: ${errorMessage}`);
   }
 });
+
+/**
+ * Probe the embedding provider and return an agent-facing warning when it's
+ * unreachable. Returned (as `embeddingProviderWarning`) by the briefing and
+ * memory tools so agents can tell the human to start Ollama instead of
+ * silently degrading to keyword search / unembedded writes. `undefined` when
+ * the provider is healthy.
+ */
+async function getEmbeddingProviderWarning(): Promise<string | undefined> {
+  const { isEmbeddingProviderAvailable, describeEmbeddingProvider } = await import(
+    "../embeddings/embed.js"
+  );
+  if (await isEmbeddingProviderAvailable()) return undefined;
+  return (
+    `Embedding provider ${describeEmbeddingProvider()} is unreachable. ` +
+    `Semantic memory search and relatedInsights are degraded, and new memories are saved WITHOUT embeddings. ` +
+    `ACTION: ask the user to start Ollama (open the Ollama app or run \`ollama serve\`). ` +
+    `Once it's running, missing embeddings are backfilled automatically on the next briefing/memory call.`
+  );
+}
 
 /**
  * Parse a Claude Code markdown plan into structured PlanStep objects.

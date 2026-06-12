@@ -174,6 +174,79 @@ async function mirrorMemoryRow(
   }
 }
 
+/**
+ * Embed every `MemoryEntry` that has no `MemoryEntryEmbedding` row (rows that
+ * landed while the embedding provider was down). Idempotent and
+ * failure-tolerant: per-row errors are logged and counted, never thrown.
+ * Shared by the `backfill:memory-embeddings` CLI and the automatic
+ * backfill below.
+ */
+export async function backfillMissingMemoryEmbeddings(options?: {
+  limit?: number;
+  projectId?: string;
+}): Promise<{ found: number; embedded: number; failed: number }> {
+  const orphans = await prisma.memoryEntry.findMany({
+    where: {
+      embedding: null,
+      ...(options?.projectId ? { projectId: options.projectId } : {}),
+    },
+    select: { id: true, content: true },
+    orderBy: { createdAt: "asc" },
+    ...(options?.limit ? { take: options.limit } : {}),
+  });
+
+  let embedded = 0;
+  let failed = 0;
+  for (const m of orphans) {
+    const ok = await embedAndStoreMemoryEmbedding({
+      memoryId: m.id,
+      content: m.content,
+    });
+    if (ok) embedded++;
+    else failed++;
+  }
+  return { found: orphans.length, embedded, failed };
+}
+
+let backfillInFlight = false;
+let lastBackfillAttemptAt = 0;
+const BACKFILL_DEBOUNCE_MS = 10 * 60 * 1000;
+const BACKFILL_BATCH_LIMIT = 200;
+
+/**
+ * Fire-and-forget self-healing: when the embedding provider is reachable,
+ * embed any memories that were saved while it was down. Debounced to once
+ * per 10 minutes per process and never run concurrently, so calling it from
+ * every briefing/memory tool invocation is safe and adds no latency to the
+ * tool response (the work happens in the background).
+ */
+export function scheduleMemoryEmbeddingBackfill(): void {
+  const now = Date.now();
+  if (backfillInFlight || now - lastBackfillAttemptAt < BACKFILL_DEBOUNCE_MS) return;
+  lastBackfillAttemptAt = now;
+  backfillInFlight = true;
+
+  void (async () => {
+    try {
+      const { isEmbeddingProviderAvailable } = await import("../../embeddings/embed.js");
+      if (!(await isEmbeddingProviderAvailable())) return;
+      const res = await backfillMissingMemoryEmbeddings({ limit: BACKFILL_BATCH_LIMIT });
+      if (res.found > 0) {
+        console.error(
+          `[Memory] auto-backfill: embedded ${res.embedded}/${res.found} memories that were missing embeddings${res.failed > 0 ? ` (${res.failed} failed)` : ""}`,
+        );
+      }
+    } catch (err) {
+      console.error(
+        "[Memory] auto-backfill failed:",
+        err instanceof Error ? err.message : err,
+      );
+    } finally {
+      backfillInFlight = false;
+    }
+  })();
+}
+
 export interface MemoryEntryResult {
   id: string;
   projectId: string;
@@ -190,6 +263,12 @@ export interface MemoryEntryResult {
   sessionId: string | null;
   createdAt: string;
   similarity?: number;
+  /**
+   * Whether the embedding row was written (save path only). `false` means
+   * the embedding provider was unreachable at write time — the text is safe,
+   * but the memory is invisible to semantic search until backfilled.
+   */
+  embedded?: boolean;
 }
 
 /**
@@ -229,16 +308,18 @@ export async function saveMemory(options: {
     await mirrorMemoryRow(mirror, entry);
   }
 
-  // Best-effort: don't fail the save if OpenAI is unavailable. The row will
-  // be picked up later by `npm run backfill:memory-embeddings`. When a mirror
-  // is configured the embedding is written to both DBs from a single API call.
-  await embedAndStoreMemoryEmbedding({
+  // Best-effort: don't fail the save if the embedding provider is
+  // unavailable. The row will be picked up by the automatic backfill (or
+  // `npm run backfill:memory-embeddings`) once the provider is back. When a
+  // mirror is configured the embedding is written to both DBs from a single
+  // API call.
+  const embedded = await embedAndStoreMemoryEmbedding({
     memoryId: entry.id,
     content: options.content,
     clients: mirror ? [prisma, mirror] : undefined,
   });
 
-  return mapEntry(entry);
+  return { ...mapEntry(entry), embedded };
 }
 
 /**

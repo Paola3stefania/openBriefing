@@ -5,7 +5,7 @@
  * This enables the investigate_issue tool to find similar past fixes and learn from them.
  */
 
-import { PrismaClient } from "@prisma/client";
+import { prisma } from "../storage/db/prisma.js";
 import { getConfig } from "../config/index.js";
 import { GitHubTokenManager } from "../connectors/github/tokenManager.js";
 import { log, logError } from "../mcp/logger.js";
@@ -627,7 +627,6 @@ export async function seedPRLearnings(options: SeedOptions = {}): Promise<SeedRe
   const startTime = Date.now();
   
   const config = getConfig();
-  const prisma = new PrismaClient();
   let owner: string;
   let repo: string;
 
@@ -812,7 +811,7 @@ export async function seedPRLearnings(options: SeedOptions = {}): Promise<SeedRe
     return result;
     
   } finally {
-    await prisma.$disconnect();
+    // Shared prisma singleton stays connected for the process lifetime.
   }
 }
 
@@ -821,7 +820,6 @@ export async function seedPRLearnings(options: SeedOptions = {}): Promise<SeedRe
  */
 export async function learnFromPR(prNumber: number, force: boolean = false, repoParam?: string): Promise<boolean> {
   const config = getConfig();
-  const prisma = new PrismaClient();
   let owner: string;
   let repo: string;
 
@@ -987,6 +985,6 @@ export async function learnFromPR(prNumber: number, force: boolean = false, repo
     return created;
     
   } finally {
-    await prisma.$disconnect();
+    // Shared prisma singleton stays connected for the process lifetime.
   }
 }

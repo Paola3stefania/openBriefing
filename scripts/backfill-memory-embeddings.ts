@@ -1,13 +1,16 @@
 /**
- * Backfill missing OpenAI embeddings for `MemoryEntry` rows.
+ * Backfill missing embeddings for `MemoryEntry` rows.
  *
  * Why this exists: `saveMemory` (and by extension `end_agent_session({
- * related_insights })`) embeds memories best-effort. If the OpenAI API key
- * is missing/expired/rate-limited at write time, the row still lands but
- * without a `MemoryEntryEmbedding`, which means the briefing's
- * `relatedInsights[]` semantic ranking can't surface it later. This script
- * walks the orphan rows and computes their embeddings — typically run once
- * after fixing a broken `OPENAI_API_KEY`.
+ * related_insights })`) embeds memories best-effort. If the embedding
+ * provider (Ollama by default, or OpenAI) is down/misconfigured at write
+ * time, the row still lands but without a `MemoryEntryEmbedding`, which
+ * means semantic search and the briefing's `relatedInsights[]` can't
+ * surface it later.
+ *
+ * Note: the MCP server now auto-backfills in the background (debounced)
+ * whenever a briefing/memory tool runs and the provider is reachable — this
+ * script remains for manual/bulk runs and dry-run inspection.
  *
  * Usage:
  *   npm run backfill:memory-embeddings
@@ -18,7 +21,7 @@
  * Behavior:
  *   - Idempotent: rows that already have an embedding are skipped (we only
  *     query `MemoryEntry where embedding IS NULL`).
- *   - Defensive: exits 0 with a clear message if `OPENAI_API_KEY` is missing.
+ *   - Defensive: exits 0 with a clear message if the provider is unreachable.
  *   - Sequential, rate-limit friendly: processes one row at a time with a
  *     small delay between calls. For large backlogs adjust `BATCH_DELAY_MS`.
  *   - Failure-tolerant: per-row errors are logged and counted; the script
@@ -28,6 +31,10 @@
 import "dotenv/config";
 import { prisma } from "../src/storage/db/prisma.js";
 import { embedAndStoreMemoryEmbedding } from "../src/storage/db/memory.js";
+import {
+  isEmbeddingProviderAvailable,
+  describeEmbeddingProvider,
+} from "../src/embeddings/embed.js";
 
 const BATCH_DELAY_MS = 50;
 
@@ -51,9 +58,10 @@ function parseArgs(argv: string[]): CliArgs {
 async function main() {
   const args = parseArgs(process.argv);
 
-  if (!process.env.OPENAI_API_KEY) {
+  if (!(await isEmbeddingProviderAvailable())) {
     console.error(
-      "[backfill] OPENAI_API_KEY is not set. Skipping — fix the key and rerun.",
+      `[backfill] Embedding provider ${describeEmbeddingProvider()} is unreachable. ` +
+        `Start it (e.g. open the Ollama app or run \`ollama serve\`) and rerun.`,
     );
     process.exit(0);
   }

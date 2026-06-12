@@ -5,7 +5,9 @@
  * and finds similar historical fixes from the PRLearning table.
  */
 
-import { PrismaClient, Prisma } from "@prisma/client";
+import { Prisma } from "@prisma/client";
+import type { PrismaClient } from "@prisma/client";
+import { prisma } from "../storage/db/prisma.js";
 import { getConfig } from "../config/index.js";
 import { GitHubTokenManager } from "../connectors/github/tokenManager.js";
 import { log, logError } from "../mcp/logger.js";
@@ -659,7 +661,6 @@ export async function investigateIssue(options: InvestigateOptions): Promise<Inv
   const { issueNumber, repo, includeDiscord = true, maxSimilarFixes = 5 } = options;
   
   const config = getConfig();
-  const prisma = new PrismaClient();
   
   // Determine repo
   let owner: string;
@@ -761,6 +762,6 @@ export async function investigateIssue(options: InvestigateOptions): Promise<Inv
     };
     
   } finally {
-    await prisma.$disconnect();
+    // Shared prisma singleton stays connected for the process lifetime.
   }
 }
