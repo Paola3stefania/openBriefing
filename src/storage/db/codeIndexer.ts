@@ -10,6 +10,21 @@ import { getLLMApiKey } from "../../llm/chat.js";
 import { log } from "../../mcp/logger.js";
 
 /**
+ * Deterministic id for a `CodeSearch` row, keyed on the search query + repo
+ * identifier (resolved local path preferred, else GitHub URL). The same query
+ * against the same repo therefore reuses one search across runs.
+ *
+ * Exported so callers (e.g. the `index_codebase` tool handler) can look up the
+ * resulting rows — like counting indexed files — without re-deriving the hash
+ * and drifting out of sync. A prior bug counted `"File: "` substrings in the
+ * context string (which `buildCodeContext` never emits), so it always reported
+ * 0 files even on a fully successful index.
+ */
+export function computeCodeSearchId(searchQuery: string, repoIdentifier: string): string {
+  return createHash("md5").update(`${searchQuery}:${repoIdentifier}`).digest("hex");
+}
+
+/**
  * Represents a code section (function, class, interface, etc.)
  */
 interface CodeSection {
@@ -198,9 +213,7 @@ export async function searchAndIndexCode(
 ): Promise<string> {
   try {
     // Check if we've searched for this query before
-    const searchId = createHash("md5")
-      .update(`${searchQuery}:${repositoryUrl}`)
-      .digest("hex");
+    const searchId = computeCodeSearchId(searchQuery, repositoryUrl);
 
     let codeSearch = await prisma.codeSearch.findUnique({
       where: { id: searchId },
@@ -1169,9 +1182,7 @@ export async function matchTextToFeaturesUsingCode(
     // Define searchId and searchQuery for use when indexing new code
     // Use repoIdentifier consistently (local path preferred over GitHub URL)
     const searchQuery = text;
-    const searchId = createHash("md5")
-      .update(`${searchQuery}:${repoIdentifier}`)
-      .digest("hex");
+    const searchId = computeCodeSearchId(searchQuery, repoIdentifier);
     
     // First, check if code is already indexed for this specific text query
     let codeSearch = await prisma.codeSearch.findUnique({
@@ -1611,7 +1622,7 @@ export async function indexCodeForAllFeatures(
   log(`[CodeIndexer] Code indexed successfully. Now matching all code sections to all features...`);
 
   // Get all indexed code sections
-  const searchId = createHash("md5").update(`${broadQuery}:${repoIdentifier}`).digest("hex");
+  const searchId = computeCodeSearchId(broadQuery, repoIdentifier);
   const codeSearch = await prisma.codeSearch.findUnique({
     where: { id: searchId },
     include: {

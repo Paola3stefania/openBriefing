@@ -784,7 +784,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         );
       }
 
-      const { searchAndIndexCode } = await import("../storage/db/codeIndexer.js");
+      const { searchAndIndexCode, computeCodeSearchId } = await import("../storage/db/codeIndexer.js");
       
       console.error(`[CodeIndexing] Starting manual code indexing for project "${projectId}", query: "${search_query}"`);
       if (localRepoPath) {
@@ -814,7 +814,14 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         );
 
         if (codeContext) {
-          const fileCount = (codeContext.match(/File: /g) || []).length;
+          // Count the real indexed files for this search. The old approach
+          // scanned codeContext for a "File: " prefix that buildCodeContext
+          // never emits (it outputs "<sectionType>: <sectionName>" lines), so
+          // it always reported 0 files even on a successful index. Derive the
+          // searchId the same way the indexer keys CodeSearch rows.
+          const { prisma } = await import("../storage/db/prisma.js");
+          const searchId = computeCodeSearchId(search_query, repoIdentifier);
+          const fileCount = await prisma.codeFile.count({ where: { codeSearchId: searchId } });
           return {
             content: [
               {
