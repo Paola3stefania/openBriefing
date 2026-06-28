@@ -16,6 +16,12 @@ members.csv
 cache/**/*.json
 results/**/*.json
 
+# Ingested data dumps and runtime logs - never commit.
+# This repo ships OpenBriefing tooling only; it must not carry Discord message
+# dumps or local server logs (privacy + repo size).
+discord/
+logs/
+
 # Local database backups (pg_dump output) - never commit
 backups/
 
