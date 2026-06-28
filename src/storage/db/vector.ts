@@ -11,16 +11,19 @@
  * 20260603100000_embeddings_ollama_1024). halfvec is pgvector's 16-bit
  * half-precision float vector type — half the storage of `vector`, and the
  * only one HNSW can index above 2000 dimensions. 1024 is the native output
- * dimension of `mxbai-embed-large` (the default Ollama model) and several
- * other strong retrieval models, so swapping models stays cheap.
+ * dimension of `qwen3-embedding:0.6b` (the default Ollama model) and several
+ * other strong retrieval models (mxbai-embed-large, bge-m3), so swapping
+ * models stays cheap.
  */
 
 /**
- * Embedding dimension. mxbai-embed-large (default Ollama model) emits 1024
+ * Embedding dimension. qwen3-embedding:0.6b (default Ollama model) emits 1024
  * dims. If you switch to a model with a different dimensionality, change
  * EMBEDDING_DIM here, write a new halfvec(N) migration, and run
  * `npm run reembed:all` — vectors from a different model live in a different
- * vector space and can't be mixed.
+ * vector space and can't be mixed. (Switching between two 1024-dim models —
+ * e.g. mxbai-embed-large ↔ qwen3-embedding:0.6b ↔ bge-m3 — still needs a
+ * reembed:all, but no migration since the column dimension is unchanged.)
  */
 export const EMBEDDING_DIM = 1024;
 

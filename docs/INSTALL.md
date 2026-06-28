@@ -36,8 +36,8 @@ brew services start postgresql@17
 # Ollama + the two default models
 brew install --cask ollama-app
 open -a Ollama
-ollama pull mxbai-embed-large   # embeddings, 1024-dim (~670 MB)
-ollama pull qwen2.5:14b         # chat / classification / extraction
+ollama pull qwen3-embedding:0.6b   # embeddings, 1024-dim, 32K ctx (~640 MB)
+ollama pull qwen3:14b              # chat / classification / extraction
 ```
 
 > Keep Ollama running (it lives in the menu bar). If it isn't running, every
@@ -81,8 +81,8 @@ OFFLINE_DB=true
 EMBEDDING_PROVIDER=ollama
 LLM_PROVIDER=ollama
 OLLAMA_BASE_URL=http://localhost:11434
-OLLAMA_EMBEDDING_MODEL=mxbai-embed-large
-OLLAMA_CHAT_MODEL=qwen2.5:14b
+OLLAMA_EMBEDDING_MODEL=qwen3-embedding:0.6b
+OLLAMA_CHAT_MODEL=qwen3:14b
 ```
 
 Find `YOUR_MACOS_USER` with `whoami`. (Homebrew Postgres creates a superuser role

@@ -3,7 +3,7 @@
  *
  * Embedding generation runs through one of two providers:
  *  - "ollama" (default): local Ollama daemon, no API key, no per-token cost.
- *    Model defaults to `mxbai-embed-large` (1024 dim, retrieval-tuned).
+ *    Model defaults to `qwen3-embedding:0.6b` (1024 dim, retrieval-tuned).
  *  - "openai": OpenAI's embeddings API. Requires OPENAI_API_KEY.
  *
  * Whichever provider is selected, the rest of the system reads embeddings
@@ -31,7 +31,7 @@ export function getEmbeddingProvider(): "ollama" | "openai" {
  */
 export function getEmbeddingModel(): string {
   if (getEmbeddingProvider() === "ollama") {
-    return process.env.OLLAMA_EMBEDDING_MODEL ?? "mxbai-embed-large";
+    return process.env.OLLAMA_EMBEDDING_MODEL ?? "qwen3-embedding:0.6b";
   }
   const model = process.env.OPENAI_EMBEDDING_MODEL ?? "text-embedding-3-small";
   const valid = [

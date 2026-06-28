@@ -55,8 +55,9 @@ model FeatureEmbedding {
 // Lazy code indexing - only index code when searched/needed
 model CodeSearch {
   id            String   @id // Hash of search query + repo
+  projectId     String   @default("default") @map("project_id") // Stable project identifier (owner/repo or folder name), mirrors agent_sessions/memories
   searchQuery   String   @map("search_query") // e.g., "SSO authentication"
-  repositoryUrl String   @map("repository_url") // GitHub repo URL
+  repositoryUrl String   @map("repository_url") // GitHub repo URL or local path
   searchType    String   @map("search_type") // 'semantic', 'keyword', 'exact'
   createdAt     DateTime @default(now()) @map("created_at")
   updatedAt     DateTime @updatedAt @map("updated_at")
@@ -64,6 +65,7 @@ model CodeSearch {
   codeFiles CodeFile[]
 
   @@unique([searchQuery, repositoryUrl])
+  @@index([projectId])
   @@index([repositoryUrl])
   @@index([createdAt(sort: Desc)])
   @@map("code_searches")

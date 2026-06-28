@@ -2,9 +2,10 @@
  * Provider-agnostic embedding generation. The single entry point all
  * higher-level code uses to turn text into vectors.
  *
- * Default: local Ollama. No per-token cost, no rate limits, no API key
- * required for the agent to keep its persistent code/issue/memory caches
- * warm. Setting `EMBEDDING_PROVIDER=openai` falls back to OpenAI's API.
+ * Default: local Ollama with `qwen3-embedding:0.6b` (1024-dim native, 32K
+ * context, multilingual + code retrieval). No per-token cost, no rate limits,
+ * no API key required for the agent to keep its persistent code/issue/memory
+ * caches warm. Setting `EMBEDDING_PROVIDER=openai` falls back to OpenAI's API.
  *
  * Whichever provider is selected, the rest of the system sees the same
  * `embedTexts(string[]) → Promise<number[][]>` shape. The dimension is fixed
@@ -31,7 +32,7 @@ function getProviderConfig(opts?: { apiKey?: string }): ProviderConfig {
   return {
     provider: v === "openai" ? "openai" : "ollama",
     ollamaBaseUrl: process.env.OLLAMA_BASE_URL ?? "http://localhost:11434",
-    ollamaModel: process.env.OLLAMA_EMBEDDING_MODEL ?? "mxbai-embed-large",
+    ollamaModel: process.env.OLLAMA_EMBEDDING_MODEL ?? "qwen3-embedding:0.6b",
     openaiModel: process.env.OPENAI_EMBEDDING_MODEL ?? "text-embedding-3-small",
     openaiApiKey: opts?.apiKey ?? process.env.OPENAI_API_KEY,
   };
@@ -155,7 +156,7 @@ async function embedWithOpenAI(
 /**
  * Human-readable description of the active provider, for warnings that get
  * surfaced to agents/users (e.g. "Ollama (http://localhost:11434, model
- * mxbai-embed-large)").
+ * qwen3-embedding:0.6b)").
  */
 export function describeEmbeddingProvider(): string {
   const cfg = getProviderConfig();

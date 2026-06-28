@@ -139,7 +139,7 @@ const mcpServer = new McpServer(
 const tools: Tool[] = [
   {
     name: "index_codebase",
-    description: "Manually search and index code from the repository for a specific query. This is useful for pre-indexing code or re-indexing after code changes. The indexed code will be available for feature matching. Will use LOCAL_REPO_PATH if configured (faster), otherwise falls back to GITHUB_REPO_URL. Requires either LOCAL_REPO_PATH or GITHUB_REPO_URL to be configured.",
+    description: "Manually search and index code from a project's repository for a specific query. Useful for pre-indexing or re-indexing after code changes. Indexed code is tagged with the resolved project id (owner/repo or folder name) so multiple projects coexist. Repo path precedence: repo_path arg → PROJECT_REPOS[project] → LOCAL_REPO_PATH → GITHUB_REPO_URL. IMPORTANT: pass 'project' (detect it from the workspace git remote owner/repo or folder name) and, for a monorepo or non-default project, 'repo_path'.",
     inputSchema: {
       type: "object",
       properties: {
@@ -147,6 +147,14 @@ const tools: Tool[] = [
           type: "string",
           description: "Search query to find relevant code (e.g., 'SSO authentication', 'session management'). The code matching this query will be indexed.",
           default: "",
+        },
+        project: {
+          type: "string",
+          description: "Project identifier — use 'owner/repo' from the workspace git remote origin, or the workspace folder name. The indexed code is scoped to this id. Defaults to the server's auto-detected project (which is usually NOT the agent's workspace), so always pass this.",
+        },
+        repo_path: {
+          type: "string",
+          description: "Optional absolute path to the project's local repository to index. Overrides PROJECT_REPOS and LOCAL_REPO_PATH. Required for projects the server isn't configured for, and for monorepos point it at the repo root.",
         },
         force: {
           type: "boolean",
@@ -167,6 +175,10 @@ const tools: Tool[] = [
           type: "boolean",
           description: "Force re-indexing even if code is already indexed for features. Useful after code changes.",
           default: false,
+        },
+        project: {
+          type: "string",
+          description: "Project identifier — 'owner/repo' from the workspace git remote, or the folder name. Indexed code + feature mappings are scoped to this id. Defaults to the server's auto-detected project, so pass it explicitly.",
         },
         local_repo_path: {
           type: "string",
@@ -744,8 +756,10 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
   try {
     switch (name) {
     case "index_codebase": {
-      const { search_query, force = false, chunk_size } = args as {
+      const { search_query, project, repo_path, force = false, chunk_size } = args as {
         search_query: string;
+        project?: string;
+        repo_path?: string;
         force?: boolean;
         chunk_size?: number;
       };
@@ -755,25 +769,37 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       const { getConfig } = await import("../config/index.js");
+      const { detectProjectId, resolveRepoPathForProject } = await import("../config/project.js");
       const config = getConfig();
       const repositoryUrl = config.pmIntegration?.github_repo_url;
-      const localRepoPath = config.pmIntegration?.local_repo_path;
+
+      // Resolve project id (arg → auto-detect) and the local repo path to
+      // index for it (repo_path arg → PROJECT_REPOS[project] → LOCAL_REPO_PATH).
+      const projectId = project?.trim() || detectProjectId();
+      const localRepoPath = resolveRepoPathForProject(projectId, repo_path);
 
       if (!repositoryUrl && !localRepoPath) {
-        throw new Error("Either GITHUB_REPO_URL or LOCAL_REPO_PATH must be configured to index codebase");
+        throw new Error(
+          "No repository configured for this project. Pass 'repo_path', set PROJECT_REPOS[project], LOCAL_REPO_PATH, or GITHUB_REPO_URL.",
+        );
       }
 
       const { searchAndIndexCode } = await import("../storage/db/codeIndexer.js");
       
-      console.error(`[CodeIndexing] Starting manual code indexing for query: "${search_query}"`);
+      console.error(`[CodeIndexing] Starting manual code indexing for project "${projectId}", query: "${search_query}"`);
+      if (localRepoPath) {
+        console.error(`[CodeIndexing] Local repo path: ${localRepoPath}`);
+      }
       if (force) {
         console.error(`[CodeIndexing] Force mode enabled - will re-index even if already indexed`);
       }
       
       try {
-        // Search and index code (this will use cache if not forcing)
-        // Use repositoryUrl if available, otherwise use localRepoPath as fallback identifier
-        const repoIdentifier = repositoryUrl || localRepoPath || "";
+        // Search and index code (this will use cache if not forcing).
+        // Prefer the resolved local path as the stable repo identifier so a
+        // project's rows are keyed consistently across runs; fall back to the
+        // GitHub URL when no local path is configured.
+        const repoIdentifier = localRepoPath || repositoryUrl || "";
         const chunkSize = chunk_size ?? 100;
         const codeContext = await searchAndIndexCode(
           search_query,
@@ -781,7 +807,10 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           "", // No specific feature ID for manual indexing
           search_query,
           force,
-          chunkSize
+          chunkSize,
+          null, // maxFiles: process all
+          projectId,
+          localRepoPath,
         );
 
         if (codeContext) {
@@ -792,7 +821,8 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 type: "text",
                 text: JSON.stringify({
                   success: true,
-                  message: `Code indexed successfully for query "${search_query}". Found ${fileCount} file(s).`,
+                  message: `Code indexed successfully for project "${projectId}", query "${search_query}". Found ${fileCount} file(s).`,
+                  project: projectId,
                   code_context_length: codeContext.length,
                   file_count: fileCount,
                 }, null, 2),
@@ -806,7 +836,8 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 type: "text",
                 text: JSON.stringify({
                   success: false,
-                  message: `No code found for query "${search_query}"`,
+                  message: `No code found for project "${projectId}", query "${search_query}". Checked repo: ${localRepoPath || repositoryUrl}.`,
+                  project: projectId,
                 }, null, 2),
               },
             ],
@@ -818,7 +849,8 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     case "index_code_for_features": {
-      const { force = false, local_repo_path, github_repo_url, chunk_size, max_files } = args as {
+      const { project, force = false, local_repo_path, github_repo_url, chunk_size, max_files } = args as {
+        project?: string;
         force?: boolean;
         local_repo_path?: string;
         github_repo_url?: string;
@@ -827,12 +859,13 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       };
 
       const { getConfig } = await import("../config/index.js");
+      const { detectProjectId, resolveRepoPathForProject } = await import("../config/project.js");
       const config = getConfig();
       
-      // Get configured values (parameter > config)
-      // No auto-detection - must be explicitly configured
+      // Get configured values (parameter > PROJECT_REPOS[project] > config)
+      const projectId = project?.trim() || detectProjectId();
       const repositoryUrl = github_repo_url || config.pmIntegration?.github_repo_url;
-      const localRepoPath = local_repo_path || config.pmIntegration?.local_repo_path;
+      const localRepoPath = resolveRepoPathForProject(projectId, local_repo_path);
 
       if (!repositoryUrl && !localRepoPath) {
         throw new Error("Either GITHUB_REPO_URL or LOCAL_REPO_PATH must be configured to index code for features. You can provide them as parameters or set them in the MCP config (.env file).");
@@ -863,7 +896,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       try {
         const chunkSize = chunk_size ?? 100;
         const maxFiles = max_files ?? null; // null = process entire repository in chunks
-        const result = await indexCodeForAllFeatures(repositoryUrl || undefined, force, undefined, localRepoPath, chunkSize, maxFiles);
+        const result = await indexCodeForAllFeatures(repositoryUrl || undefined, force, undefined, localRepoPath, chunkSize, maxFiles, projectId);
         
         // Get diagnostic info (use the same variables we already have)
         const githubRepoUrl = repositoryUrl;

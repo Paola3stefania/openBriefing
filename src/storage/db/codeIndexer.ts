@@ -192,7 +192,9 @@ export async function searchAndIndexCode(
   featureName: string,
   force: boolean = false,
   chunkSize: number = 100,
-  maxFiles: number | null = null // null = process all files
+  maxFiles: number | null = null, // null = process all files
+  projectId: string = "default",
+  localRepoPathOverride?: string // per-project repo path (overrides global config)
 ): Promise<string> {
   try {
     // Check if we've searched for this query before
@@ -239,13 +241,17 @@ export async function searchAndIndexCode(
     const isGitHubUrl = parseGitHubRepoUrl(repositoryUrl) !== null;
     const isLocalPath = !isGitHubUrl && repositoryUrl && (existsSync(repositoryUrl) || repositoryUrl.startsWith("/") || repositoryUrl.startsWith("./") || repositoryUrl.startsWith("../"));
     
-    // ALWAYS prefer local repository from config first, then check if repositoryUrl is a local path
+    // Repo-path precedence: explicit per-project override → repositoryUrl when
+    // it is itself a local path → global config local_repo_path.
     const { getConfig } = await import("../../config/index.js");
     const config = getConfig();
-    let localRepoPath: string | undefined = config.pmIntegration?.local_repo_path;
-    
-    // If repositoryUrl is a local path, use it (overrides config if provided as parameter)
-    if (isLocalPath) {
+    let localRepoPath: string | undefined =
+      localRepoPathOverride?.trim() || config.pmIntegration?.local_repo_path;
+
+    if (localRepoPathOverride?.trim()) {
+      log(`[CodeIndexer] Using per-project local repository override: ${localRepoPath}`);
+    } else if (isLocalPath) {
+      // If repositoryUrl is a local path, use it (overrides config if provided as parameter)
       localRepoPath = repositoryUrl;
       log(`[CodeIndexer] repositoryUrl is a local path, using it directly: ${localRepoPath}`);
     } else if (localRepoPath) {
@@ -290,7 +296,8 @@ export async function searchAndIndexCode(
       searchId,
       searchQuery,
       repositoryUrl,
-      chunkSize // Use the chunkSize parameter
+      chunkSize, // Use the chunkSize parameter
+      projectId
     );
 
     // Map to feature (if featureId provided)
@@ -316,18 +323,21 @@ async function parseAndIndexCode(
   searchId: string,
   searchQuery: string,
   repositoryUrl: string,
-  chunkSize: number = 100
+  chunkSize: number = 100,
+  projectId: string = "default"
 ): Promise<CodeFile[]> {
   // Create or get code search
   const codeSearch = await prisma.codeSearch.upsert({
     where: { id: searchId },
     create: {
       id: searchId,
+      projectId,
       searchQuery,
       repositoryUrl,
       searchType: "semantic",
     },
     update: {
+      projectId,
       updatedAt: new Date(),
     },
   });
@@ -1473,7 +1483,8 @@ export async function indexCodeForAllFeatures(
   onProgress?: (processed: number, total: number) => void,
   localRepoPathOverride?: string,
   chunkSize: number = 100,
-  maxFiles: number | null = null // null = process all files in chunks
+  maxFiles: number | null = null, // null = process all files in chunks
+  projectId: string = "default"
 ): Promise<{ indexed: number; matched: number; total: number }> {
   const { getConfig } = await import("../../config/index.js");
   const config = getConfig();
@@ -1582,7 +1593,9 @@ export async function indexCodeForAllFeatures(
     "all_features",
     force,
     chunkSize,
-    maxFiles
+    maxFiles,
+    projectId,
+    localRepoPath
   );
 
   if (!codeContext) {

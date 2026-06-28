@@ -174,7 +174,14 @@ export async function fetchLocalCodeContext(
               filePath,
               relativePath,
               similarity: combinedSimilarity,
-              content: keyInfo
+              // Carry the FULL file content (not the extractKeyCodeInfo summary):
+              // downstream parseAndIndexCode runs parseCodeIntoSections on this,
+              // and the regexes only match real `function`/`class`/`interface`
+              // declarations. Storing the summary here yielded 0 sections (and
+              // thus an empty buildCodeContext → false "No code found"). keyInfo
+              // above is still the inclusion gate; ranking already used the full
+              // content's embedding.
+              content,
             });
           }
         } catch (error) {
@@ -403,15 +410,27 @@ async function findAllCodeFiles(
             continue;
           }
 
-          // Recurse into source directories and any directory under packages/
+          // Recurse into source directories, monorepo workspace containers
+          // (packages/*, apps/*), and anything nested beneath them. The
+          // workspace-container case is what lets a monorepo like
+          // `apps/idp/{lib,app,components}` be reached: `apps` and `apps/idp`
+          // are not themselves source dirs, so without this the walker would
+          // dead-end at `apps/` and find zero files.
           const pathLower = entryPath.toLowerCase();
+          const isWorkspaceContainer = entryPath === "packages" ||
+                                       entryPath === "apps" ||
+                                       pathLower.startsWith("packages/") ||
+                                       pathLower.startsWith("apps/");
           const isRootSourceDir = entryPath === "src" ||
                                   entryPath === "lib" ||
                                   entryPath === "app" ||
-                                  entryPath.startsWith("packages/");
+                                  entryPath === "components";
           const isNestedSourceDir = (pathLower.includes("/src/") || 
                                      pathLower.includes("/lib/") || 
-                                     pathLower.includes("/packages/")) &&
+                                     pathLower.includes("/app/") || 
+                                     pathLower.includes("/components/") || 
+                                     pathLower.includes("/packages/") || 
+                                     pathLower.includes("/apps/")) &&
                                      !pathLower.startsWith("demo/") && // Exclude demo/src, demo/lib, etc.
                                      !pathLower.includes("/test/") && // Exclude test directories
                                      !pathLower.includes("/tests/") && // Exclude tests directories
@@ -419,7 +438,7 @@ async function findAllCodeFiles(
                                      !pathLower.includes("/__tests__/"); // Exclude __tests__ directories
 
           // Also include root level (for config files, etc.)
-          if (isRootSourceDir || isNestedSourceDir || currentDir === "") {
+          if (isWorkspaceContainer || isRootSourceDir || isNestedSourceDir || currentDir === "") {
             // Add to queue for iterative processing (avoids stack overflow)
             dirQueue.push(entryPath);
           }
@@ -452,11 +471,15 @@ async function findAllCodeFiles(
               continue; // Skip test files
             }
             
-            // Include all code files in source directories and packages (excluding test directories)
+            // Include all code files in source directories, packages, and
+            // monorepo workspaces (apps/*) — excluding test/demo directories.
             const pathLower = entryPath.toLowerCase();
             const isInSourceDir = (pathLower.includes("/src/") || 
                                    pathLower.includes("/lib/") || 
-                                   pathLower.includes("/packages/")) &&
+                                   pathLower.includes("/app/") || 
+                                   pathLower.includes("/components/") || 
+                                   pathLower.includes("/packages/") || 
+                                   pathLower.includes("/apps/")) &&
                                    !pathLower.startsWith("demo/") && // Exclude demo files
                                    !pathLower.includes("/test/") && // Exclude test directories
                                    !pathLower.includes("/tests/") && // Exclude tests directories
@@ -466,7 +489,10 @@ async function findAllCodeFiles(
             // Also include root-level source directories and config files
             const isRootSourceFile = entryPath.startsWith("src/") ||
                                       entryPath.startsWith("lib/") ||
+                                      entryPath.startsWith("app/") ||
+                                      entryPath.startsWith("components/") ||
                                       entryPath.startsWith("packages/") ||
+                                      entryPath.startsWith("apps/") ||
                                       // Include config files at root or in packages (vitest.config.ts, tsconfig.json, etc.)
                                       (currentDir === "" && (entry.name.includes("config") || entry.name.includes("setup")));
             

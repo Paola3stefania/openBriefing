@@ -42,8 +42,8 @@ function getLLMProviderConfig(): LLMProviderConfig {
   return {
     provider: raw === "openai" ? "openai" : "ollama",
     ollamaBaseUrl: process.env.OLLAMA_BASE_URL ?? "http://localhost:11434",
-    ollamaModel: process.env.OLLAMA_CHAT_MODEL ?? "llama3.1",
-    openaiModel: process.env.OPENAI_CHAT_MODEL ?? "gpt-4o-mini",
+    ollamaModel: process.env.OLLAMA_CHAT_MODEL ?? "qwen3:8b",
+    openaiModel: process.env.OPENAI_CHAT_MODEL ?? "gpt-5.4-mini",
     openaiApiKey: process.env.OPENAI_API_KEY,
   };
 }
@@ -99,8 +99,14 @@ export async function llmChat(messages: ChatMessage[], opts: LLMChatOptions = {}
   const body: Record<string, unknown> = {
     model,
     messages,
-    temperature: opts.temperature ?? 0.3,
   };
+  // OpenAI's GPT-5 family (reasoning models) only accepts the default
+  // temperature over Chat Completions and 400s on any explicit value, so omit
+  // it for those. Ollama and older OpenAI models honor it normally.
+  const isGpt5 = cfg.provider === "openai" && /^gpt-5/.test(model);
+  if (!isGpt5) {
+    body.temperature = opts.temperature ?? 0.3;
+  }
   if (opts.jsonMode) body.response_format = { type: "json_object" };
   if (opts.maxTokens) body.max_tokens = opts.maxTokens;
 

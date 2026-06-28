@@ -84,3 +84,37 @@ export function setProjectId(id: string): void {
 export function resetProjectId(): void {
   cachedProjectId = undefined;
 }
+
+/**
+ * Per-project local repository paths, parsed from the optional `PROJECT_REPOS`
+ * env var (JSON map of project id → absolute repo path). Mirrors the
+ * `PROJECT_DISCORD_GUILDS` pattern. Lets one OpenBriefing server index code for
+ * several projects (e.g. `better-auth/better-auth` AND `better-auth/idp`)
+ * without the single global `LOCAL_REPO_PATH` having to be re-pointed.
+ *
+ * Example:
+ *   PROJECT_REPOS='{"better-auth/idp":"/Users/me/Better Auth/idp"}'
+ */
+export function getProjectRepos(): Record<string, string> {
+  const raw = process.env.PROJECT_REPOS;
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? (parsed as Record<string, string>) : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Resolve the local repo path to index for a project.
+ * Precedence: explicit override (tool arg) → PROJECT_REPOS[project] →
+ * global LOCAL_REPO_PATH. Returns undefined if none apply (caller then falls
+ * back to the GitHub API via GITHUB_REPO_URL).
+ */
+export function resolveRepoPathForProject(projectId: string, override?: string): string | undefined {
+  if (override && override.trim().length > 0) return override.trim();
+  const map = getProjectRepos();
+  if (map[projectId]) return map[projectId];
+  return process.env.LOCAL_REPO_PATH?.trim() || undefined;
+}

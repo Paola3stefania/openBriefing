@@ -24,7 +24,7 @@ You need an embedding provider for memory search and the code index. Ollama (loc
 |----------|-------------|---------|
 | `EMBEDDING_PROVIDER` | Embedding backend: `ollama` (local, default) or `openai` | `ollama` |
 | `OLLAMA_BASE_URL` | Ollama server URL | `http://localhost:11434` |
-| `OLLAMA_EMBEDDING_MODEL` | Ollama embedding model — must emit 1024-dim vectors | `mxbai-embed-large` |
+| `OLLAMA_EMBEDDING_MODEL` | Ollama embedding model — must emit 1024-dim vectors | `qwen3-embedding:0.6b` |
 | `EMBEDDING_DIM` | Embedding dimension; must match the model | `1024` |
 | `OPENAI_API_KEY` | Required when `EMBEDDING_PROVIDER=openai` | None |
 | `OPENAI_EMBEDDING_MODEL` | OpenAI embedding model (must emit 1024 dims) | `text-embedding-3-small` |
@@ -53,28 +53,30 @@ You need an embedding provider for memory search and the code index. Ollama (loc
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `LLM_PROVIDER` | Chat backend: `ollama` or `openai` (falls back to `EMBEDDING_PROVIDER`) | `ollama` |
-| `OLLAMA_CHAT_MODEL` | Ollama chat model | `qwen2.5:14b` |
-| `OPENAI_CHAT_MODEL` | OpenAI chat model (when `LLM_PROVIDER=openai`) | `gpt-4o-mini` |
+| `OLLAMA_CHAT_MODEL` | Ollama chat model | `qwen3:14b` (code default `qwen3:8b`) |
+| `OPENAI_CHAT_MODEL` | OpenAI chat model (when `LLM_PROVIDER=openai`) | `gpt-5.4-mini` |
 
 > **Default stack is fully local (Ollama).** Set it up once:
 >
 > ```bash
 > brew install --cask ollama-app   # the plain `ollama` formula ships without llama-server
 > open -a Ollama                    # starts the server on :11434
-> ollama pull mxbai-embed-large     # embeddings (1024-dim)
-> ollama pull qwen2.5:14b           # chat / extraction
+> ollama pull qwen3-embedding:0.6b  # embeddings (1024-dim, 32K ctx)
+> ollama pull qwen3:14b             # chat / extraction
 > ```
 >
 > To use OpenAI instead, set `EMBEDDING_PROVIDER=openai` and/or `LLM_PROVIDER=openai`
 > (plus `OPENAI_API_KEY`). For embeddings, pick an `OPENAI_EMBEDDING_MODEL` that
 > emits 1024 dims (or write a new `halfvec(N)` migration + run `npm run reembed:all`).
 
-> **Future embedding upgrade (tracked).** We deliberately stay on
-> `mxbai-embed-large` (1024-dim) for now because it's a no-migration default. When
-> we want a measurable retrieval-quality jump, switch to **Qwen3-Embedding** (e.g.
-> `Qwen3-Embedding-4B`, 2560-dim). It is **not** a drop-in: it requires a new
-> `halfvec(2560)` migration on every embedding column, a full `npm run reembed:all`,
-> and a local re-seed.
+> **Embedding model.** The default is `qwen3-embedding:0.6b` (1024-dim native,
+> 32K context, multilingual + code retrieval) — a no-migration fit for the
+> `halfvec(1024)` columns. Other 1024-dim models (`mxbai-embed-large`, `bge-m3`)
+> swap in the same way: run `npm run reembed:all` (vectors aren't comparable
+> across models) but no migration. For a further retrieval-quality jump, the
+> higher-dim variants `qwen3-embedding:4b` (2560-dim) or `:8b` (4096-dim) are
+> **not** drop-in — each needs a new `halfvec(N)` migration on every embedding
+> column, a full `npm run reembed:all`, and a local re-seed.
 
 ### Sessions
 

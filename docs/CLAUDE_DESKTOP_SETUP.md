@@ -45,8 +45,8 @@ You only do this part **once**.
 
    ```bash
    open -a Ollama
-   ollama pull mxbai-embed-large
-   ollama pull qwen2.5:14b
+   ollama pull qwen3-embedding:0.6b
+   ollama pull qwen3:14b
    ```
 
    > Leave Ollama running. It lives in your Mac's top menu bar. If your computer

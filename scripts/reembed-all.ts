@@ -1,10 +1,12 @@
 /**
  * Re-embed every persisted source row using the active embedding provider.
  *
- * Run this after a model dimension change (e.g. the halfvec(3072 → 1024)
- * migration) or when switching providers (Ollama ↔ OpenAI). Each batch
- * round-trips to the provider once; with Ollama running locally on
- * `mxbai-embed-large` and a modest GPU you'll see ~50-200 embeddings/sec.
+ * Run this after a model change (even between two 1024-dim Ollama models like
+ * mxbai-embed-large → qwen3-embedding:0.6b, since vectors aren't comparable
+ * across models), a dimension change, or when switching providers
+ * (Ollama ↔ OpenAI). Each batch round-trips to the provider once; with Ollama
+ * running locally on `qwen3-embedding:0.6b` and a modest GPU you'll see
+ * ~50-200 embeddings/sec.
  *
  * Usage:
  *   npm run reembed:all                                      # everything

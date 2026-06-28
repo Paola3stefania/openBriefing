@@ -13,7 +13,7 @@ PostgreSQL is mandatory — the server throws on startup if it's unset.
 - `STORAGE_BACKEND` — defaults to `database`. `json` is honored **only** under `NODE_ENV=test`.
 
 ### Embeddings (for memory search + code index)
-- Default provider is **Ollama** (local): `OLLAMA_BASE_URL` (default `http://localhost:11434`), `OLLAMA_EMBEDDING_MODEL` (e.g. `mxbai-embed-large`).
+- Default provider is **Ollama** (local): `OLLAMA_BASE_URL` (default `http://localhost:11434`), `OLLAMA_EMBEDDING_MODEL` (e.g. `qwen3-embedding:0.6b`).
 - To use OpenAI instead: `EMBEDDING_PROVIDER=openai` + `OPENAI_API_KEY` (+ optional `OPENAI_EMBEDDING_MODEL`).
 - `EMBEDDING_DIM` must match the model's output dimension.
 
@@ -39,7 +39,7 @@ DATABASE_URL=postgresql://user:password@localhost:5432/briefings
 
 # Embeddings (Ollama by default)
 OLLAMA_BASE_URL=http://localhost:11434
-OLLAMA_EMBEDDING_MODEL=mxbai-embed-large
+OLLAMA_EMBEDDING_MODEL=qwen3-embedding:0.6b
 EMBEDDING_DIM=1024
 # To use OpenAI instead:
 # EMBEDDING_PROVIDER=openai
