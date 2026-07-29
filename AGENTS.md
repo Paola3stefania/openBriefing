@@ -69,6 +69,8 @@ npm run db:setup-local            # create local Postgres DB + apply schema
 npm run db:migrate                # prisma migrate deploy
 npm run db:seed-local-from-neon   # clone cloud data into local
 npm run db:sync                   # non-destructive row-level merge (db-merge.sh)
+npm run db:verify-replay          # replay the whole chain into a throwaway DB
+npm run db:sync-checksums         # re-point _prisma_migrations at edited files
 ```
 
 Preview the briefing in the terminal:
@@ -107,6 +109,7 @@ Your Cursor config may name the server `user-openbriefing`, `openbriefing`, or a
 - After changing briefing or distillation logic, add or extend tests in `src/**/*.test.ts` when behavior is testable.
 - If you change **`skills/openbriefing/SKILL.md`**, run **`npm run sync:skill`** so **`.cursor/skills/openbriefing/SKILL.md`** stays identical (distributable source of truth is `skills/`; `setup.ts` copies from there).
 - Keep channel/ingest/PM-export features out of this repo — they belong to [unMute](https://github.com/Paola3stefania/unMute).
+- **A new migration must sort after every migration that already exists** — never backdate a timestamp, even when the change logically "belongs" earlier. See [Migration ordering is load-bearing](#migration-ordering-is-load-bearing). Run `npm run db:verify-replay` after touching `prisma/migrations/`.
 
 ## Mental model (one picture)
 
@@ -133,6 +136,18 @@ There is no local-JSON fallback: if `DATABASE_URL`/`DB_*` is unset the server th
 ### Agent memory uses `pgvector`
 
 `memory_entry_embeddings.embedding` is a real `vector`/`halfvec` column with an HNSW cosine index (migration `20260602000000_memory_pgvector`). Prisma maps it as `Unsupported`, so it's read/written via raw SQL only — see `src/storage/db/vector.ts`, the raw upsert in `src/storage/db/memory.ts`, and the indexed `<=>` search in `searchMemory` + `distillRelatedInsights`. Apply with `npm run db:migrate` (deploy); do **not** `migrate dev` against it. The other embedding tables (code/features) are still JSONB + JS cosine.
+
+### Migration ordering is load-bearing
+
+Prisma applies migrations in lexicographic order of their directory names, which for this repo means timestamp order. **A new migration must sort after every migration that already exists**, even when the change it makes logically belongs earlier in the story.
+
+We learned this the expensive way. `20260603000000_drop_unmute_domain_tables` was authored *after* `20260603040000_all_embeddings_halfvec` and `20260603100000_embeddings_ollama_1024` were already written and applied to Neon, but was given an earlier timestamp. On the two databases that already had the later migrations recorded, nothing changed and nothing complained. On a fresh database the drop ran first, so the two later migrations tried to `ALTER TABLE issue_embeddings` after it had been dropped and the chain died at `42P01 relation does not exist`. Nobody with a working database could see it.
+
+The statements were dead on every reachable path, so they were deleted rather than wrapped in existence guards — a guard would preserve the impression that those tables might come back, and nothing in the schema can create them anymore.
+
+`npm run db:verify-replay` (`scripts/verify-migration-replay.sh`) is the check for this class of bug: it creates a throwaway database, applies the full chain from empty, and asserts the resulting embedding columns and HNSW indexes. The `Migrations` GitHub Actions workflow runs it against `pgvector/pgvector:pg17` on every push and PR. Run it locally after any change under `prisma/migrations/`; tests against an already-migrated database cannot catch this.
+
+**If you edit a migration that is already applied somewhere**, `prisma migrate deploy` and `prisma migrate status` will not object (verified on Prisma 6.19 — the "modified after it was applied" error lives on the `migrate dev` path), so cloud and CI keep working. But `prisma migrate dev` will notice and want to reset the dev database. Run `npm run db:sync-checksums -- --apply` against every database holding the edited migrations to head that off; the stored checksum is a plain SHA-256 of `migration.sql`, so it is recomputed exactly, and only `_prisma_migrations` metadata is rewritten.
 
 ### The `OFFLINE_DB` toggle (two-mode architecture)
 

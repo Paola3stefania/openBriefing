@@ -2,13 +2,17 @@
 -- type. Before this migration:
 --   * memory_entry_embeddings.embedding was vector(1536) — partial conversion
 --     in 20260602000000_memory_pgvector.
---   * 9 other embedding columns (issue/thread/group/feature/code_file/
---     code_section/documentation/documentation_section/pr_learnings) were
---     stored as JSONB float arrays. No similarity index, every cosine search
---     materialised the entire table into JS.
+--   * 4 other embedding columns (feature/code_file/code_section/pr_learnings)
+--     were stored as JSONB float arrays. No similarity index, every cosine
+--     search materialised the entire table into JS.
 --
--- After this migration, all 10 columns are halfvec(3072) with an HNSW cosine
--- index. We pick halfvec(3072) over vector(3072) because:
+-- This migration originally also converted issue/thread/group/documentation/
+-- documentation_section embeddings. 20260603000000_drop_unmute_domain_tables
+-- sorts earlier and drops those tables, so on any fresh replay the statements
+-- were dead and failed with "relation does not exist"; they are removed here.
+--
+-- After this migration, all 5 remaining columns are halfvec(3072) with an HNSW
+-- cosine index. We pick halfvec(3072) over vector(3072) because:
 --   * existing data is 3072-dim (text-embedding-3-large at default), so no
 --     re-embedding cost,
 --   * pgvector's HNSW supports halfvec up to 4000 dims but only supports
@@ -35,21 +39,9 @@ ALTER TABLE "memory_entry_embeddings"
   ALTER COLUMN "embedding" TYPE halfvec(3072)
   USING ("embedding"::text)::halfvec;
 
--- 3. Convert the 9 JSONB embedding columns. Use a CASE expression so NULLs
+-- 3. Convert the 4 JSONB embedding columns. Use a CASE expression so NULLs
 --    stay NULL (only pr_learnings.embedding is currently nullable, but the
 --    pattern is harmless on NOT NULL columns and keeps the migration uniform).
-ALTER TABLE "issue_embeddings"
-  ALTER COLUMN "embedding" TYPE halfvec(3072)
-  USING (CASE WHEN "embedding" IS NULL THEN NULL ELSE ("embedding"::text)::halfvec END);
-
-ALTER TABLE "thread_embeddings"
-  ALTER COLUMN "embedding" TYPE halfvec(3072)
-  USING (CASE WHEN "embedding" IS NULL THEN NULL ELSE ("embedding"::text)::halfvec END);
-
-ALTER TABLE "group_embeddings"
-  ALTER COLUMN "embedding" TYPE halfvec(3072)
-  USING (CASE WHEN "embedding" IS NULL THEN NULL ELSE ("embedding"::text)::halfvec END);
-
 ALTER TABLE "feature_embeddings"
   ALTER COLUMN "embedding" TYPE halfvec(3072)
   USING (CASE WHEN "embedding" IS NULL THEN NULL ELSE ("embedding"::text)::halfvec END);
@@ -59,14 +51,6 @@ ALTER TABLE "code_file_embeddings"
   USING (CASE WHEN "embedding" IS NULL THEN NULL ELSE ("embedding"::text)::halfvec END);
 
 ALTER TABLE "code_section_embeddings"
-  ALTER COLUMN "embedding" TYPE halfvec(3072)
-  USING (CASE WHEN "embedding" IS NULL THEN NULL ELSE ("embedding"::text)::halfvec END);
-
-ALTER TABLE "documentation_embeddings"
-  ALTER COLUMN "embedding" TYPE halfvec(3072)
-  USING (CASE WHEN "embedding" IS NULL THEN NULL ELSE ("embedding"::text)::halfvec END);
-
-ALTER TABLE "documentation_section_embeddings"
   ALTER COLUMN "embedding" TYPE halfvec(3072)
   USING (CASE WHEN "embedding" IS NULL THEN NULL ELSE ("embedding"::text)::halfvec END);
 
@@ -81,18 +65,6 @@ CREATE INDEX IF NOT EXISTS "memory_entry_embeddings_embedding_hnsw"
   ON "memory_entry_embeddings"
   USING hnsw ("embedding" halfvec_cosine_ops);
 
-CREATE INDEX IF NOT EXISTS "issue_embeddings_embedding_hnsw"
-  ON "issue_embeddings"
-  USING hnsw ("embedding" halfvec_cosine_ops);
-
-CREATE INDEX IF NOT EXISTS "thread_embeddings_embedding_hnsw"
-  ON "thread_embeddings"
-  USING hnsw ("embedding" halfvec_cosine_ops);
-
-CREATE INDEX IF NOT EXISTS "group_embeddings_embedding_hnsw"
-  ON "group_embeddings"
-  USING hnsw ("embedding" halfvec_cosine_ops);
-
 CREATE INDEX IF NOT EXISTS "feature_embeddings_embedding_hnsw"
   ON "feature_embeddings"
   USING hnsw ("embedding" halfvec_cosine_ops);
@@ -103,14 +75,6 @@ CREATE INDEX IF NOT EXISTS "code_file_embeddings_embedding_hnsw"
 
 CREATE INDEX IF NOT EXISTS "code_section_embeddings_embedding_hnsw"
   ON "code_section_embeddings"
-  USING hnsw ("embedding" halfvec_cosine_ops);
-
-CREATE INDEX IF NOT EXISTS "documentation_embeddings_embedding_hnsw"
-  ON "documentation_embeddings"
-  USING hnsw ("embedding" halfvec_cosine_ops);
-
-CREATE INDEX IF NOT EXISTS "documentation_section_embeddings_embedding_hnsw"
-  ON "documentation_section_embeddings"
   USING hnsw ("embedding" halfvec_cosine_ops);
 
 CREATE INDEX IF NOT EXISTS "pr_learnings_embedding_hnsw"

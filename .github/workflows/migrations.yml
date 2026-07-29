@@ -1,0 +1,52 @@
+name: Migrations
+
+# Replays the whole migration chain into an empty Postgres with pgvector.
+#
+# Every other check in this repo (and every developer's local database) runs
+# against an already-migrated database, which makes a fresh-install-only
+# migration failure invisible. That blind spot is how a backdated migration
+# timestamp shipped a chain that no new contributor could apply. This job is
+# the only thing that exercises the path a new install actually takes.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  replay:
+    name: Replay migrations from an empty database
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        # pgvector image rather than plain postgres: 20260602000000_memory_pgvector
+        # runs CREATE EXTENSION vector, and later migrations need halfvec + HNSW.
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Replay migrations and assert schema shape
+        env:
+          REPLAY_ADMIN_URL: postgresql://postgres:postgres@localhost:5432/postgres
+        run: npm run db:verify-replay
