@@ -7,6 +7,9 @@
  * at it. This script copies it from the committed `run-mcp.sh.example` template
  * and marks it executable. It is:
  *   - idempotent: never overwrites an existing run-mcp.sh (your local tweaks stay),
+ *     but still re-applies the executable bit, since a manual
+ *     `cp run-mcp.sh.example run-mcp.sh` leaves it at 644 and the client then
+ *     fails to spawn with EACCES,
  *   - safe in CI / as a dependency: missing template or chmod failure is a no-op.
  *
  * Wired as `postinstall` so it runs automatically on `npm install`, and also
@@ -20,9 +23,18 @@ const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const target = join(repoRoot, "run-mcp.sh");
 const template = join(repoRoot, "run-mcp.sh.example");
 
+function makeExecutable(path) {
+  try {
+    chmodSync(path, 0o755);
+  } catch {
+    // chmod can fail on some filesystems/OSes; the file is still usable.
+  }
+}
+
 try {
   if (existsSync(target)) {
-    // Leave any machine-specific edits untouched.
+    // Leave any machine-specific edits untouched, but the spawn still needs +x.
+    makeExecutable(target);
     process.exit(0);
   }
   if (!existsSync(template)) {
@@ -30,11 +42,7 @@ try {
     process.exit(0);
   }
   copyFileSync(template, target);
-  try {
-    chmodSync(target, 0o755);
-  } catch {
-    // chmod can fail on some filesystems/OSes; the file is still usable.
-  }
+  makeExecutable(target);
   console.error("[ensure-launcher] created run-mcp.sh from run-mcp.sh.example");
 } catch (err) {
   // Never fail the install over the launcher; print a hint and move on.

@@ -14,12 +14,17 @@
 cd "$(dirname "$0")" || exit 1
 
 # Clients often spawn with a minimal PATH that omits Homebrew/nvm, so `node`
-# isn't found. Prepend common install locations before resolving it.
-export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.nvm/versions/node/*/bin:$PATH"
+# isn't found. Prepend common install locations before resolving it. A glob does
+# not expand inside double quotes, so the nvm versions are collected in a loop.
+NODE_PATHS="$HOME/.local/node/bin:/opt/homebrew/bin:/usr/local/bin"
+for nvm_bin in "$HOME"/.nvm/versions/node/*/bin; do
+  [ -d "$nvm_bin" ] && NODE_PATHS="$NODE_PATHS:$nvm_bin"
+done
+export PATH="$NODE_PATHS:$PATH"
 
 NODE_BIN="$(command -v node || true)"
 if [ -z "$NODE_BIN" ]; then
-  for candidate in /opt/homebrew/bin/node /usr/local/bin/node; do
+  for candidate in "$HOME/.local/node/bin/node" /opt/homebrew/bin/node /usr/local/bin/node; do
     [ -x "$candidate" ] && NODE_BIN="$candidate" && break
   done
 fi

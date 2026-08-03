@@ -1,10 +1,7 @@
 {
   "mcpServers": {
     "openbriefing": {
-      "command": "./run-mcp.sh",
-      "env": {
-        "DATABASE_URL": "${DATABASE_URL}"
-      }
+      "command": "/Users/paola3stefania/openBriefing/run-mcp.sh"
     }
   }
 }

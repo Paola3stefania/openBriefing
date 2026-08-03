@@ -4,12 +4,18 @@
  * Determines a stable project identifier from the environment:
  *   1. OPENBRIEFING_PROJECT env var  (explicit override)
  *   2. git remote origin  (owner/repo)
- *   3. GITHUB_OWNER + GITHUB_REPO env vars
- *   4. basename of cwd
+ *   3. basename of cwd
  *
  * NOTE: When running as an MCP server, git remote detects this repo —
  * not the agent's workspace. Agents should pass `project` explicitly.
  * This detection is a fallback for CLI scripts running inside a project.
+ *
+ * GITHUB_OWNER / GITHUB_REPO deliberately do NOT feed this. They tell the
+ * GitHub connector which repo to read issues and PRs from (see
+ * config/github.ts); they say nothing about which project the calling agent
+ * is working in. Using them here made every `project`-less call resolve to a
+ * real, populated project, so a briefing for the wrong repo came back looking
+ * correct and sessions/memories filed themselves under it.
  *
  * The result is cached for the lifetime of the process.
  */
@@ -45,14 +51,7 @@ function detectFromGitRemote(): string | null {
 }
 
 function detectFromEnv(): string | null {
-  const explicit = process.env.OPENBRIEFING_PROJECT;
-  if (explicit) return explicit;
-
-  const owner = process.env.GITHUB_OWNER;
-  const repo = process.env.GITHUB_REPO;
-  if (owner && repo) return `${owner}/${repo}`;
-  if (repo) return repo;
-  return null;
+  return process.env.OPENBRIEFING_PROJECT?.trim() || null;
 }
 
 function detectFromCwd(): string {
